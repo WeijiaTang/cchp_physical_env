@@ -1,0 +1,150 @@
+{
+  "generated_at": "2026-03-04T08:20:29",
+  "config_path": "scripts/process-data/cchp_main_15min_2024_config.json",
+  "config": {
+    "target_year": 2024,
+    "timezone": "Asia/Shanghai",
+    "drop_feb29": true,
+    "industrial_park": {
+      "year_load": 2020,
+      "five_minute_dirs": [
+        "data/raw/load/industrial_park_scidata2023/osf/csv/Electric power load data/2020/5_minutes/2020_5min_Commercial",
+        "data/raw/load/industrial_park_scidata2023/osf/csv/Electric power load data/2020/5_minutes/2020_5min_Office",
+        "data/raw/load/industrial_park_scidata2023/osf/csv/Electric power load data/2020/5_minutes/2020_5min_Public",
+        "data/raw/load/industrial_park_scidata2023/osf/csv/Electric power load data/2020/5_minutes/2020_5min_Residential"
+      ],
+      "target_peak_mw": 10.0
+    },
+    "citylearn": {
+      "dataset_dir": "data/raw/load/citylearn/datasets/vt_chittenden_county_neighborhood",
+      "file_glob": "resstock-*.csv",
+      "scale_qh_peak_ratio_to_pdem_peak": 0.9,
+      "scale_qc_peak_ratio_to_pdem_peak": 0.6
+    },
+    "weather": {
+      "source_csv": "data/raw/weather/oikolab/beijing_china_2023-01-01_2025-12-31_era5_merged.csv"
+    },
+    "renewables": {
+      "pv_cap_mw": 4.0,
+      "pv_derate": 0.85,
+      "pv_irradiance_ref_wm2": 1000.0,
+      "wt_cap_mw": 0.0,
+      "wt_cut_in_ms": 3.0,
+      "wt_rated_ms": 12.0,
+      "wt_cut_out_ms": 25.0
+    },
+    "prices": {
+      "electricity": {
+        "tou_schedule_csv": "data/raw/price/electricity/beijing_tou_2023_schedule.csv",
+        "tou_multipliers_csv": "data/raw/price/electricity/beijing_tou_2023_multipliers.csv",
+        "flat_prices_csv": "data/raw/price/electricity/beijing_proxy_purchase_electricity_flat_prices_2024-02.csv",
+        "flat_price_selection": {
+          "user_group": "normal",
+          "billing": "single_part",
+          "voltage_level": "1-10千伏"
+        },
+        "tariff_for_multipliers": "ge_1kv_single_part",
+        "output_unit": "CNY/MWh"
+      },
+      "gas": {
+        "mode": "constant_cny_per_gj",
+        "constant_cny_per_gj": 80.16759776536313,
+        "notes": "Derived from 2.87 CNY/m3 (industrial_commercial, inner_six, restored) and LHV=35.8 MJ/m3 => 0.0358 GJ/m3."
+      },
+      "carbon": {
+        "carbon_tax_cny_per_tco2": 111.0
+      }
+    },
+    "output": {
+      "main_csv": "data/processed/cchp_main_15min_2024.csv",
+      "manifest_json": "data/processed/cchp_main_15min_2024.manifest.json"
+    }
+  },
+  "shape": {
+    "rows": 35040,
+    "cols": 17
+  },
+  "columns": [
+    "timestamp",
+    "p_dem_mw",
+    "qh_dem_mw",
+    "qc_dem_mw",
+    "pv_mw",
+    "wt_mw",
+    "t_amb_k",
+    "sp_pa",
+    "rh_pct",
+    "wind_speed",
+    "wind_direction",
+    "ghi_wm2",
+    "dni_wm2",
+    "dhi_wm2",
+    "price_e",
+    "price_gas",
+    "carbon_tax"
+  ],
+  "index": {
+    "timezone": "Asia/Shanghai",
+    "target_year": 2024,
+    "drop_feb29": true,
+    "rows_expected": 35040
+  },
+  "industrial_park_meta": {
+    "files_count": 1464,
+    "unique_5min_timestamps": 105120,
+    "min_count_per_5min_timestamp": 3,
+    "max_count_per_5min_timestamp": 9,
+    "peak_mw_before_scale": 4.03458,
+    "peak_mw_after_scale": 10.000000000000002,
+    "scale_to_target_peak": 2.478572738674162,
+    "target_peak_mw": 10.0,
+    "drop_feb29": true,
+    "year_load": 2020
+  },
+  "citylearn_meta": {
+    "dataset_dir": "data/raw/load/citylearn/datasets/vt_chittenden_county_neighborhood",
+    "file_glob": "resstock-*.csv",
+    "buildings_count": 47,
+    "assumption": "CityLearn resstock-*.csv row0 maps to target_year-01-01 00:00 (local time), sequential for 8760 hours.",
+    "qh_definition": "heating_demand + dhw_demand (kWh/step) treated as heat demand, then /1000 -> MW at 1h steps.",
+    "upsample_1h_to_15min": "zero-order hold (repeat each hour 4 times)",
+    "scale_qh_peak_ratio_to_pdem_peak": 0.9,
+    "scale_qc_peak_ratio_to_pdem_peak": 0.6,
+    "pdem_peak_mw_used_for_scaling": 10.000000000000002,
+    "qh_peak_mw_before_scale": 0.7659254693650002,
+    "qc_peak_mw_before_scale": 0.26276303110000004,
+    "qh_scale_factor": 11.750490563346276,
+    "qc_scale_factor": 22.834262395597705,
+    "qh_peak_mw_after_scale": 9.000000000000002,
+    "qc_peak_mw_after_scale": 6.000000000000001
+  },
+  "weather_meta": {
+    "source_csv": "data/raw/weather/oikolab/beijing_china_2023-01-01_2025-12-31_era5_merged.csv",
+    "assumption": "Oikolab ERA5 merged CSV datetime treated as local time (utc_offset=8).",
+    "upsample_1h_to_15min": "zero-order hold (ffill after resample)",
+    "drop_feb29": true,
+    "target_year": 2024
+  },
+  "price_e_meta": {
+    "flat_price_cny_per_kwh": 0.855191,
+    "flat_price_selection": {
+      "user_group": "normal",
+      "billing": "single_part",
+      "voltage_level": "1-10千伏"
+    },
+    "tariff_for_multipliers": "ge_1kv_single_part",
+    "multipliers_used": {
+      "flat": 1.0,
+      "valley": 0.3,
+      "peak": 1.8,
+      "super_peak": 2.16
+    },
+    "output_unit": "CNY/MWh",
+    "tou_level_counts": {
+      "valley": 11680,
+      "flat": 11432,
+      "peak": 10440,
+      "super_peak": 1488
+    }
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "target_year": 2024,
+  "timezone": "Asia/Shanghai",
+  "drop_feb29": true,
+  "industrial_park": {
+    "year_load": 2020,
+    "five_minute_dirs": [
+      "data/raw/load/industrial_park_scidata2023/osf/csv/Electric power load data/2020/5_minutes/2020_5min_Commercial",
+      "data/raw/load/industrial_park_scidata2023/osf/csv/Electric power load data/2020/5_minutes/2020_5min_Office",
+      "data/raw/load/industrial_park_scidata2023/osf/csv/Electric power load data/2020/5_minutes/2020_5min_Public",
+      "data/raw/load/industrial_park_scidata2023/osf/csv/Electric power load data/2020/5_minutes/2020_5min_Residential"
+    ],
+    "target_peak_mw": 10.0
+  },
+  "citylearn": {
+    "dataset_dir": "data/raw/load/citylearn/datasets/vt_chittenden_county_neighborhood",
+    "file_glob": "resstock-*.csv",
+    "scale_qh_peak_ratio_to_pdem_peak": 0.9,
+    "scale_qc_peak_ratio_to_pdem_peak": 0.6
+  },
+  "weather": {
+    "source_csv": "data/raw/weather/oikolab/beijing_china_2023-01-01_2025-12-31_era5_merged.csv"
+  },
+  "renewables": {
+    "pv_cap_mw": 4.0,
+    "pv_derate": 0.85,
+    "pv_irradiance_ref_wm2": 1000.0,
+    "wt_cap_mw": 0.0,
+    "wt_cut_in_ms": 3.0,
+    "wt_rated_ms": 12.0,
+    "wt_cut_out_ms": 25.0
+  },
+  "prices": {
+    "electricity": {
+      "tou_schedule_csv": "data/raw/price/electricity/beijing_tou_2023_schedule.csv",
+      "tou_multipliers_csv": "data/raw/price/electricity/beijing_tou_2023_multipliers.csv",
+      "flat_prices_csv": "data/raw/price/electricity/beijing_proxy_purchase_electricity_flat_prices_2024-02.csv",
+      "flat_price_selection": {
+        "user_group": "normal",
+        "billing": "single_part",
+        "voltage_level": "1-10千伏"
+      },
+      "tariff_for_multipliers": "ge_1kv_single_part",
+      "output_unit": "CNY/MWh"
+    },
+    "gas": {
+      "mode": "constant_cny_per_gj",
+      "constant_cny_per_gj": 80.16759776536313,
+      "notes": "Derived from 2.87 CNY/m3 (industrial_commercial, inner_six, restored) and LHV=35.8 MJ/m3 => 0.0358 GJ/m3."
+    },
+    "carbon": {
+      "carbon_tax_cny_per_tco2": 111.0
+    }
+  },
+  "output": {
+    "main_csv": "data/processed/cchp_main_15min_2024.csv",
+    "manifest_json": "data/processed/cchp_main_15min_2024.manifest.json"
+  }
+}
+

@@ -1,0 +1,22 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+.windsurfrules
+.ace-tool/
+ref*
+# IDE
+.kiro
+.wind*
+# docs
+docs/
+# data
+data/raw/
+runs/
+kaggle_train_sac_single.ipynb.example

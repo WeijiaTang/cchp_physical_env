@@ -1,0 +1,13 @@
+[project]
+name = "cchp"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=1.26",
+  "pandas>=2.2",
+  "openpyxl>=3.1",
+]
+
+# torch 暂不写入依赖：你将自行安装（避免 CPU/GPU 版本选择问题）。
