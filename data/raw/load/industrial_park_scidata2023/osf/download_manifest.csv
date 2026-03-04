@@ -1,0 +1,4 @@
+dataset,file_name,osf_node,osf_file_id,download_url,size_bytes,md5,sha256,license,notes
+industrial_park_scidata2023,Electric power load data.zip,agk8s,64cb190a4f0a442835994659,https://files.osf.io/v1/resources/agk8s/providers/osfstorage/64cb190a4f0a442835994659,193429960,3323cf7983b66368ce58efca00f2be33,743402af5103b2368d1d0a00af67fa80ff05d24580b388ac7d95cead215fc443,CC BY 4.0 (paper dataset),Contains xlsx files for 2016-2021 with 5min/30min/1hour resolutions; choose 5min then aggregate to 15min.
+industrial_park_scidata2023,Weather data.zip,agk8s,64cbdc2b9cbf0333221e48ff,https://files.osf.io/v1/resources/agk8s/providers/osfstorage/64cbdc2b9cbf0333221e48ff,10955758,11a1962f14c0bf3a46278bb438682d8f,fcf6c8e855e7e4ab7d8dedf8cb3f7e198c309f70b2f0bf68fcba1b1cf62e6500,CC BY 4.0 (paper dataset),Optional; we use Beijing ERA5 as main weather, but keep for completeness/consistency with load dataset.
+

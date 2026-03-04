@@ -18,6 +18,11 @@ ref*
 docs/
 # data
 # data/raw/
-data/raw/load
+# data/raw/load
+# data/raw/load/industrial_park_scidata2023
+data/raw/load/industrial_park_scidata2023/SEMLab_HFUT-Building-Electricpowerloaddata
+data/raw/load/industrial_park_scidata2023/osf/csv/Weather data
+data/raw/load/industrial_park_scidata2023/osf/csv/Electric power load data
+# outputs
 runs/
 kaggle_train_sac_single.ipynb.example
