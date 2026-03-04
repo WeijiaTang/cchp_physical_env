@@ -90,7 +90,7 @@ training:
   sequence_adapter: rule
   history_steps: 16
   episode_days: 14
-  episodes: 8
+  episodes: 800
   train_steps: 4096
   batch_size: 128
   update_epochs: 4
