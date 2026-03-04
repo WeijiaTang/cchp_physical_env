@@ -1,0 +1,15 @@
+valid_from,valid_to,user_group,usage,billing,voltage_level,flat_price_cny_per_kwh,demand_charge_cny_per_kw_month,capacity_charge_cny_per_kva_month,source_pdf
+2024-02-01,2024-02-29,normal,industrial_commercial,single_part,不满1千伏,0.875191,,,data/raw/price/electricity/guowang_beijing_proxy_purchase_industry_commercial_2024-02.pdf
+2024-02-01,2024-02-29,normal,industrial_commercial,single_part,1-10千伏,0.855191,,,data/raw/price/electricity/guowang_beijing_proxy_purchase_industry_commercial_2024-02.pdf
+2024-02-01,2024-02-29,normal,industrial_commercial,single_part,35-110千伏,0.785191,,,data/raw/price/electricity/guowang_beijing_proxy_purchase_industry_commercial_2024-02.pdf
+2024-02-01,2024-02-29,normal,industrial_commercial,single_part,220千伏及以上,0.740191,,,data/raw/price/electricity/guowang_beijing_proxy_purchase_industry_commercial_2024-02.pdf
+2024-02-01,2024-02-29,normal,industrial_commercial,two_part,1-10千伏,0.671691,51,32,data/raw/price/electricity/guowang_beijing_proxy_purchase_industry_commercial_2024-02.pdf
+2024-02-01,2024-02-29,normal,industrial_commercial,two_part,35-110千伏,0.631191,48,30,data/raw/price/electricity/guowang_beijing_proxy_purchase_industry_commercial_2024-02.pdf
+2024-02-01,2024-02-29,normal,industrial_commercial,two_part,220千伏及以上,0.616191,45,28,data/raw/price/electricity/guowang_beijing_proxy_purchase_industry_commercial_2024-02.pdf
+2024-02-01,2024-02-29,multiplier_1_5x,industrial_commercial,single_part,不满1千伏,1.074865,,,data/raw/price/electricity/guowang_beijing_proxy_purchase_industry_commercial_2024-02.pdf
+2024-02-01,2024-02-29,multiplier_1_5x,industrial_commercial,single_part,1-10千伏,1.054865,,,data/raw/price/electricity/guowang_beijing_proxy_purchase_industry_commercial_2024-02.pdf
+2024-02-01,2024-02-29,multiplier_1_5x,industrial_commercial,single_part,35-110千伏,0.984865,,,data/raw/price/electricity/guowang_beijing_proxy_purchase_industry_commercial_2024-02.pdf
+2024-02-01,2024-02-29,multiplier_1_5x,industrial_commercial,single_part,220千伏及以上,0.939865,,,data/raw/price/electricity/guowang_beijing_proxy_purchase_industry_commercial_2024-02.pdf
+2024-02-01,2024-02-29,multiplier_1_5x,industrial_commercial,two_part,1-10千伏,0.871365,51,32,data/raw/price/electricity/guowang_beijing_proxy_purchase_industry_commercial_2024-02.pdf
+2024-02-01,2024-02-29,multiplier_1_5x,industrial_commercial,two_part,35-110千伏,0.830865,48,30,data/raw/price/electricity/guowang_beijing_proxy_purchase_industry_commercial_2024-02.pdf
+2024-02-01,2024-02-29,multiplier_1_5x,industrial_commercial,two_part,220千伏及以上,0.815865,45,28,data/raw/price/electricity/guowang_beijing_proxy_purchase_industry_commercial_2024-02.pdf

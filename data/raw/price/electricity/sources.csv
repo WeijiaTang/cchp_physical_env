@@ -1,0 +1,4 @@
+category,document_id,document_name,issue_date,effective_date,source_url,notes
+policy,京发改规〔2023〕11号,北京市分时电价机制通知,2023-08-18,2023-09-01,https://www.bj148.org/ztk/2023nzt/2023xgsd/9y/bjzcfgjgfxwj/202308/t20230829_1656077.html,峰谷时段划分与峰谷价比
+price_table,国网北京2024-02,代理购电工商业用户电价表,2024-02-01,2024-02-29,https://ele.aiit.org.cn/static/elefile/99301281654120484247400203042171.pdf,含分时电价具体数值
+derived_csv,beijing_proxy_purchase_electricity_flat_prices_2024-02,从国网北京2024-02电价表提取的平段基准价CSV,2026-03-03,2024-02-01,data/raw/price/electricity/beijing_proxy_purchase_electricity_flat_prices_2024-02.csv,字段含 billing/voltage 的平段电价（元/kWh）与两部制的需量/容量电价

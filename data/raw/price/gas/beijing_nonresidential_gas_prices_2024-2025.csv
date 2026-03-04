@@ -1,0 +1,12 @@
+start_date,end_date,category,region,price_cny_per_m3,notes
+2024-11-15,2025-03-15,power_generation,beijing,2.74,Uplift period price.
+2024-11-15,2025-03-15,heating_cooling,inner_six,2.92,Uplift period price.
+2024-11-15,2025-03-15,heating_cooling,other,2.68,Uplift period price.
+2024-11-15,2025-03-15,industrial_commercial,inner_six,3.34,Uplift period price.
+2024-11-15,2025-03-15,industrial_commercial,other,3.10,Uplift period price.
+2024-11-15,2025-03-15,cng_refueling_station_nonresidential,beijing,2.80,Uplift period price.
+2025-03-16,,power_generation,beijing,2.27,Derived as (2.74 - 0.47) after uplift cancellation (the uplift amount is stated by source).
+2025-03-16,,heating_cooling,inner_six,2.45,Derived as (2.92 - 0.47) after uplift cancellation (the uplift amount is stated by source).
+2025-03-16,,heating_cooling,other,2.21,Derived as (2.68 - 0.47) after uplift cancellation (the uplift amount is stated by source).
+2025-03-16,,industrial_commercial,inner_six,2.87,Derived as (3.34 - 0.47) after uplift cancellation (the uplift amount is stated by source).
+2025-03-16,,industrial_commercial,other,2.63,Derived as (3.10 - 0.47) after uplift cancellation (the uplift amount is stated by source).

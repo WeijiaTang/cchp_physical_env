@@ -1,0 +1,3 @@
+year,price_cny_per_tco2,price_type,notes
+2024,111,online_avg,Reported online average transaction price for Beijing ETS (used as default carbon_tax).
+

@@ -1,0 +1,11 @@
+schedule_id,priority,months,start_time,end_time,wrap_next_day,tou_level,notes
+bj_tou_2023,0,,07:00,10:00,0,flat,All-year flat period.
+bj_tou_2023,0,,10:00,13:00,0,peak,All-year peak period.
+bj_tou_2023,0,,13:00,17:00,0,flat,All-year flat period.
+bj_tou_2023,0,,17:00,22:00,0,peak,All-year peak period.
+bj_tou_2023,0,,22:00,23:00,0,flat,All-year flat period.
+bj_tou_2023,0,,23:00,07:00,1,valley,All-year valley period (wraps to next day).
+bj_tou_2023,1,"7,8",11:00,13:00,0,super_peak,Summer (Jul/Aug) super-peak.
+bj_tou_2023,1,"7,8",16:00,17:00,0,super_peak,Summer (Jul/Aug) super-peak (overrides flat 13:00-17:00).
+bj_tou_2023,1,"1,12",18:00,21:00,0,super_peak,Winter (Jan/Dec) super-peak (overrides peak 17:00-22:00).
+

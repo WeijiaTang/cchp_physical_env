@@ -17,6 +17,7 @@ ref*
 # docs
 docs/
 # data
-data/raw/
+# data/raw/
+data/raw/load
 runs/
 kaggle_train_sac_single.ipynb.example

@@ -1,0 +1,14 @@
+tariff,tou_level,multiplier_to_flat,notes
+lt_1kv_single_part,flat,1.00,Peak:Flat:Valley = 1.71:1:0.36; super_peak = peak*1.2
+lt_1kv_single_part,valley,0.36,Peak:Flat:Valley = 1.71:1:0.36; super_peak = peak*1.2
+lt_1kv_single_part,peak,1.71,Peak:Flat:Valley = 1.71:1:0.36; super_peak = peak*1.2
+lt_1kv_single_part,super_peak,2.052,Super-peak multiplier derived as 1.71*1.2
+ge_1kv_single_part,flat,1.00,Peak:Flat:Valley = 1.8:1:0.3; super_peak = peak*1.2
+ge_1kv_single_part,valley,0.30,Peak:Flat:Valley = 1.8:1:0.3; super_peak = peak*1.2
+ge_1kv_single_part,peak,1.80,Peak:Flat:Valley = 1.8:1:0.3; super_peak = peak*1.2
+ge_1kv_single_part,super_peak,2.16,Super-peak multiplier derived as 1.8*1.2
+two_part,flat,1.00,Peak:Flat:Valley = 1.6:1:0.4; super_peak = peak*1.2
+two_part,valley,0.40,Peak:Flat:Valley = 1.6:1:0.4; super_peak = peak*1.2
+two_part,peak,1.60,Peak:Flat:Valley = 1.6:1:0.4; super_peak = peak*1.2
+two_part,super_peak,1.92,Super-peak multiplier derived as 1.6*1.2
+
