@@ -1,0 +1,98 @@
+# Ref: docs/spec/task.md
+# 说明：
+# 1) Option-C：env 下参数“全放开”，yaml 改什么就是什么。
+# 2) 但为保持研究可比性，仍建议将部分参数视为“基线参数”：不建议随意改动。
+#    这些注释仅用于提示，不会阻止你修改（除非你自己在实验规范中约束）。
+
+env:
+  # 时间步（建议不改：需与数据频率一致）
+  dt_hours: 0.25 # 1/4小时
+
+  # 约束模式与物理后端
+  constraint_mode: physics_in_loop
+  physics_backend: tespy
+
+  # 必标定（物理主线）
+  # 必标定（物理主线）
+  ua_mw_per_k: 0.02
+  sigma_per_hour: 0.02
+  cop_nominal: 0.75
+  m_exh_per_fuel_ratio: 18.0
+  t_exh_offset_k: 220.0
+  t_exh_slope_k_per_mw: 2.0
+
+  # GT/BES 电侧参数（部分建议不改：影响可比性）
+  p_gt_cap_mw: 12.0
+  gt_min_output_mw: 1.0
+  gt_ramp_mw_per_step: 2.5
+  gt_eta_min: 0.26
+  gt_eta_max: 0.36
+  gas_lhv_mj_per_kg: 50.0
+  gt_om_var_cost_per_mwh: 20.0
+  gt_start_cost: 250.0
+  gt_startup_fuel_correction_ratio: 0.10
+
+  p_bes_cap_mw: 4.0
+  e_bes_cap_mwh: 8.0
+  bes_soc_init: 0.50
+  bes_soc_min: 0.10
+  bes_soc_max: 0.95
+  bes_eta_charge: 0.95
+  bes_eta_discharge: 0.95
+  bes_self_discharge_per_hour: 0.0
+  bes_aux_equip_eff: 1.0
+  bes_init_strategy: half
+  bes_dod_battery_capex_per_mwh: 350000.0
+  bes_dod_k_p: 1.14
+  bes_dod_n_fail_100: 6000.0
+  bes_dod_add_calendar_age: false
+  bes_dod_battery_life_years: 10.0
+
+  # 电网与价格（部分建议不改：影响可比性）
+  grid_import_cap_mw: 30.0
+  grid_export_cap_mw: 30.0
+  sell_price_ratio: 0.50
+  penalty_curtail_per_mwh: 20.0
+
+  # 碳排放因子（建议不改：用于论文口径）
+  gt_emission_ton_per_mwh_th: 0.202
+  boiler_emission_ton_per_mwh_th: 0.202
+
+  # 可靠性与约束罚金（建议不改：reward 口径）
+  penalty_unmet_e_per_mwh: 3000.0
+  penalty_unmet_h_per_mwh: 2500.0
+  penalty_unmet_c_per_mwh: 2500.0
+  penalty_violation_per_flag: 50.0
+
+  # HRSG 边界（建议不改：物理口径）
+  hrsg_water_mass_flow_kg_per_s: 45.0
+  hrsg_water_inlet_k: 333.15
+
+  # 次标定（容量参数）
+  q_boiler_cap_mw: 10.0
+  q_ech_cap_mw: 6.0
+  q_abs_drive_cap_mw: 5.0
+  q_abs_cool_cap_mw: 4.5
+  e_tes_cap_mwh: 20.0
+  e_tes_init_mwh: 10.0
+  q_tes_charge_cap_mw: 8.0
+  q_tes_discharge_cap_mw: 8.0
+
+  # pyomo 求解配置
+  pyomo_solver: projection
+  pyomo_tracking_weight: 1.0
+  pyomo_unmet_penalty_weight: 1000.0
+  pyomo_curtail_penalty_weight: 100.0
+
+training:
+  seed: 42
+  policy: rule
+  sequence_adapter: rule
+  history_steps: 16
+  episode_days: 14
+  episodes: 8
+  train_steps: 4096
+  batch_size: 128
+  update_epochs: 4
+  lr: 0.0003
+  device: auto

@@ -1,13 +1,23 @@
 [project]
 name = "cchp"
 version = "0.1.0"
-description = "Add your description here"
+description = "cchp"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "numpy>=1.26",
   "pandas>=2.2",
   "openpyxl>=3.1",
+  "PyYAML>=6.0",
+  "transformers>=4.38",
+  "tespy>=0.9.12",
+  "pyomo>=6.10.0",
+  "CoolProp>=7.2.0",
 ]
 
-# torch 暂不写入依赖：你将自行安装（避免 CPU/GPU 版本选择问题）。
+# torch 不写死在依赖里：请按本机 CUDA/CPU 版本安装对应轮子。
+
+[project.optional-dependencies]
+mamba = [
+  "mamba-ssm>=1.2",
+]

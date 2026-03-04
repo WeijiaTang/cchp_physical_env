@@ -1,0 +1,105 @@
+# Ref: docs/spec/task.md
+"""CCHP Python-only 物理环境主包。"""
+
+from .core.data import (
+    FROZEN_COLUMNS,
+    TRAIN_YEAR,
+    EVAL_YEAR,
+    compute_training_statistics,
+    ensure_frozen_schema_consistency,
+    load_exogenous_data,
+    make_episode_sampler,
+    summarize_exogenous_data,
+)
+from .core.config_loader import (
+    build_env_config_from_overrides,
+    build_training_options,
+    load_env_overrides,
+    load_training_overrides,
+    load_yaml_config,
+    validate_training_overrides,
+    validate_env_overrides,
+)
+from .pipeline.calibration import (
+    load_calibration_config,
+    run_calibration_search,
+    run_calibration_trial,
+    sample_physical_params,
+    validate_calibration_config,
+)
+from .pipeline.ablation import run_constraint_ablation
+from .pipeline.sequence import (
+    DEFAULT_SEQUENCE_ACTION_KEYS,
+    DEFAULT_SEQUENCE_OBSERVATION_FEATURE_KEYS,
+    SUPPORTED_SEQUENCE_ADAPTERS,
+    MambaSequenceAdapter,
+    RuleSequenceAdapter,
+    SequenceAdapter,
+    SequenceRulePolicy,
+    SequenceWindowBuffer,
+    TransformerSequenceAdapter,
+    build_torch_module_predictor,
+    build_action_vector,
+    build_feature_vector,
+    build_sequence_adapter,
+    normalized_action_vector_to_env_action_dict,
+)
+from .env.cchp_env import CCHPPhysicalEnv, EnvConfig
+from .policy.checkpoint import load_policy, load_policy_predictor, save_policy
+from .policy.models import (
+    SUPPORTED_POLICY_BACKBONES,
+    MambaPolicyNet,
+    TransformerPolicyNet,
+    build_policy_network,
+)
+from .policy.trainer import SequencePolicyTrainer, SequenceTrainerConfig, train_sequence_policy
+
+__all__ = [
+    "CCHPPhysicalEnv",
+    "EnvConfig",
+    "FROZEN_COLUMNS",
+    "TRAIN_YEAR",
+    "EVAL_YEAR",
+    "compute_training_statistics",
+    "ensure_frozen_schema_consistency",
+    "load_exogenous_data",
+    "make_episode_sampler",
+    "summarize_exogenous_data",
+    "load_yaml_config",
+    "load_env_overrides",
+    "load_training_overrides",
+    "validate_env_overrides",
+    "validate_training_overrides",
+    "build_env_config_from_overrides",
+    "build_training_options",
+    "load_calibration_config",
+    "validate_calibration_config",
+    "sample_physical_params",
+    "run_calibration_trial",
+    "run_calibration_search",
+    "run_constraint_ablation",
+    "DEFAULT_SEQUENCE_OBSERVATION_FEATURE_KEYS",
+    "DEFAULT_SEQUENCE_ACTION_KEYS",
+    "SUPPORTED_SEQUENCE_ADAPTERS",
+    "build_action_vector",
+    "build_feature_vector",
+    "normalized_action_vector_to_env_action_dict",
+    "build_torch_module_predictor",
+    "build_sequence_adapter",
+    "SequenceAdapter",
+    "RuleSequenceAdapter",
+    "TransformerSequenceAdapter",
+    "MambaSequenceAdapter",
+    "SequenceWindowBuffer",
+    "SequenceRulePolicy",
+    "SUPPORTED_POLICY_BACKBONES",
+    "TransformerPolicyNet",
+    "MambaPolicyNet",
+    "build_policy_network",
+    "save_policy",
+    "load_policy",
+    "load_policy_predictor",
+    "SequenceTrainerConfig",
+    "SequencePolicyTrainer",
+    "train_sequence_policy",
+]
