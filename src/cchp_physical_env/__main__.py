@@ -1,4 +1,22 @@
 # Ref: docs/spec/task.md
+"""
+CLI 入口：数据校验、训练、评估、标定、消融。
+
+本模块是 `python -m cchp_physical_env` 的主入口，职责包括：
+- 解析 CLI 参数与环境配置文件（config.yaml）
+- 路由到不同子命令（summary/train/eval/sb3-train/sb3-eval/calibrate/ablation）
+- 协调数据加载、环境构建、策略训练与评估
+
+参数优先级（从高到低）：
+1. CLI 显式参数（如 --episode-days=14）
+2. config.yaml 中的 training 字段
+3. 代码中的默认值（在 build_parser 中定义）
+
+常见坑：
+- 训练/评估年份硬编码为 2024/2025，不要在 CSV 路径里改年份
+- SB3 训练需要安装 stable-baselines3（可选依赖）
+- eval 子命令会自动识别 SB3 checkpoint（通过 artifact_type=sb3_policy）
+"""
 from __future__ import annotations
 
 import argparse
@@ -31,9 +49,12 @@ from .pipeline.sequence import SUPPORTED_SEQUENCE_ADAPTERS
 from .pipeline.runner import evaluate_baseline, train_baseline
 from .policy.sb3 import SB3TrainConfig, evaluate_sb3_policy, train_sb3_policy
 
+# 默认路径（训练/评估数据、环境配置）
 DEFAULT_TRAIN_PATH = Path("data/processed/cchp_main_15min_2024.csv")
 DEFAULT_EVAL_PATH = Path("data/processed/cchp_main_15min_2025.csv")
 DEFAULT_ENV_CONFIG_PATH = Path("src/cchp_physical_env/config/config.yaml")
+
+# 训练选项键：这些字段可以从 CLI 或 config.yaml 覆盖
 TRAINING_OPTION_KEYS = (
     "seed",
     "policy",
@@ -57,11 +78,22 @@ TRAINING_OPTION_KEYS = (
 
 
 def _resolve_env_config_path(args: argparse.Namespace) -> Path:
+    """
+    解析环境配置文件路径。
+
+    优先级：CLI 参数 > 默认路径（config/config.yaml）
+    """
     path = getattr(args, "env_config", None)
     return DEFAULT_ENV_CONFIG_PATH if path is None else Path(path)
 
 
 def _resolve_training_options(args: argparse.Namespace) -> dict:
+    """
+    解析训练选项，合并 config.yaml 与 CLI 参数。
+
+    优先级：CLI 参数 > config.yaml > 默认值
+    返回：完整的训练选项字典
+    """
     config_path = _resolve_env_config_path(args)
     training_overrides = load_training_overrides(config_path)
     resolved = build_training_options(training_overrides)
@@ -72,6 +104,13 @@ def _resolve_training_options(args: argparse.Namespace) -> dict:
 
 
 def _print_summary_block(train_path: Path, eval_path: Path) -> None:
+    """
+    打印训练/评估数据摘要并校验冻结 schema。
+
+    检查项：
+    - 行数是否为 EXPECTED_STEPS_PER_YEAR（35040）
+    - 训练/评估集 schema 是否一致
+    """
     train_df = load_exogenous_data(train_path)
     eval_df = load_exogenous_data(eval_path)
     ensure_frozen_schema_consistency(train_df, eval_df)
@@ -90,12 +129,25 @@ def _print_summary_block(train_path: Path, eval_path: Path) -> None:
 
 
 def _command_summary(args: argparse.Namespace) -> None:
+    """
+    summary 子命令：打印 2024/2025 数据摘要并校验 schema。
+    """
     env_overrides = load_env_overrides(_resolve_env_config_path(args))
     build_env_config_from_overrides(env_overrides)
     _print_summary_block(train_path=args.train_path, eval_path=args.eval_path)
 
 
 def _command_train(args: argparse.Namespace) -> None:
+    """
+    train 子命令：根据配置路由到不同训练路径。
+
+    路由逻辑：
+    1. 若 sb3_enabled=True -> 调用 SB3 训练（PPO/SAC/TD3/DDPG）
+    2. 若 policy=sequence_rule 且 adapter 为 mlp/transformer/mamba -> 调用 sequence trainer
+    3. 否则 -> 调用 baseline 训练（rule/random/sequence_rule）
+
+    训练年份固定为 2024，数据来自 data/processed/cchp_main_15min_2024.csv
+    """
     train_df = load_exogenous_data(args.train_path)
     env_overrides = load_env_overrides(_resolve_env_config_path(args))
     env_config = build_env_config_from_overrides(env_overrides)
@@ -191,6 +243,15 @@ def _command_train(args: argparse.Namespace) -> None:
 
 
 def _command_eval(args: argparse.Namespace) -> None:
+    """
+    eval 子命令：运行 2025 年评估，自动识别 checkpoint 类型。
+
+    路由逻辑：
+    1. 若 checkpoint 包含 artifact_type=sb3_policy -> 调用 SB3 评估
+    2. 否则 -> 调用 baseline 评估（rule/random/sequence_rule）
+
+    评估年份固定为 2025，数据来自 data/processed/cchp_main_15min_2025.csv
+    """
     eval_df = load_exogenous_data(args.eval_path)
     env_overrides = load_env_overrides(_resolve_env_config_path(args))
     env_config = build_env_config_from_overrides(env_overrides)
@@ -243,6 +304,14 @@ def _command_eval(args: argparse.Namespace) -> None:
 
 
 def _command_sb3_train(args: argparse.Namespace) -> None:
+    """
+    sb3-train 子命令：使用 Stable-Baselines3 训练 PPO/SAC/TD3/DDPG。
+
+    与 train 子命令的区别：
+    - 显式指定算法（--algo）
+    - 不依赖 sb3_enabled 标志
+    - 产出 baseline_policy.json（artifact_type=sb3_policy）
+    """
     train_df = load_exogenous_data(args.train_path)
     env_overrides = load_env_overrides(_resolve_env_config_path(args))
     env_config = build_env_config_from_overrides(env_overrides)
@@ -268,6 +337,13 @@ def _command_sb3_train(args: argparse.Namespace) -> None:
 
 
 def _command_sb3_eval(args: argparse.Namespace) -> None:
+    """
+    sb3-eval 子命令：使用 SB3 checkpoint 运行 2025 年评估。
+
+    与 eval 子命令的区别：
+    - 必须显式指定 --checkpoint（baseline_policy.json）
+    - 支持 --stochastic 标志（随机动作采样）
+    """
     eval_df = load_exogenous_data(args.eval_path)
     env_overrides = load_env_overrides(_resolve_env_config_path(args))
     env_config = build_env_config_from_overrides(env_overrides)
@@ -283,6 +359,15 @@ def _command_sb3_eval(args: argparse.Namespace) -> None:
     print(json.dumps({"mode": "sb3_eval", "run_dir": str(args.run_dir), "summary": summary}, indent=2, ensure_ascii=False))
 
 def _command_calibrate(args: argparse.Namespace) -> None:
+    """
+    calibrate 子命令：运行物理参数标定搜索（Task-002）。
+
+    功能：
+    - 从配置文件读取搜索空间
+    - 在训练集上采样参数组合
+    - 在评估集上验证效果
+    - 输出最优参数配置
+    """
     train_df = load_exogenous_data(args.train_path)
     eval_df = load_exogenous_data(args.eval_path)
     env_overrides = load_env_overrides(_resolve_env_config_path(args))
@@ -313,6 +398,15 @@ def _command_calibrate(args: argparse.Namespace) -> None:
 
 
 def _command_ablation(args: argparse.Namespace) -> None:
+    """
+    ablation 子命令：运行约束方式消融实验（Task-003）。
+
+    功能：
+    - 对比不同约束处理方式（physics_in_loop vs reward_only）
+    - 在训练集上训练策略
+    - 在评估集上对比性能指标
+    - 输出消融结果汇总
+    """
     train_df = load_exogenous_data(args.train_path)
     eval_df = load_exogenous_data(args.eval_path)
     env_overrides = load_env_overrides(_resolve_env_config_path(args))
@@ -341,6 +435,18 @@ def _command_ablation(args: argparse.Namespace) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """
+    构建 CLI 参数解析器。
+
+    子命令：
+    - summary: 打印数据摘要并校验 schema
+    - train: 运行训练（支持 baseline/sequence/SB3）
+    - eval: 运行评估（自动识别 checkpoint 类型）
+    - sb3-train: 显式调用 SB3 训练
+    - sb3-eval: 显式调用 SB3 评估
+    - calibrate: 物理参数标定搜索
+    - ablation: 约束方式消融实验
+    """
     parser = argparse.ArgumentParser(
         prog="python -m cchp_physical_env",
         description="CCHP Python-only 数据/训练/评估入口",

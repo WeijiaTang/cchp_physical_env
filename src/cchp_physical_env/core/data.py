@@ -1,4 +1,18 @@
 # Ref: docs/spec/task.md
+"""
+数据处理与校验：冻结 schema、时间口径、缺失值修复、episode 采样。
+
+本模块定义了 processed 数据的"冻结口径"，确保实验可复现：
+- 冻结 schema：FROZEN_COLUMNS 定义了最小充分的外生变量集合
+- 冻结时间口径：15min 分辨率、Asia/Shanghai 时区、删除闰日 2/29
+- 冻结缺失值修复规则：负荷插值、天气前向填充、价格硬失败
+- 训练/评估年份硬约束：TRAIN_YEAR=2024、EVAL_YEAR=2025
+
+常见坑：
+- 不要在 processed 数据里加入"未来信息"（如未来 24h 价格）
+- 训练统计只能从训练集拟合，不能混入评估集
+- episode 采样仅允许训练年数据
+"""
 from __future__ import annotations
 
 import json
@@ -9,35 +23,40 @@ from typing import Iterator
 import numpy as np
 import pandas as pd
 
+# 时间分辨率常量
 STEP_MINUTES = 15
 STEP_FREQ = "15min"
 STEPS_PER_DAY = 24 * 60 // STEP_MINUTES
-EXPECTED_STEPS_PER_YEAR = 365 * STEPS_PER_DAY
+EXPECTED_STEPS_PER_YEAR = 365 * STEPS_PER_DAY  # 删除闰日后为 35040
 TIMEZONE = "Asia/Shanghai"
+
+# 训练/评估年份硬约束（不要在其他地方改）
 TRAIN_YEAR = 2024
 EVAL_YEAR = 2025
 
+# 冻结 schema：最小充分的外生变量集合
 FROZEN_COLUMNS = [
     "timestamp",
-    "p_dem_mw",
-    "qh_dem_mw",
-    "qc_dem_mw",
-    "pv_mw",
-    "wt_mw",
-    "t_amb_k",
-    "sp_pa",
-    "rh_pct",
-    "wind_speed",
-    "wind_direction",
-    "ghi_wm2",
-    "dni_wm2",
-    "dhi_wm2",
-    "price_e",
-    "price_gas",
-    "carbon_tax",
+    "p_dem_mw",  # 电负荷
+    "qh_dem_mw",  # 热负荷
+    "qc_dem_mw",  # 冷负荷
+    "pv_mw",  # 光伏出力
+    "wt_mw",  # 风电出力
+    "t_amb_k",  # 环境温度（K）
+    "sp_pa",  # 气压（Pa）
+    "rh_pct",  # 相对湿度（%）
+    "wind_speed",  # 风速
+    "wind_direction",  # 风向
+    "ghi_wm2",  # 总辐照度
+    "dni_wm2",  # 直射辐照度
+    "dhi_wm2",  # 散射辐照度
+    "price_e",  # 电价
+    "price_gas",  # 气价
+    "carbon_tax",  # 碳税
 ]
 
-LOAD_LIKE_COLUMNS = ["p_dem_mw", "qh_dem_mw", "qc_dem_mw", "pv_mw", "wt_mw"]
+# 缺失值修复策略分类
+LOAD_LIKE_COLUMNS = ["p_dem_mw", "qh_dem_mw", "qc_dem_mw", "pv_mw", "wt_mw"]  # 时间插值
 WEATHER_COLUMNS = [
     "t_amb_k",
     "sp_pa",
@@ -47,8 +66,8 @@ WEATHER_COLUMNS = [
     "ghi_wm2",
     "dni_wm2",
     "dhi_wm2",
-]
-PRICE_COLUMNS = ["price_e", "price_gas", "carbon_tax"]
+]  # 前向填充
+PRICE_COLUMNS = ["price_e", "price_gas", "carbon_tax"]  # 硬失败（不允许缺失）
 
 
 class DataValidationError(ValueError):
@@ -66,6 +85,11 @@ class EpisodeWindow:
 
 
 def _build_expected_index(year: int, tz_name: str = TIMEZONE) -> pd.DatetimeIndex:
+    """
+    构建全年 15min 时间索引，并删除闰日 2/29。
+
+    返回：长度为 EXPECTED_STEPS_PER_YEAR（35040）的 DatetimeIndex
+    """
     full_index = pd.date_range(
         start=f"{year}-01-01 00:00:00",
         end=f"{year}-12-31 23:45:00",
@@ -81,6 +105,12 @@ def _build_expected_index(year: int, tz_name: str = TIMEZONE) -> pd.DatetimeInde
 
 
 def _coerce_timestamp_series(series: pd.Series) -> pd.Series:
+    """
+    解析时间戳序列，统一转换到 Asia/Shanghai 时区。
+
+    若无时区信息则 localize，有时区则 convert。
+    解析失败会抛出 DataValidationError。
+    """
     parsed = pd.to_datetime(series, errors="coerce")
     if parsed.isna().any():
         invalid_count = int(parsed.isna().sum())
@@ -93,12 +123,14 @@ def _coerce_timestamp_series(series: pd.Series) -> pd.Series:
 
 
 def _assert_required_columns(df: pd.DataFrame) -> None:
+    """校验 DataFrame 是否包含所有冻结列。"""
     missing = [column for column in FROZEN_COLUMNS if column not in df.columns]
     if missing:
         raise DataValidationError(f"缺少冻结列: {missing}")
 
 
 def _assert_single_year(index: pd.DatetimeIndex) -> int:
+    """校验时间索引是否为单年数据，返回年份。"""
     years = sorted({int(value.year) for value in index})
     if len(years) != 1:
         raise DataValidationError(f"文件必须是单年数据，实际年份: {years}")
@@ -106,6 +138,7 @@ def _assert_single_year(index: pd.DatetimeIndex) -> int:
 
 
 def _assert_strictly_monotonic(index: pd.DatetimeIndex) -> None:
+    """校验时间索引是否严格递增且无重复。"""
     if not index.is_monotonic_increasing:
         raise DataValidationError("`timestamp` 不是严格递增。")
     if index.has_duplicates:
@@ -114,6 +147,7 @@ def _assert_strictly_monotonic(index: pd.DatetimeIndex) -> None:
 
 
 def _drop_feb29_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """删除闰日 2/29 的行，保证全年步数为 35040。"""
     index = df.index
     mask = (index.month == 2) & (index.day == 29)
     if mask.any():
@@ -122,6 +156,11 @@ def _drop_feb29_rows(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _assert_step_resolution(index: pd.DatetimeIndex) -> None:
+    """
+    校验时间索引是否为 15min 分辨率。
+
+    特殊处理：允许 2/28 23:45 -> 3/1 00:00 的跳跃（闰日删除后的边界）
+    """
     if len(index) < 2:
         raise DataValidationError("数据行数不足，无法校验 15min 分辨率。")
     step = pd.Timedelta(minutes=STEP_MINUTES)
@@ -158,6 +197,14 @@ def _coerce_numeric_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _repair_missing_values(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    按冻结规则修复缺失值。
+
+    策略：
+    - 负荷/新能源列：时间插值 + 边界前后向填充
+    - 天气列：前向填充（ZOH）
+    - 价格/税列：硬失败（不允许缺失，避免隐式规则污染实验口径）
+    """
     repaired = df.copy()
 
     # 负荷/新能源列：时间插值 + 边界前后向填充。
@@ -186,6 +233,18 @@ def _repair_missing_values(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _canonicalize_frame(raw_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    将原始 DataFrame 规范化为冻结口径格式。
+
+    处理流程：
+    1. 校验冻结列是否存在
+    2. 解析时间戳并设置索引
+    3. 校验单年、严格递增、无重复
+    4. 删除闰日并对齐到全年主索引
+    5. 数值化并修复缺失值
+    6. 校验 15min 分辨率和行数
+    7. 保证冻结列顺序在前
+    """
     _assert_required_columns(raw_df)
 
     working = raw_df.copy()
@@ -218,8 +277,12 @@ def _canonicalize_frame(raw_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def load_exogenous_data(path: str | Path) -> pd.DataFrame:
-    """读取 processed CSV，并执行冻结规则校验与缺失值处理。"""
+    """
+    读取 processed CSV，并执行冻结规则校验与缺失值处理。
 
+    返回：规范化后的 DataFrame，包含冻结列且顺序固定
+    抛出：FileNotFoundError / DataValidationError
+    """
     csv_path = Path(path)
     if not csv_path.exists():
         raise FileNotFoundError(f"数据文件不存在: {csv_path}")
@@ -301,8 +364,20 @@ def _extract_year(df: pd.DataFrame) -> int:
 def make_episode_sampler(
     df: pd.DataFrame, episode_days: int, seed: int
 ) -> Iterator[tuple[EpisodeWindow, pd.DataFrame]]:
-    """在训练年数据上按固定随机种子采样 7-30 天 episode。"""
+    """
+    在训练年数据上按固定随机种子采样 7-30 天 episode。
 
+    参数：
+    - df: 训练年数据（必须为 2024）
+    - episode_days: episode 长度（7-30 天）
+    - seed: 随机种子（保证可复现）
+
+    返回：无限迭代器，每次产出 (EpisodeWindow, episode_df)
+
+    注意：
+    - 仅允许训练年数据（TRAIN_YEAR=2024）
+    - episode_days 必须在 [7, 30] 范围内
+    """
     if episode_days < 7 or episode_days > 30:
         raise ValueError("`episode_days` 必须在 [7, 30] 范围内。")
 
@@ -340,8 +415,19 @@ def make_episode_sampler(
 def compute_training_statistics(
     train_df: pd.DataFrame, columns: list[str] | None = None
 ) -> dict:
-    """仅在训练集上拟合统计量，供后续归一化/策略阈值使用。"""
+    """
+    仅在训练集上拟合统计量，供后续归一化/策略阈值使用。
 
+    参数：
+    - train_df: 训练年数据（必须为 2024）
+    - columns: 需要统计的列（默认为所有冻结列，除 timestamp）
+
+    返回：包含 mean/std/p05/p50/p95 的统计字典
+
+    注意：
+    - 仅允许训练年数据（TRAIN_YEAR=2024）
+    - 这些统计量不能用于评估集（防止数据泄漏）
+    """
     year = _extract_year(train_df)
     if year != TRAIN_YEAR:
         raise DataValidationError(

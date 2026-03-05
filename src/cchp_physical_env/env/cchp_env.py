@@ -1,5 +1,37 @@
 # Ref: docs/spec/task.md (Task-ID: 010)
 # Ref: docs/spec/architecture.md (Pattern: Orchestrator + Physics Layer)
+"""
+CCHP 物理环境：Gym 风格的多能耦合调度环境。
+
+本环境是"编排层"，只负责：
+- 管理 episode 生命周期（reset/step）
+- 构建 observation（外生变量 + 内生状态）
+- 调用 physics 层求解设备状态
+- 调用约束求解器投影动作到可行域
+- 计算成本、惩罚、reward
+- 追踪 KPI（violation/unmet/成本拆分）
+
+Action 语义：
+- u_gt: 燃气轮机出力设定点（-1~1，映射到 0~p_gt_cap_mw）
+- u_bes: 储电池功率（-1~1，负为充电，正为放电）
+- u_boiler: 备用锅炉出力设定点（0~1）
+- u_abs: 吸收式制冷机驱动热设定点（0~1）
+- u_ech: 电制冷机出力设定点（0~1）
+- u_tes: 蓄热罐充放热设定点（-1~1，负为充热，正为放热）
+
+Observation 语义：
+- 外生变量：负荷/新能源/天气/价格（来自 CSV）
+- 内生状态：GT/BES/TES 状态、SOC、温度等
+
+约束模式（constraint_mode）：
+- physics_in_loop: 动作先投影到可行域，再执行物理仿真
+- reward_only: 动作直接执行，约束违反通过惩罚项反馈
+
+常见坑：
+- reward = -total_cost（取负值，RL 最大化 reward 等价于最小化成本）
+- violation_rate 可能被吸收式制冷机驱动温度标志影响，需检查诊断
+- 外送电价格为 sell_price_ratio * price_e，且有 cap 和额外惩罚
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -40,6 +72,21 @@ def _clip(value: float, low: float, high: float) -> float:
 
 @dataclass(slots=True)
 class EnvConfig:
+    """
+    环境配置：包含所有物理参数、约束参数、惩罚系数。
+
+    配置来源：config/config.yaml（通过 config_loader 构建）
+    不要在代码中硬编码这些值。
+
+    关键参数说明：
+    - constraint_mode: 约束处理方式（physics_in_loop / reward_only）
+    - physics_backend: 物理求解后端（当前仅支持 tespy）
+    - p_gt_cap_mw: 燃气轮机额定功率
+    - p_bes_cap_mw / e_bes_cap_mwh: 储电池功率/容量
+    - grid_export_cap_mw: 外送电上限
+    - sell_price_ratio: 外送电价格系数
+    - penalty_*: 各类惩罚项系数
+    """
     dt_hours: float
     constraint_mode: str
     physics_backend: str
@@ -113,7 +160,20 @@ class EnvConfig:
 
 
 class CCHPPhysicalEnv:
-    """CCHP Gym 风格环境：只负责编排，物理与约束下沉到 physics 层。"""
+    """
+    CCHP Gym 风格环境：只负责编排，物理与约束下沉到 physics 层。
+
+    使用方式：
+    1. 从 config.yaml 构建 EnvConfig
+    2. 加载外生数据 CSV
+    3. 创建环境实例
+    4. 调用 reset() 开始 episode
+    5. 循环调用 step(action) 直到 done
+
+    Action 格式：dict[str, float]，键为 action_keys
+    Observation 格式：dict[str, float]
+    Reward：float，等于 -total_cost
+    """
 
     action_keys = ("u_gt", "u_bes", "u_boiler", "u_abs", "u_ech", "u_tes")
 
@@ -255,6 +315,19 @@ class CCHPPhysicalEnv:
         start_idx: int | None = None,
         episode_steps: int | None = None,
     ) -> tuple[dict[str, float], dict]:
+        """
+        重置环境，开始新的 episode。
+
+        参数：
+        - seed: 随机种子（可选）
+        - episode_df: 自定义 episode 数据（可选）
+        - start_idx: 从全年数据的哪个位置开始（可选）
+        - episode_steps: episode 长度（可选）
+
+        返回：(observation, info)
+        - observation: 初始观测
+        - info: episode 元信息（步数、起止时间）
+        """
         if seed is not None:
             self.rng = np.random.default_rng(seed)
 
@@ -277,12 +350,22 @@ class CCHPPhysicalEnv:
         return observation, info
 
     def _is_physics_in_loop(self) -> bool:
+        """判断是否为 physics_in_loop 约束模式。"""
         mode = self.config.constraint_mode.strip().lower()
         if mode not in {"physics_in_loop", "reward_only"}:
             raise ValueError(f"不支持的 constraint_mode: {self.config.constraint_mode}")
         return mode == "physics_in_loop"
 
     def _compute_grid_balance(self, *, p_net_mw: float, p_demand_mw: float) -> dict[str, float]:
+        """
+        计算电网平衡：输入/输出/未满足/弃电。
+
+        参数：
+        - p_net_mw: 本地净发电（GT + BES 放电 - BES 充电 - 电制冷）
+        - p_demand_mw: 电负荷需求
+
+        返回：dict 包含 grid_import_mw / grid_export_mw / p_unmet_e_mw / p_curtail_mw
+        """
         import_need = max(0.0, p_demand_mw - p_net_mw)
         export_need = max(0.0, p_net_mw - p_demand_mw)
         grid_import = min(import_need, self.config.grid_import_cap_mw)
@@ -297,6 +380,26 @@ class CCHPPhysicalEnv:
         }
 
     def step(self, action: Mapping[str, float]) -> tuple[dict[str, float], float, bool, bool, dict]:
+        """
+        执行一步动作，返回 (observation, reward, terminated, truncated, info)。
+
+        内部流程：
+        1. 从 action 中提取控制设定点
+        2. 调用约束求解器投影到可行域（physics_in_loop 模式）
+        3. 调用 physics 层求解设备状态（GT/HRSG/BES/TES/锅炉/制冷机）
+        4. 计算电网平衡（输入/输出/未满足/弃电）
+        5. 计算成本拆分（燃料/电网/惩罚/降解）
+        6. 更新内生状态（SOC/温度/历史状态）
+        7. 追踪 KPI（violation/unmet/成本）
+        8. 构建 observation 和 info
+
+        返回：
+        - observation: dict[str, float]，下一时刻观测
+        - reward: float，等于 -total_cost
+        - terminated: bool，是否到达 episode 末尾
+        - truncated: bool，是否被截断（当前未使用）
+        - info: dict，包含诊断信息
+        """
         if self.current_step >= len(self.episode_df):
             raise RuntimeError("episode 已结束，请先 reset。")
 
