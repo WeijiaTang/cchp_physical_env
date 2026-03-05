@@ -48,7 +48,10 @@ class AbsChillerNetwork:
                 q_drive_used_mw=0.0,
                 q_cool_mw=0.0,
                 cop_abs=0.0,
-                violation_flags={"abs_drive_temp_low": True, "abs_drive_clipped": requested > 0.0},
+                violation_flags={
+                    "abs_drive_temp_low": requested > 0.0,
+                    "abs_drive_clipped": requested > 0.0,
+                },
             )
 
         q_drive_used = _clip(requested, 0.0, self.design.q_drive_cap_mw)
@@ -60,4 +63,3 @@ class AbsChillerNetwork:
             cop_abs=cop_abs,
             violation_flags={"abs_drive_clipped": requested > q_drive_used + 1e-9},
         )
-

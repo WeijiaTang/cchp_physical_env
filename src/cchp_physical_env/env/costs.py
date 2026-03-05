@@ -10,6 +10,10 @@ if TYPE_CHECKING:  # pragma: no cover
 
 @dataclass(slots=True)
 class CostBreakdown:
+    cost_grid_import: float
+    cost_grid_export_revenue: float
+    cost_grid_curtail: float
+    cost_grid_export_penalty: float
     cost_grid: float
     cost_gt_fuel: float
     cost_gt_om: float
@@ -44,10 +48,25 @@ def compute_cost_breakdown(
     violation_count: int,
     config: "EnvConfig",
 ) -> CostBreakdown:
+    sell_price = float(price_e) * float(config.sell_price_ratio)
+    if float(config.sell_price_cap_per_mwh) > 0.0:
+        sell_price = min(sell_price, float(config.sell_price_cap_per_mwh))
+
+    cost_grid_import = grid_import_mw * dt_h * price_e
+    cost_grid_export_revenue = grid_export_mw * dt_h * sell_price
+    cost_grid_curtail = p_curtail_mw * dt_h * config.penalty_curtail_per_mwh
+
+    export_over_soft_cap_mw = max(0.0, grid_export_mw - float(config.grid_export_soft_cap_mw))
+    cost_grid_export_penalty = (
+        grid_export_mw * dt_h * float(config.penalty_export_per_mwh)
+        + export_over_soft_cap_mw * dt_h * float(config.penalty_export_over_soft_cap_per_mwh)
+    )
+
     cost_grid = (
-        grid_import_mw * dt_h * price_e
-        - grid_export_mw * dt_h * price_e * config.sell_price_ratio
-        + p_curtail_mw * dt_h * config.penalty_curtail_per_mwh
+        cost_grid_import
+        - cost_grid_export_revenue
+        + cost_grid_curtail
+        + cost_grid_export_penalty
     )
     cost_gt_fuel = fuel_input_gt_effective_mw * dt_h * price_gas
     cost_gt_om = p_gt_mw * dt_h * config.gt_om_var_cost_per_mwh + gt_started * config.gt_start_cost
@@ -76,6 +95,10 @@ def compute_cost_breakdown(
         + cost_viol
     )
     return CostBreakdown(
+        cost_grid_import=cost_grid_import,
+        cost_grid_export_revenue=cost_grid_export_revenue,
+        cost_grid_curtail=cost_grid_curtail,
+        cost_grid_export_penalty=cost_grid_export_penalty,
         cost_grid=cost_grid,
         cost_gt_fuel=cost_gt_fuel,
         cost_gt_om=cost_gt_om,

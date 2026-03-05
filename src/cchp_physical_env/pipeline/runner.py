@@ -168,8 +168,17 @@ def _run_single_episode(
         total_reward += reward
         final_info = info
         if collect_step_log:
-            log_row = {key: value for key, value in info.items() if key != "violation_flags"}
-            log_row["violation_flags_json"] = json.dumps(info.get("violation_flags", {}), ensure_ascii=False)
+            log_row = {
+                key: value
+                for key, value in info.items()
+                if key not in {"violation_flags", "diagnostic_flags"}
+            }
+            log_row["violation_flags_json"] = json.dumps(
+                info.get("violation_flags", {}), ensure_ascii=False
+            )
+            log_row["diagnostic_flags_json"] = json.dumps(
+                info.get("diagnostic_flags", {}), ensure_ascii=False
+            )
             step_rows.append(log_row)
 
     summary = final_info.get("episode_summary", env.kpi.summary())

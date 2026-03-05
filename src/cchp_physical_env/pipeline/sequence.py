@@ -25,7 +25,7 @@ DEFAULT_SEQUENCE_OBSERVATION_FEATURE_KEYS = (
 DEFAULT_SEQUENCE_ACTION_KEYS = ("u_gt", "u_bes", "u_boiler", "u_abs", "u_ech", "u_tes")
 
 # 支持的序列适配器类型列表
-SUPPORTED_SEQUENCE_ADAPTERS = ("rule", "transformer", "mamba")
+SUPPORTED_SEQUENCE_ADAPTERS = ("rule", "mlp", "transformer", "mamba")
 
 # 动作边界字典，定义了各控制动作的取值范围限制
 _ACTION_BOUNDS = {
@@ -453,6 +453,35 @@ class TransformerSequenceAdapter(SequenceAdapter):
         return self.predictor(window, observation)
 
 
+class MLPSequenceAdapter(SequenceAdapter):
+    """MLP 适配器壳：通过 predictor 推理动作（接口与 Transformer/Mamba 一致）。"""
+
+    def __init__(
+        self,
+        *,
+        history_steps: int,
+        predictor: Callable[[np.ndarray, dict[str, float]], Mapping[str, float]] | None = None,
+        observation_feature_keys: tuple[str, ...] = DEFAULT_SEQUENCE_OBSERVATION_FEATURE_KEYS,
+        action_feature_keys: tuple[str, ...] = DEFAULT_SEQUENCE_ACTION_KEYS,
+    ) -> None:
+        super().__init__(
+            history_steps=history_steps,
+            observation_feature_keys=observation_feature_keys,
+            action_feature_keys=action_feature_keys,
+        )
+        self.predictor = predictor
+
+    def predict_action(
+        self, *, window: np.ndarray, observation: dict[str, float]
+    ) -> Mapping[str, float]:
+        if self.predictor is None:
+            raise RuntimeError(
+                "MLPSequenceAdapter 尚未绑定真实模型推理器；"
+                "请先注入 predictor，或使用 --sequence-adapter rule。"
+            )
+        return self.predictor(window, observation)
+
+
 class MambaSequenceAdapter(SequenceAdapter):
     """Mamba 适配器壳：后续接入真实模型推理。"""
 
@@ -500,6 +529,13 @@ def build_sequence_adapter(
             history_steps=history_steps,
             p_gt_cap_mw=p_gt_cap_mw,
             q_ech_cap_mw=q_ech_cap_mw,
+            observation_feature_keys=observation_feature_keys,
+            action_feature_keys=action_feature_keys,
+        )
+    if normalized == "mlp":
+        return MLPSequenceAdapter(
+            history_steps=history_steps,
+            predictor=predictor,
             observation_feature_keys=observation_feature_keys,
             action_feature_keys=action_feature_keys,
         )

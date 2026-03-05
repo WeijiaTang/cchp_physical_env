@@ -120,11 +120,13 @@ class SequencePolicyTrainer:
             action_feature_keys=self.action_keys,
         )
 
+        model_kwargs = dict(self.config.model_kwargs)
+        model_kwargs.setdefault("history_steps", int(self.config.history_steps))
         self.model = build_policy_network(
             policy_backbone=self.config.policy_backbone,
             n_features=self.window_buffer.n_features,
             n_actions=len(self.action_keys),
-            model_kwargs=self.config.model_kwargs,
+            model_kwargs=model_kwargs,
         ).to(self.device)
         self.optimizer = adam_w_cls(
             self.model.parameters(),
@@ -292,6 +294,27 @@ class SequencePolicyTrainer:
         update_idx = 0
         rows: list[dict[str, Any]] = []
 
+        tqdm = None
+        try:
+            from tqdm.auto import tqdm as _tqdm  # type: ignore
+
+            tqdm = _tqdm
+        except Exception:
+            tqdm = None
+
+        pbar = None
+        if tqdm is not None:
+            pbar = tqdm(
+                total=int(self.config.train_steps),
+                desc=f"sequence_train({self.config.policy_backbone})",
+                unit="step",
+                dynamic_ncols=True,
+            )
+            pbar.update(0)
+        else:
+            last_print = 0
+            print_every = max(1, int(self.config.train_steps // 20))
+
         while total_env_steps < self.config.train_steps:
             _, episode_df = next(sampler)
             remaining = self.config.train_steps - total_env_steps
@@ -302,6 +325,29 @@ class SequencePolicyTrainer:
             )
             update_metrics = self._ppo_update(rollout)
             total_env_steps += rollout.n_steps
+
+            if pbar is not None:
+                pbar.update(int(rollout.n_steps))
+                try:
+                    pbar.set_postfix(
+                        {
+                            "r_mean": float(np.mean(rollout.rewards)),
+                            "loss": float(update_metrics.get("policy_loss", 0.0)),
+                            "lr": float(update_metrics.get("lr", 0.0)),
+                        },
+                        refresh=False,
+                    )
+                except Exception:
+                    pass
+            else:
+                if total_env_steps - last_print >= print_every:
+                    last_print = total_env_steps
+                    print(
+                        f"[sequence_train] steps={total_env_steps}/{self.config.train_steps} "
+                        f"update={update_idx} r_mean={float(np.mean(rollout.rewards)):.3f} "
+                        f"loss={float(update_metrics.get('policy_loss', 0.0)):.5f} "
+                        f"lr={float(update_metrics.get('lr', 0.0)):.6f}"
+                    )
 
             rows.append(
                 {
@@ -318,6 +364,12 @@ class SequencePolicyTrainer:
             )
             update_idx += 1
 
+        if pbar is not None:
+            try:
+                pbar.close()
+            except Exception:
+                pass
+
         pd.DataFrame(rows).to_csv(self.run_dir / "train" / "sequence_updates.csv", index=False)
 
         model_checkpoint_path = save_policy(
@@ -333,7 +385,10 @@ class SequencePolicyTrainer:
                 "n_actions": int(len(self.action_keys)),
                 "feature_keys": list(self.feature_keys),
                 "action_keys": list(self.action_keys),
-                "model_kwargs": dict(self.config.model_kwargs),
+                "model_kwargs": {
+                    "history_steps": int(self.config.history_steps),
+                    **dict(self.config.model_kwargs),
+                },
             },
         )
 
