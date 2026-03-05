@@ -14,6 +14,67 @@ import pandas as pd
 from ..core.data import EVAL_YEAR, TRAIN_YEAR, load_exogenous_data, make_episode_sampler
 from ..env.cchp_env import CCHPPhysicalEnv, EnvConfig
 
+try:
+    import torch
+    from torch import Tensor, nn
+except ModuleNotFoundError:  # pragma: no cover
+    torch = None
+    Tensor = Any
+    nn = Any
+
+try:
+    from mamba_ssm import Mamba as MambaBlock
+except ModuleNotFoundError:  # pragma: no cover
+    MambaBlock = None
+
+try:
+    from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+except ModuleNotFoundError:  # pragma: no cover
+    BaseFeaturesExtractor = object
+
+
+OBS_KEYS: tuple[str, ...] = (
+    "p_dem_mw",
+    "qh_dem_mw",
+    "qc_dem_mw",
+    "pv_mw",
+    "wt_mw",
+    "price_e",
+    "price_gas",
+    "carbon_tax",
+    "t_amb_k",
+    "sp_pa",
+    "rh_pct",
+    "wind_speed",
+    "wind_direction",
+    "ghi_wm2",
+    "dni_wm2",
+    "dhi_wm2",
+    "soc_bes",
+    "gt_on",
+    "e_tes_mwh",
+    "t_tes_hot_k",
+    "sin_t",
+    "cos_t",
+    "sin_week",
+    "cos_week",
+)
+
+
+def _require_torch() -> None:
+    if torch is None:  # pragma: no cover
+        raise ModuleNotFoundError(
+            "未检测到 torch。SAC/TD3/DDPG 训练需要 PyTorch。\n"
+            "建议先安装 PyTorch（按本机 CUDA/CPU 版本选择）。"
+        )
+
+
+def _require_mamba() -> None:
+    if MambaBlock is None:  # pragma: no cover
+        raise ModuleNotFoundError(
+            "未检测到 mamba-ssm。请安装：uv pip install -e '.[mamba]'"
+        )
+
 
 def _require_sb3_modules():
     try:
@@ -32,10 +93,12 @@ def _require_sb3_modules():
     return gym, spaces, PPO, SAC, TD3, DDPG, DummyVecEnv
 
 
-def _timestamped_run_dir(run_root: str | Path, *, mode: str, algo: str) -> Path:
+def _timestamped_run_dir(
+    run_root: str | Path, *, mode: str, algo: str, backbone: str, history_steps: int
+) -> Path:
     root = Path(run_root)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = root / f"{stamp}_{mode}_sb3_{algo}"
+    run_dir = root / f"{stamp}_{mode}_sb3_{algo}_{backbone}_k{int(history_steps)}"
     (run_dir / "train").mkdir(parents=True, exist_ok=True)
     (run_dir / "eval").mkdir(parents=True, exist_ok=True)
     (run_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
@@ -49,8 +112,30 @@ def _extract_year(df: pd.DataFrame) -> int:
     return years[0]
 
 
-def _observation_to_gym(observation: dict[str, float]) -> dict[str, np.ndarray]:
-    return {key: np.asarray([float(value)], dtype=np.float32) for key, value in observation.items()}
+def _observation_dict_to_vector(observation: dict[str, float]) -> np.ndarray:
+    return np.asarray([float(observation[key]) for key in OBS_KEYS], dtype=np.float32)
+
+
+class WindowBuffer:
+    def __init__(self, *, history_steps: int, obs_dim: int) -> None:
+        if history_steps <= 0:
+            raise ValueError("history_steps 必须 > 0。")
+        if obs_dim <= 0:
+            raise ValueError("obs_dim 必须 > 0。")
+        self.history_steps = int(history_steps)
+        self.obs_dim = int(obs_dim)
+        self.window = np.zeros((self.history_steps, self.obs_dim), dtype=np.float32)
+
+    def reset(self, first_obs: np.ndarray) -> np.ndarray:
+        vector = np.asarray(first_obs, dtype=np.float32).reshape(self.obs_dim)
+        self.window[:] = vector[None, :]
+        return self.window
+
+    def push(self, obs: np.ndarray) -> np.ndarray:
+        vector = np.asarray(obs, dtype=np.float32).reshape(self.obs_dim)
+        self.window[:-1, :] = self.window[1:, :]
+        self.window[-1, :] = vector
+        return self.window
 
 
 def _action_vector_to_env_action(action_vector: np.ndarray) -> dict[str, float]:
@@ -71,6 +156,8 @@ def _action_vector_to_env_action(action_vector: np.ndarray) -> dict[str, float]:
 @dataclass(slots=True)
 class SB3TrainConfig:
     algo: str
+    backbone: str = "mlp"
+    history_steps: int = 16
     total_timesteps: int = 200_000
     episode_days: int = 14
     n_envs: int = 1
@@ -84,6 +171,12 @@ class SB3TrainConfig:
         self.algo = str(self.algo).strip().lower()
         if self.algo not in {"ppo", "sac", "td3", "ddpg"}:
             raise ValueError("sb3 algo 仅支持 ppo/sac/td3/ddpg。")
+        self.backbone = str(self.backbone).strip().lower()
+        if self.backbone not in {"mlp", "transformer", "mamba"}:
+            raise ValueError("sb3 backbone 仅支持 mlp/transformer/mamba。")
+        self.history_steps = int(self.history_steps)
+        if self.history_steps <= 0:
+            raise ValueError("history_steps 必须 > 0。")
         self.total_timesteps = int(self.total_timesteps)
         if self.total_timesteps <= 0:
             raise ValueError("total_timesteps 必须 > 0。")
@@ -106,7 +199,7 @@ class SB3TrainConfig:
         self.device = str(self.device).strip().lower()
 
 
-def _build_spaces():
+def _build_spaces(*, history_steps: int):
     _, spaces, *_ = _require_sb3_modules()
     # action: [u_gt,u_bes,u_boiler,u_abs,u_ech,u_tes]
     action_space = spaces.Box(
@@ -115,46 +208,33 @@ def _build_spaces():
         shape=(6,),
         dtype=np.float32,
     )
-    # observation: all scalar floats (wrapped as shape=(1,) arrays)
+    history_steps_int = int(history_steps)
+    if history_steps_int <= 0:
+        raise ValueError("history_steps 必须 > 0。")
+    obs_dim = len(OBS_KEYS)
+    # observation: windowed floats (K,D)
     # 这里采用保守的大范围有限边界，避免依赖外部统计文件；论文口径建议再加归一化消融。
-    obs_low = np.asarray([-1e9], dtype=np.float32)
-    obs_high = np.asarray([1e9], dtype=np.float32)
-    observation_space = spaces.Dict(
-        {
-            "p_dem_mw": spaces.Box(obs_low, obs_high, shape=(1,), dtype=np.float32),
-            "qh_dem_mw": spaces.Box(obs_low, obs_high, shape=(1,), dtype=np.float32),
-            "qc_dem_mw": spaces.Box(obs_low, obs_high, shape=(1,), dtype=np.float32),
-            "pv_mw": spaces.Box(obs_low, obs_high, shape=(1,), dtype=np.float32),
-            "wt_mw": spaces.Box(obs_low, obs_high, shape=(1,), dtype=np.float32),
-            "price_e": spaces.Box(obs_low, obs_high, shape=(1,), dtype=np.float32),
-            "price_gas": spaces.Box(obs_low, obs_high, shape=(1,), dtype=np.float32),
-            "carbon_tax": spaces.Box(obs_low, obs_high, shape=(1,), dtype=np.float32),
-            "t_amb_k": spaces.Box(obs_low, obs_high, shape=(1,), dtype=np.float32),
-            "sp_pa": spaces.Box(obs_low, obs_high, shape=(1,), dtype=np.float32),
-            "rh_pct": spaces.Box(obs_low, obs_high, shape=(1,), dtype=np.float32),
-            "wind_speed": spaces.Box(obs_low, obs_high, shape=(1,), dtype=np.float32),
-            "wind_direction": spaces.Box(obs_low, obs_high, shape=(1,), dtype=np.float32),
-            "ghi_wm2": spaces.Box(obs_low, obs_high, shape=(1,), dtype=np.float32),
-            "dni_wm2": spaces.Box(obs_low, obs_high, shape=(1,), dtype=np.float32),
-            "dhi_wm2": spaces.Box(obs_low, obs_high, shape=(1,), dtype=np.float32),
-            "soc_bes": spaces.Box(np.asarray([0.0], dtype=np.float32), np.asarray([1.0], dtype=np.float32), shape=(1,), dtype=np.float32),
-            "gt_on": spaces.Box(np.asarray([0.0], dtype=np.float32), np.asarray([1.0], dtype=np.float32), shape=(1,), dtype=np.float32),
-            "e_tes_mwh": spaces.Box(obs_low, obs_high, shape=(1,), dtype=np.float32),
-            "t_tes_hot_k": spaces.Box(obs_low, obs_high, shape=(1,), dtype=np.float32),
-            "sin_t": spaces.Box(np.asarray([-1.0], dtype=np.float32), np.asarray([1.0], dtype=np.float32), shape=(1,), dtype=np.float32),
-            "cos_t": spaces.Box(np.asarray([-1.0], dtype=np.float32), np.asarray([1.0], dtype=np.float32), shape=(1,), dtype=np.float32),
-            "sin_week": spaces.Box(np.asarray([-1.0], dtype=np.float32), np.asarray([1.0], dtype=np.float32), shape=(1,), dtype=np.float32),
-            "cos_week": spaces.Box(np.asarray([-1.0], dtype=np.float32), np.asarray([1.0], dtype=np.float32), shape=(1,), dtype=np.float32),
-        }
+    obs_low = np.full((history_steps_int, obs_dim), -1e9, dtype=np.float32)
+    obs_high = np.full((history_steps_int, obs_dim), 1e9, dtype=np.float32)
+    observation_space = spaces.Box(
+        low=obs_low,
+        high=obs_high,
+        shape=(history_steps_int, obs_dim),
+        dtype=np.float32,
     )
     return observation_space, action_space
 
 
 def make_train_env_factory(
-    *, train_df: pd.DataFrame, env_config: EnvConfig, seed: int, episode_days: int
+    *,
+    train_df: pd.DataFrame,
+    env_config: EnvConfig,
+    seed: int,
+    episode_days: int,
+    history_steps: int,
 ) -> Callable[[], Any]:
     gym, *_ = _require_sb3_modules()
-    observation_space, action_space = _build_spaces()
+    observation_space, action_space = _build_spaces(history_steps=history_steps)
 
     class _CCHPSB3TrainEnv(gym.Env):
         metadata = {"render_modes": []}
@@ -169,6 +249,7 @@ def make_train_env_factory(
             )
             self.env = CCHPPhysicalEnv(exogenous_df=train_df, config=env_config, seed=int(seed))
             self.observation: dict[str, float] | None = None
+            self.buffer = WindowBuffer(history_steps=int(history_steps), obs_dim=len(OBS_KEYS))
 
         def reset(self, *, seed: int | None = None, options: dict | None = None):
             del options
@@ -177,7 +258,9 @@ def make_train_env_factory(
             _, episode_df = next(self.sampler)
             observation, _ = self.env.reset(seed=int(seed or 0), episode_df=episode_df)
             self.observation = observation
-            return _observation_to_gym(observation), {}
+            vector = _observation_dict_to_vector(observation)
+            window = self.buffer.reset(vector)
+            return window.copy(), {}
 
         def step(self, action):
             if self.observation is None:
@@ -185,9 +268,121 @@ def make_train_env_factory(
             action_dict = _action_vector_to_env_action(action)
             next_obs, reward, terminated, truncated, info = self.env.step(action_dict)
             self.observation = next_obs
-            return _observation_to_gym(next_obs), float(reward), bool(terminated), bool(truncated), dict(info)
+            vector = _observation_dict_to_vector(next_obs)
+            window = self.buffer.push(vector)
+            return window.copy(), float(reward), bool(terminated), bool(truncated), dict(info)
 
     return _CCHPSB3TrainEnv
+
+
+if torch is not None and BaseFeaturesExtractor is not object:
+
+    class SB3TransformerWindowExtractor(BaseFeaturesExtractor):
+        def __init__(
+            self,
+            observation_space: Any,
+            *,
+            d_model: int = 128,
+            n_head: int = 4,
+            n_layer: int = 3,
+            dropout: float = 0.1,
+        ) -> None:
+            shape = getattr(observation_space, "shape", None)
+            if not shape or len(shape) != 2:
+                raise ValueError("TransformerWindowExtractor 仅支持 Box(K,D) observation_space。")
+            _, obs_dim = int(shape[0]), int(shape[1])
+            super().__init__(observation_space, features_dim=int(d_model))
+            self.input_proj = nn.Linear(obs_dim, int(d_model))
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=int(d_model),
+                nhead=int(n_head),
+                dim_feedforward=int(d_model) * 4,
+                dropout=float(dropout),
+                activation="gelu",
+                batch_first=True,
+            )
+            self.transformer = nn.TransformerEncoder(encoder_layer=encoder_layer, num_layers=int(n_layer))
+            self.output_norm = nn.LayerNorm(int(d_model))
+
+        def forward(self, observations: Tensor) -> Tensor:
+            if observations.dim() != 3:
+                raise ValueError("SB3 Transformer extractor 输入必须是 (B,K,D)。")
+            hidden = self.input_proj(observations)
+            hidden = self.transformer(hidden)
+            hidden_last = self.output_norm(hidden[:, -1, :])
+            return hidden_last
+
+
+    class SB3MambaWindowExtractor(BaseFeaturesExtractor):
+        def __init__(
+            self,
+            observation_space: Any,
+            *,
+            d_model: int = 128,
+            n_layer: int = 4,
+            d_state: int = 16,
+            d_conv: int = 4,
+            expand: int = 2,
+            dropout: float = 0.1,
+        ) -> None:
+            _require_mamba()
+            shape = getattr(observation_space, "shape", None)
+            if not shape or len(shape) != 2:
+                raise ValueError("MambaWindowExtractor 仅支持 Box(K,D) observation_space。")
+            _, obs_dim = int(shape[0]), int(shape[1])
+            super().__init__(observation_space, features_dim=int(d_model))
+            self.input_proj = nn.Linear(obs_dim, int(d_model))
+            self.blocks = nn.ModuleList(
+                [
+                    MambaBlock(
+                        d_model=int(d_model),
+                        d_state=int(d_state),
+                        d_conv=int(d_conv),
+                        expand=int(expand),
+                    )
+                    for _ in range(int(n_layer))
+                ]
+            )
+            self.dropout = nn.Dropout(float(dropout))
+            self.output_norm = nn.LayerNorm(int(d_model))
+
+        def forward(self, observations: Tensor) -> Tensor:
+            if observations.dim() != 3:
+                raise ValueError("SB3 Mamba extractor 输入必须是 (B,K,D)。")
+            hidden = self.input_proj(observations)
+            for block in self.blocks:
+                hidden = hidden + self.dropout(block(hidden))
+            hidden_last = self.output_norm(hidden[:, -1, :])
+            return hidden_last
+
+
+def _sb3_policy_kwargs_for_backbone(*, backbone: str) -> dict[str, Any]:
+    normalized = str(backbone).strip().lower()
+    if normalized == "mlp":
+        return {}
+    _require_torch()
+    if normalized == "transformer":
+        if BaseFeaturesExtractor is object:  # pragma: no cover
+            raise ModuleNotFoundError("未检测到 stable-baselines3。")
+        return {
+            "features_extractor_class": SB3TransformerWindowExtractor,
+            "features_extractor_kwargs": {"d_model": 128, "n_head": 4, "n_layer": 3, "dropout": 0.1},
+        }
+    if normalized == "mamba":
+        if BaseFeaturesExtractor is object:  # pragma: no cover
+            raise ModuleNotFoundError("未检测到 stable-baselines3。")
+        return {
+            "features_extractor_class": SB3MambaWindowExtractor,
+            "features_extractor_kwargs": {
+                "d_model": 128,
+                "n_layer": 4,
+                "d_state": 16,
+                "d_conv": 4,
+                "expand": 2,
+                "dropout": 0.1,
+            },
+        }
+    raise ValueError("sb3 backbone 仅支持 mlp/transformer/mamba。")
 
 
 def train_sb3_policy(
@@ -204,7 +399,13 @@ def train_sb3_policy(
     if year != TRAIN_YEAR:
         raise ValueError(f"训练必须使用 {TRAIN_YEAR}，当前年份 {year}")
 
-    run_dir = _timestamped_run_dir(run_root=run_root, mode="train", algo=config.algo)
+    run_dir = _timestamped_run_dir(
+        run_root=run_root,
+        mode="train",
+        algo=config.algo,
+        backbone=config.backbone,
+        history_steps=config.history_steps,
+    )
     train_summary_path = run_dir / "train" / "summary.json"
     checkpoint_path = run_dir / "checkpoints" / "baseline_policy.json"
     model_path = run_dir / "checkpoints" / "sb3_model.zip"
@@ -215,20 +416,33 @@ def train_sb3_policy(
             env_config=env_config,
             seed=config.seed + idx,
             episode_days=config.episode_days,
+            history_steps=config.history_steps,
         )
         for idx in range(config.n_envs)
     ]
     vec_env = DummyVecEnv(env_fns)
 
     algo_cls = {"ppo": PPO, "sac": SAC, "td3": TD3, "ddpg": DDPG}[config.algo]
+    policy_kwargs = _sb3_policy_kwargs_for_backbone(backbone=config.backbone)
+    policy_kwargs_serializable: dict[str, Any] = {}
+    if policy_kwargs:
+        extractor_cls = policy_kwargs.get("features_extractor_class")
+        extractor_name = (
+            str(getattr(extractor_cls, "__name__", "")) if extractor_cls is not None else ""
+        )
+        policy_kwargs_serializable = {
+            "features_extractor_class": extractor_name,
+            "features_extractor_kwargs": dict(policy_kwargs.get("features_extractor_kwargs", {})),
+        }
     model = algo_cls(
-        policy="MultiInputPolicy",
+        policy="MlpPolicy",
         env=vec_env,
         learning_rate=config.learning_rate,
         batch_size=config.batch_size,
         gamma=config.gamma,
         seed=config.seed,
         device=config.device,
+        policy_kwargs=policy_kwargs if policy_kwargs else None,
         verbose=1,
     )
     model.learn(total_timesteps=int(config.total_timesteps))
@@ -237,7 +451,9 @@ def train_sb3_policy(
     payload = {
         "artifact_type": "sb3_policy",
         "algo": config.algo,
-        "policy": "MultiInputPolicy",
+        "policy": "MlpPolicy",
+        "backbone": str(config.backbone),
+        "history_steps": int(config.history_steps),
         "seed": int(config.seed),
         "train_year": int(TRAIN_YEAR),
         "episode_days": int(config.episode_days),
@@ -247,6 +463,8 @@ def train_sb3_policy(
         "batch_size": int(config.batch_size),
         "gamma": float(config.gamma),
         "device": str(config.device),
+        "observation_keys": list(OBS_KEYS),
+        "policy_kwargs": policy_kwargs_serializable,
         "model_path": str(model_path).replace("\\", "/"),
         "run_dir": str(run_dir).replace("\\", "/"),
     }
@@ -285,21 +503,28 @@ def evaluate_sb3_policy(
     algo_cls = {"ppo": PPO, "sac": SAC, "td3": TD3, "ddpg": DDPG}[algo]
     model = algo_cls.load(str(model_path), device=device)
 
+    history_steps = int(ckpt.get("history_steps", 1))
+    if history_steps <= 0:
+        raise ValueError("checkpoint_json.history_steps 必须 > 0。")
+    obs_dim = len(OBS_KEYS)
+    buffer = WindowBuffer(history_steps=history_steps, obs_dim=obs_dim)
+
     output_run_dir = Path(run_dir)
     (output_run_dir / "eval").mkdir(parents=True, exist_ok=True)
 
     env = CCHPPhysicalEnv(exogenous_df=eval_df, config=env_config, seed=seed)
     observation, _ = env.reset(seed=seed, episode_df=eval_df)
+    window = buffer.reset(_observation_dict_to_vector(observation)).copy()
     terminated = False
     total_reward = 0.0
     step_rows: list[dict[str, Any]] = []
     final_info: dict[str, Any] = {}
 
     while not terminated:
-        obs_gym = _observation_to_gym(observation)
-        action_vec, _ = model.predict(obs_gym, deterministic=bool(deterministic))
+        action_vec, _ = model.predict(window, deterministic=bool(deterministic))
         action_dict = _action_vector_to_env_action(action_vec)
         observation, reward, terminated, _, info = env.step(action_dict)
+        window = buffer.push(_observation_dict_to_vector(observation)).copy()
         total_reward += float(reward)
         final_info = dict(info)
         log_row = {key: value for key, value in info.items() if key not in {"violation_flags", "diagnostic_flags"}}
@@ -314,6 +539,8 @@ def evaluate_sb3_policy(
     summary["year"] = int(EVAL_YEAR)
     summary["policy"] = "sb3"
     summary["algo"] = algo
+    summary["backbone"] = str(ckpt.get("backbone", ""))
+    summary["history_steps"] = int(history_steps)
     summary["seed"] = int(seed)
     summary["checkpoint_json"] = str(Path(checkpoint_json)).replace("\\", "/")
 
@@ -327,4 +554,3 @@ def evaluate_sb3_policy(
 
 def load_dataframe(path: str | Path) -> pd.DataFrame:
     return load_exogenous_data(path)
-

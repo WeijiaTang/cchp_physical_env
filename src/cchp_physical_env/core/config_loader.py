@@ -34,6 +34,8 @@ TRAINING_DEFAULTS: dict[str, Any] = {
     # Task-011：可选 SB3 多算法（SAC/TD3/DDPG/PPO）
     "sb3_enabled": False,
     "sb3_algo": "ppo",
+    "sb3_backbone": "mlp",
+    "sb3_history_steps": 16,
     "sb3_total_timesteps": 200_000,
     "sb3_n_envs": 1,
     "sb3_learning_rate": 3e-4,
@@ -242,6 +244,7 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
         "train_steps",
         "batch_size",
         "update_epochs",
+        "sb3_history_steps",
         "sb3_total_timesteps",
         "sb3_n_envs",
         "sb3_batch_size",
@@ -254,6 +257,10 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
         if key in {"sb3_algo"}:
             if len(str(value).strip()) == 0:
                 raise ValueError("sb3_algo 不能为空。")
+            continue
+        if key in {"sb3_backbone"}:
+            if len(str(value).strip()) == 0:
+                raise ValueError("sb3_backbone 不能为空。")
             continue
         if key in bool_keys:
             if not isinstance(value, bool):
@@ -294,6 +301,11 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
     sb3_algo = str(overrides.get("sb3_algo", TRAINING_DEFAULTS["sb3_algo"])).strip().lower()
     if sb3_algo not in {"ppo", "sac", "td3", "ddpg"}:
         raise ValueError("training.sb3_algo 仅支持 ppo/sac/td3/ddpg。")
+    sb3_backbone = str(
+        overrides.get("sb3_backbone", TRAINING_DEFAULTS["sb3_backbone"])
+    ).strip().lower()
+    if sb3_backbone not in {"mlp", "transformer", "mamba"}:
+        raise ValueError("training.sb3_backbone 仅支持 mlp/transformer/mamba。")
 
 
 def build_training_options(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -316,6 +328,8 @@ def build_training_options(overrides: dict[str, Any] | None = None) -> dict[str,
     normalized["device"] = str(normalized["device"]).strip().lower()
     normalized["sb3_enabled"] = bool(normalized["sb3_enabled"])
     normalized["sb3_algo"] = str(normalized["sb3_algo"]).strip().lower()
+    normalized["sb3_backbone"] = str(normalized["sb3_backbone"]).strip().lower()
+    normalized["sb3_history_steps"] = int(normalized["sb3_history_steps"])
     normalized["sb3_total_timesteps"] = int(normalized["sb3_total_timesteps"])
     normalized["sb3_n_envs"] = int(normalized["sb3_n_envs"])
     normalized["sb3_learning_rate"] = float(normalized["sb3_learning_rate"])

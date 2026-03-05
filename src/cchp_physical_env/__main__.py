@@ -69,6 +69,8 @@ TRAINING_OPTION_KEYS = (
     "device",
     "sb3_enabled",
     "sb3_algo",
+    "sb3_backbone",
+    "sb3_history_steps",
     "sb3_total_timesteps",
     "sb3_n_envs",
     "sb3_learning_rate",
@@ -155,6 +157,8 @@ def _command_train(args: argparse.Namespace) -> None:
     if bool(training_options.get("sb3_enabled", False)):
         config = SB3TrainConfig(
             algo=training_options["sb3_algo"],
+            backbone=training_options["sb3_backbone"],
+            history_steps=training_options["sb3_history_steps"],
             total_timesteps=training_options["sb3_total_timesteps"],
             episode_days=training_options["episode_days"],
             n_envs=training_options["sb3_n_envs"],
@@ -318,6 +322,8 @@ def _command_sb3_train(args: argparse.Namespace) -> None:
 
     config = SB3TrainConfig(
         algo=args.algo,
+        backbone=args.backbone,
+        history_steps=args.history_steps,
         total_timesteps=args.total_timesteps,
         episode_days=args.episode_days,
         n_envs=args.n_envs,
@@ -498,7 +504,22 @@ def build_parser() -> argparse.ArgumentParser:
         default=argparse.SUPPRESS,
         help="启用 SB3 多算法训练（否则走 baseline/sequence trainer）。",
     )
+    train_parser.add_argument(
+        "--no-sb3",
+        dest="sb3_enabled",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="禁用 SB3（覆盖 config.yaml 里的 sb3_enabled=true）。",
+    )
     train_parser.add_argument("--sb3-algo", type=str, default=argparse.SUPPRESS, choices=["ppo", "sac", "td3", "ddpg"])
+    train_parser.add_argument(
+        "--sb3-backbone",
+        type=str,
+        default=argparse.SUPPRESS,
+        choices=["mlp", "transformer", "mamba"],
+        help="SB3 policy backbone（用于 SAC+Transformer 等组合）。",
+    )
+    train_parser.add_argument("--sb3-history-steps", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument("--sb3-total-timesteps", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument("--sb3-n-envs", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument("--sb3-learning-rate", type=float, default=argparse.SUPPRESS)
@@ -531,6 +552,19 @@ def build_parser() -> argparse.ArgumentParser:
     sb3_train_parser = subparsers.add_parser("sb3-train", help="用 SB3 训练 PPO/SAC/TD3/DDPG（Task-011，可选依赖）。")
     sb3_train_parser.add_argument("--run-root", type=Path, default=Path("runs"))
     sb3_train_parser.add_argument("--algo", type=str, choices=["ppo", "sac", "td3", "ddpg"], default="ppo")
+    sb3_train_parser.add_argument(
+        "--backbone",
+        type=str,
+        choices=["mlp", "transformer", "mamba"],
+        default="mlp",
+        help="SB3 特征提取骨干：mlp/transformer/mamba（用于 SAC+Transformer 等对比）。",
+    )
+    sb3_train_parser.add_argument(
+        "--history-steps",
+        type=int,
+        default=16,
+        help="SB3 序列窗口长度（步）。",
+    )
     sb3_train_parser.add_argument("--total-timesteps", type=int, default=200_000)
     sb3_train_parser.add_argument("--episode-days", type=int, default=14)
     sb3_train_parser.add_argument("--n-envs", type=int, default=1)

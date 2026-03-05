@@ -133,6 +133,12 @@ training:
   sb3_enabled: false
   # 选择算法：ppo / sac / td3 / ddpg
   sb3_algo: ppo
+  # SB3 policy backbone：mlp / transformer / mamba
+  # - mlp：窗口 flatten 后走 MLP（最稳）
+  # - transformer/mamba：用序列编码器提取特征，再交给 SB3 算法头（可用于 “SAC+Transformer” 对比）
+  sb3_backbone: mlp
+  # SB3 输入窗口长度（步），与 sequence_rule 的 history_steps 概念一致
+  sb3_history_steps: 16
   # SB3 总交互步数（训练预算）
   sb3_total_timesteps: 200000
   # 并行环境数量（DummyVecEnv），>1 可加速但更吃资源
