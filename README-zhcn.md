@@ -138,13 +138,13 @@ uv run python -m cchp_physical_env --help
 示例（序列策略训练，`mlp` 消融）：
 
 ```bash
-uv run python -m cchp_physical_env train \
-  --policy sequence_rule \
-  --sequence-adapter mlp \
-  --history-steps 16 \
-  --episode-days 7 \
-  --train-steps 4096 \
-  --batch-size 256 \
+uv run python -m cchp_physical_env train `
+  --policy sequence_rule `
+  --sequence-adapter mlp `
+  --history-steps 16 `
+  --episode-days 7 `
+  --train-steps 4096 `
+  --batch-size 256 `
   --device cpu
 ```
 
@@ -172,35 +172,35 @@ uv run python -m cchp_physical_env train
 CLI 覆盖示例（强制启用 `td3`，覆盖 config）：
 
 ```bash
-uv run python -m cchp_physical_env train \
-  --sb3-enabled \
-  --sb3-algo td3 \
+uv run python -m cchp_physical_env train `
+  --sb3-enabled `
+  --sb3-algo td3 `
   --sb3-total-timesteps 200000
 ```
 
 可选：显式使用 SB3 子命令（等价入口）：
 
 ```bash
-uv run python -m cchp_physical_env sb3-train \
-  --algo sac \
-  --total-timesteps 200000 \
-  --episode-days 14 \
-  --n-envs 1 \
+uv run python -m cchp_physical_env sb3-train `
+  --algo sac `
+  --total-timesteps 200000 `
+  --episode-days 14 `
+  --n-envs 1 `
   --device auto
 ```
 
 评估示例：
 
 ```bash
-uv run python -m cchp_physical_env eval \
+uv run python -m cchp_physical_env eval `
   --checkpoint runs/<sb3_train_run>/checkpoints/baseline_policy.json
 ```
 
 可选：显式调用 `sb3-eval`（备用入口）：
 
 ```bash
-uv run python -m cchp_physical_env sb3-eval \
-  --run-dir runs/<new_eval_dir> \
+uv run python -m cchp_physical_env sb3-eval `
+  --run-dir runs/<new_eval_dir> `
   --checkpoint runs/<sb3_train_run>/checkpoints/baseline_policy.json
 ```
 
@@ -253,16 +253,3 @@ uv run python -m cchp_physical_env sb3-eval \
 - 一个“数据数据集”，顶层包含 `data/processed/*.csv`
 
 Notebook 会将两者 rsync 到可写目录，并依次执行 `summary/train/eval`。
-
-## 上游基线（可选）
-
-上游基线位于：`reference/repo/joint_bes_gt_dispatch/`，并保留其独立脚本。
-
-示例：
-
-```powershell
-cd reference/repo/joint_bes_gt_dispatch
-python main/rule_based.py
-python main/run_dqn.py
-```
-

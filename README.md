@@ -134,13 +134,13 @@ Typical config knobs are under `training:` in `src/cchp_physical_env/config/conf
 Example (sequence training, `mlp` ablation):
 
 ```bash
-uv run python -m cchp_physical_env train \
-  --policy sequence_rule \
-  --sequence-adapter mlp \
-  --history-steps 16 \
-  --episode-days 7 \
-  --train-steps 4096 \
-  --batch-size 256 \
+uv run python -m cchp_physical_env train `
+  --policy sequence_rule `
+  --sequence-adapter mlp `
+  --history-steps 16 `
+  --episode-days 7 `
+  --train-steps 4096 `
+  --batch-size 256 `
   --device cpu
 ```
 
@@ -166,35 +166,35 @@ uv run python -m cchp_physical_env train
 CLI override example (force `td3` and override config):
 
 ```bash
-uv run python -m cchp_physical_env train \
-  --sb3-enabled \
-  --sb3-algo td3 \
+uv run python -m cchp_physical_env train `
+  --sb3-enabled `
+  --sb3-algo td3 `
   --sb3-total-timesteps 200000
 ```
 
 Explicit SB3 entrypoint (equivalent, optional):
 
 ```bash
-uv run python -m cchp_physical_env sb3-train \
-  --algo sac \
-  --total-timesteps 200000 \
-  --episode-days 14 \
-  --n-envs 1 \
+uv run python -m cchp_physical_env sb3-train `
+  --algo sac `
+  --total-timesteps 200000 `
+  --episode-days 14 `
+  --n-envs 1 `
   --device auto
 ```
 
 Evaluation:
 
 ```bash
-uv run python -m cchp_physical_env eval \
+uv run python -m cchp_physical_env eval `
   --checkpoint runs/<sb3_train_run>/checkpoints/baseline_policy.json
 ```
 
 Optional explicit SB3 evaluation (fallback):
 
 ```bash
-uv run python -m cchp_physical_env sb3-eval \
-  --run-dir runs/<new_eval_dir> \
+uv run python -m cchp_physical_env sb3-eval `
+  --run-dir runs/<new_eval_dir> `
   --checkpoint runs/<sb3_train_run>/checkpoints/baseline_policy.json
 ```
 
@@ -247,16 +247,3 @@ In Kaggle, add two datasets:
 - A data dataset that contains `data/processed/*.csv`
 
 The notebook will rsync both into a writable working directory and then run `summary/train/eval`.
-
-## Upstream baseline (optional)
-
-The upstream baseline lives in `reference/repo/joint_bes_gt_dispatch/` and comes with its own run scripts.
-
-Example:
-
-```powershell
-cd reference/repo/joint_bes_gt_dispatch
-python main/rule_based.py
-python main/run_dqn.py
-```
-
