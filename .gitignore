@@ -25,4 +25,4 @@ data/raw/load/industrial_park_scidata2023/osf/csv/Weather data
 data/raw/load/industrial_park_scidata2023/osf/csv/Electric power load data
 # outputs
 runs/
-kaggle_train_sac_single.ipynb.example
+kaggle/
