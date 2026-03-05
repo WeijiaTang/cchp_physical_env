@@ -1,4 +1,4 @@
-English[README-en.md](README.md)|中文[README-zhcn.md](README-zhcn.md)|
+[README-en.md](README.md) | [README-zhcn.md](README-zhcn.md)|
 ## CCHP (Combined Cooling, Heating, and Power) + Renewables Scheduling Research
 
 This repository provides a **Python** physical environment for a CCHP energy system (electricity-heat-cooling coupling) and a minimal CLI pipeline for reproducible experiments.
