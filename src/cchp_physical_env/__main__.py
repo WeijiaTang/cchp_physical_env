@@ -55,6 +55,7 @@ from .policy.sb3 import SB3TrainConfig, evaluate_sb3_policy, train_sb3_policy
 DEFAULT_TRAIN_PATH = Path("data/processed/cchp_main_15min_2024.csv")
 DEFAULT_EVAL_PATH = Path("data/processed/cchp_main_15min_2025.csv")
 DEFAULT_ENV_CONFIG_PATH = Path("src/cchp_physical_env/config/config.yaml")
+DEFAULT_CONSTRAINT_MODES = ("physics_in_loop", "reward_only")
 
 # 训练选项键：这些字段可以从 CLI 或 config.yaml 覆盖
 TRAINING_OPTION_KEYS = (
@@ -137,7 +138,8 @@ def _command_summary(args: argparse.Namespace) -> None:
     summary 子命令：打印 2024/2025 数据摘要并校验 schema。
     """
     env_overrides = load_env_overrides(_resolve_env_config_path(args))
-    build_env_config_from_overrides(env_overrides)
+    force_mode = getattr(args, "constraint_mode", None)
+    build_env_config_from_overrides(env_overrides, force_constraint_mode=force_mode)
     _print_summary_block(train_path=args.train_path, eval_path=args.eval_path)
 
 
@@ -154,7 +156,8 @@ def _command_train(args: argparse.Namespace) -> None:
     """
     train_df = load_exogenous_data(args.train_path)
     env_overrides = load_env_overrides(_resolve_env_config_path(args))
-    env_config = build_env_config_from_overrides(env_overrides)
+    force_mode = getattr(args, "constraint_mode", None)
+    env_config = build_env_config_from_overrides(env_overrides, force_constraint_mode=force_mode)
     training_options = _resolve_training_options(args)
     if bool(training_options.get("sb3_enabled", False)):
         config = SB3TrainConfig(
@@ -260,7 +263,8 @@ def _command_eval(args: argparse.Namespace) -> None:
     """
     eval_df = load_exogenous_data(args.eval_path)
     env_overrides = load_env_overrides(_resolve_env_config_path(args))
-    env_config = build_env_config_from_overrides(env_overrides)
+    force_mode = getattr(args, "constraint_mode", None)
+    env_config = build_env_config_from_overrides(env_overrides, force_constraint_mode=force_mode)
     training_options = _resolve_training_options(args)
 
     if args.checkpoint is not None:
@@ -320,7 +324,8 @@ def _command_sb3_train(args: argparse.Namespace) -> None:
     """
     train_df = load_exogenous_data(args.train_path)
     env_overrides = load_env_overrides(_resolve_env_config_path(args))
-    env_config = build_env_config_from_overrides(env_overrides)
+    force_mode = getattr(args, "constraint_mode", None)
+    env_config = build_env_config_from_overrides(env_overrides, force_constraint_mode=force_mode)
 
     config = SB3TrainConfig(
         algo=args.algo,
@@ -354,7 +359,8 @@ def _command_sb3_eval(args: argparse.Namespace) -> None:
     """
     eval_df = load_exogenous_data(args.eval_path)
     env_overrides = load_env_overrides(_resolve_env_config_path(args))
-    env_config = build_env_config_from_overrides(env_overrides)
+    force_mode = getattr(args, "constraint_mode", None)
+    env_config = build_env_config_from_overrides(env_overrides, force_constraint_mode=force_mode)
     summary = evaluate_sb3_policy(
         eval_df=eval_df,
         env_config=env_config,
@@ -381,6 +387,11 @@ def _command_calibrate(args: argparse.Namespace) -> None:
     env_overrides = load_env_overrides(_resolve_env_config_path(args))
     training_options = _resolve_training_options(args)
     config = load_calibration_config(args.config)
+    force_mode = getattr(args, "constraint_mode", None)
+    if force_mode is not None:
+        # calibrate 的 env_config 仍从 base_env_overrides 构建；这里仅把模式强制覆盖透传下去。
+        env_overrides = dict(env_overrides)
+        env_overrides["constraint_mode"] = str(force_mode)
     search_block = dict(config.get("search", {}))
     search_block["history_steps"] = int(training_options["history_steps"])
     search_block["sequence_adapter"] = str(training_options["sequence_adapter"]).strip().lower()
@@ -419,6 +430,10 @@ def _command_ablation(args: argparse.Namespace) -> None:
     eval_df = load_exogenous_data(args.eval_path)
     env_overrides = load_env_overrides(_resolve_env_config_path(args))
     training_options = _resolve_training_options(args)
+    force_mode = getattr(args, "constraint_mode", None)
+    if force_mode is not None:
+        env_overrides = dict(env_overrides)
+        env_overrides["constraint_mode"] = str(force_mode)
     modes = [item.strip() for item in str(args.modes).split(",") if item.strip()]
     result = run_constraint_ablation(
         train_df=train_df,
@@ -475,6 +490,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--train-path", type=Path, default=DEFAULT_TRAIN_PATH)
     parser.add_argument("--eval-path", type=Path, default=DEFAULT_EVAL_PATH)
     parser.add_argument("--env-config", type=Path, default=DEFAULT_ENV_CONFIG_PATH)
+    parser.add_argument(
+        "--constraint-mode",
+        type=str,
+        default=argparse.SUPPRESS,
+        choices=list(DEFAULT_CONSTRAINT_MODES),
+        help="覆盖 env.constraint_mode（其余 env 参数仍从 --env-config 读取）。",
+    )
 
     subparsers = parser.add_subparsers(dest="command")
 

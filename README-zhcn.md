@@ -244,6 +244,123 @@ uv run python -m cchp_physical_env sb3-eval `
 uv run python -m cchp_physical_env collect
 ```
 
+## 论文级实验协议（PowerShell，推荐复制粘贴）
+
+论文结论应来自“矩阵化协议”：多 seed、多方法/消融、统一 2025 评估、最后 `collect` 汇总成论文表格。
+
+### 0) 数据健康检查（必做）
+
+```powershell
+uv run python -m cchp_physical_env summary
+```
+
+### 1) Tier-1（必做）：约束范式消融（`physics_in_loop` vs `reward_only`）
+
+```powershell
+$seeds = 40,41,42
+
+foreach ($seed in $seeds) {
+  foreach ($mode in @('physics_in_loop', 'reward_only')) {
+    uv run python -m cchp_physical_env train `
+      --policy rule `
+      --episodes 800 `
+      --episode-days 14 `
+      --constraint-mode $mode `
+      --seed $seed
+
+    $runDir = Get-ChildItem runs -Directory | Sort-Object Name | Select-Object -Last 1
+    $ckpt = Join-Path $runDir.FullName 'checkpoints/baseline_policy.json'
+
+    uv run python -m cchp_physical_env eval `
+      --checkpoint $ckpt `
+      --constraint-mode $mode `
+      --seed $seed
+  }
+}
+
+uv run python -m cchp_physical_env collect
+```
+
+### 2) Tier-2（必做）：策略结构消融（rule / 启发式序列 / 深度序列骨干）
+
+```powershell
+$seed = 42
+$K = 16
+$episodeDays = 28
+$trainSteps = 409600
+
+# (1) rule
+uv run python -m cchp_physical_env train `
+  --policy rule `
+  --episodes 800 `
+  --episode-days 14 `
+  --seed $seed
+$runDir = Get-ChildItem runs -Directory | Sort-Object Name | Select-Object -Last 1
+$ckpt = Join-Path $runDir.FullName 'checkpoints/baseline_policy.json'
+uv run python -m cchp_physical_env eval --checkpoint $ckpt --seed $seed
+
+# (2) 启发式序列（需要 train_statistics 来确定阈值）
+uv run python -m cchp_physical_env train `
+  --policy sequence_rule `
+  --sequence-adapter rule `
+  --history-steps $K `
+  --episodes 800 `
+  --episode-days 14 `
+  --seed $seed
+$runDir = Get-ChildItem runs -Directory | Sort-Object Name | Select-Object -Last 1
+$ckpt = Join-Path $runDir.FullName 'checkpoints/baseline_policy.json'
+uv run python -m cchp_physical_env eval --checkpoint $ckpt --seed $seed
+
+# (3) 深度序列：MLP / Transformer / Mamba（PPO-style）
+$adapters = 'mlp','transformer','mamba'
+foreach ($adapter in $adapters) {
+  uv run python -m cchp_physical_env train `
+    --policy sequence_rule `
+    --sequence-adapter $adapter `
+    --history-steps $K `
+    --episode-days $episodeDays `
+    --train-steps $trainSteps `
+    --batch-size 1024 `
+    --update-epochs 4 `
+    --lr 0.0003 `
+    --device auto `
+    --seed $seed
+
+  $runDir = Get-ChildItem runs -Directory | Sort-Object Name | Select-Object -Last 1
+  $ckpt = Join-Path $runDir.FullName 'checkpoints/baseline_policy.json'
+  uv run python -m cchp_physical_env eval --checkpoint $ckpt --seed $seed
+}
+
+uv run python -m cchp_physical_env collect
+```
+
+### 3) Tier-3（建议）：多算法对比（SB3，支持 `SAC + Transformer`）
+
+```powershell
+$seeds = 40,41,42
+
+foreach ($seed in $seeds) {
+  uv run python -m cchp_physical_env sb3-train `
+    --algo sac `
+    --backbone transformer `
+    --history-steps 16 `
+    --total-timesteps 200000 `
+    --episode-days 14 `
+    --n-envs 1 `
+    --learning-rate 0.0003 `
+    --batch-size 256 `
+    --gamma 0.99 `
+    --device auto `
+    --seed $seed
+
+  $runDir = Get-ChildItem runs -Directory | Sort-Object Name | Select-Object -Last 1
+  $ckpt = Join-Path $runDir.FullName 'checkpoints/baseline_policy.json'
+  uv run python -m cchp_physical_env eval --checkpoint $ckpt --seed $seed
+}
+
+uv run python -m cchp_physical_env collect
+```
+
 ## 配置说明
 
 `src/cchp_physical_env/config/config.yaml` 顶层分两段：

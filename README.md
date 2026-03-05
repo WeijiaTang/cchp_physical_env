@@ -75,6 +75,133 @@ $ckpt = Join-Path $runDir.FullName 'checkpoints/baseline_policy.json'
 uv run python -m cchp_physical_env eval --checkpoint $ckpt --seed 2
 ```
 
+## Paper-grade experiment protocol (PowerShell)
+
+The paper results should be produced from a **matrix** of runs (multiple methods × multiple seeds), then evaluated on the frozen 2025 year, and finally collected into one benchmark table.
+
+### 0) Data health check (must-do)
+
+```powershell
+uv run python -m cchp_physical_env summary
+```
+
+### 1) Tier-1 (must-do): constraint paradigm ablation
+
+Run the same method under two constraint modes:
+
+- `physics_in_loop` (feasible projection / solver-in-the-loop)
+- `reward_only` (no solver, projection-based execution + penalties)
+
+```powershell
+$seeds = 40,41,42
+
+foreach ($seed in $seeds) {
+  foreach ($mode in @('physics_in_loop', 'reward_only')) {
+    uv run python -m cchp_physical_env train `
+      --policy rule `
+      --episodes 800 `
+      --episode-days 14 `
+      --constraint-mode $mode `
+      --seed $seed
+
+    $runDir = Get-ChildItem runs -Directory | Sort-Object Name | Select-Object -Last 1
+    $ckpt = Join-Path $runDir.FullName 'checkpoints/baseline_policy.json'
+
+    uv run python -m cchp_physical_env eval `
+      --checkpoint $ckpt `
+      --constraint-mode $mode `
+      --seed $seed
+  }
+}
+
+uv run python -m cchp_physical_env collect
+```
+
+### 2) Tier-2 (must-do): policy structure ablation
+
+Compare:
+
+- `rule` (non-learning baseline)
+- `sequence_rule` with `sequence_adapter=rule` (heuristic sequence baseline, no deep learning)
+- deep sequence backbones: `mlp` / `transformer` / `mamba` (PPO-style trainer)
+
+```powershell
+$seed = 42
+$K = 16
+$episodeDays = 28
+$trainSteps = 409600
+
+# (1) rule baseline
+uv run python -m cchp_physical_env train `
+  --policy rule `
+  --episodes 800 `
+  --episode-days 14 `
+  --seed $seed
+$runDir = Get-ChildItem runs -Directory | Sort-Object Name | Select-Object -Last 1
+$ckpt = Join-Path $runDir.FullName 'checkpoints/baseline_policy.json'
+uv run python -m cchp_physical_env eval --checkpoint $ckpt --seed $seed
+
+# (2) heuristic sequence baseline (needs train_statistics for thresholds)
+uv run python -m cchp_physical_env train `
+  --policy sequence_rule `
+  --sequence-adapter rule `
+  --history-steps $K `
+  --episodes 800 `
+  --episode-days 14 `
+  --seed $seed
+$runDir = Get-ChildItem runs -Directory | Sort-Object Name | Select-Object -Last 1
+$ckpt = Join-Path $runDir.FullName 'checkpoints/baseline_policy.json'
+uv run python -m cchp_physical_env eval --checkpoint $ckpt --seed $seed
+
+# (3) deep sequence: MLP/Transformer/Mamba (PPO-style)
+$adapters = 'mlp','transformer','mamba'
+foreach ($adapter in $adapters) {
+  uv run python -m cchp_physical_env train `
+    --policy sequence_rule `
+    --sequence-adapter $adapter `
+    --history-steps $K `
+    --episode-days $episodeDays `
+    --train-steps $trainSteps `
+    --batch-size 1024 `
+    --update-epochs 4 `
+    --lr 0.0003 `
+    --device auto `
+    --seed $seed
+
+  $runDir = Get-ChildItem runs -Directory | Sort-Object Name | Select-Object -Last 1
+  $ckpt = Join-Path $runDir.FullName 'checkpoints/baseline_policy.json'
+  uv run python -m cchp_physical_env eval --checkpoint $ckpt --seed $seed
+}
+uv run python -m cchp_physical_env collect
+```
+
+### 3) Tier-3 (recommended): multi-RL algorithm benchmark (SB3)
+
+```powershell
+$seeds = 40,41,42
+
+foreach ($seed in $seeds) {
+  uv run python -m cchp_physical_env sb3-train `
+    --algo sac `
+    --backbone transformer `
+    --history-steps 16 `
+    --total-timesteps 200000 `
+    --episode-days 14 `
+    --n-envs 1 `
+    --learning-rate 0.0003 `
+    --batch-size 256 `
+    --gamma 0.99 `
+    --device auto `
+    --seed $seed
+
+  $runDir = Get-ChildItem runs -Directory | Sort-Object Name | Select-Object -Last 1
+  $ckpt = Join-Path $runDir.FullName 'checkpoints/baseline_policy.json'
+  uv run python -m cchp_physical_env eval --checkpoint $ckpt --seed $seed
+}
+
+uv run python -m cchp_physical_env collect
+```
+
 ### 3) Run CLI (without `uv`)
 
 If you prefer plain `pip` + `python`:
