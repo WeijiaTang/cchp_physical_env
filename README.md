@@ -225,6 +225,19 @@ All runs are saved under `runs/<timestamp>_<mode>_<policy>/` (or sequence/SB3 va
 
 `eval --checkpoint .../checkpoints/...` will infer `run_dir` from checkpoint parent path.
 
+Paper-friendly eval exports (generated automatically on `eval`):
+
+- `eval/summary_flat.csv` (1-row flattened KPI table)
+- `eval/cost_breakdown.csv`, `eval/violation_counts.csv`, `eval/diagnostic_counts.csv`
+- `eval/step_log_light.csv` (drops per-step JSON fields, easier for plotting)
+- `eval/daily_agg.csv` (daily aggregation for curves/figures)
+
+Collect benchmark tables across runs:
+
+```bash
+uv run python -m cchp_physical_env collect
+```
+
 ## Config notes
 
 `src/cchp_physical_env/config/config.yaml` has two top-level blocks:

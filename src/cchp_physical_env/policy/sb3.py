@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 from ..core.data import EVAL_YEAR, TRAIN_YEAR, load_exogenous_data, make_episode_sampler
+from ..core.reporting import flatten_mapping, write_one_row_csv, write_paper_eval_artifacts
 from ..env.cchp_env import CCHPPhysicalEnv, EnvConfig
 
 try:
@@ -395,6 +396,14 @@ def train_sb3_policy(
     gym, _, PPO, SAC, TD3, DDPG, DummyVecEnv = _require_sb3_modules()
     del gym
 
+    try:
+        from stable_baselines3.common.logger import configure as sb3_configure_logger
+        from stable_baselines3.common.monitor import Monitor
+    except ModuleNotFoundError as error:  # pragma: no cover
+        raise ModuleNotFoundError(
+            "未检测到 stable-baselines3 训练日志模块。请确认已安装：uv pip install -e '.[sb3]'"
+        ) from error
+
     year = _extract_year(train_df)
     if year != TRAIN_YEAR:
         raise ValueError(f"训练必须使用 {TRAIN_YEAR}，当前年份 {year}")
@@ -420,7 +429,18 @@ def train_sb3_policy(
         )
         for idx in range(config.n_envs)
     ]
-    vec_env = DummyVecEnv(env_fns)
+    # 记录每个并行环境的 episode 回报/长度，便于论文复现实验曲线。
+    wrapped_env_fns = []
+    for idx, factory in enumerate(env_fns):
+        monitor_path = run_dir / "train" / f"monitor_env{idx}.csv"
+
+        def _make(mon_path=monitor_path, base_factory=factory):
+            env = base_factory()
+            return Monitor(env, filename=str(mon_path))
+
+        wrapped_env_fns.append(_make)
+
+    vec_env = DummyVecEnv(wrapped_env_fns)
 
     algo_cls = {"ppo": PPO, "sac": SAC, "td3": TD3, "ddpg": DDPG}[config.algo]
     policy_kwargs = _sb3_policy_kwargs_for_backbone(backbone=config.backbone)
@@ -445,6 +465,7 @@ def train_sb3_policy(
         policy_kwargs=policy_kwargs if policy_kwargs else None,
         verbose=1,
     )
+    model.set_logger(sb3_configure_logger(folder=str(run_dir / "train"), format_strings=["stdout", "csv"]))
     model.learn(total_timesteps=int(config.total_timesteps))
     model.save(str(model_path))
 
@@ -470,6 +491,7 @@ def train_sb3_policy(
     }
     checkpoint_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     train_summary_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    write_one_row_csv(run_dir / "train" / "summary_flat.csv", flatten_mapping(payload))
     return payload
 
 
@@ -548,7 +570,14 @@ def evaluate_sb3_policy(
         json.dumps(summary, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-    pd.DataFrame(step_rows).to_csv(output_run_dir / "eval" / "step_log.csv", index=False)
+    step_df = pd.DataFrame(step_rows)
+    step_df.to_csv(output_run_dir / "eval" / "step_log.csv", index=False)
+    write_paper_eval_artifacts(
+        output_run_dir / "eval",
+        summary=summary,
+        step_log=step_df,
+        dt_h=float(env_config.dt_hours),
+    )
     return summary
 
 
