@@ -9,6 +9,8 @@ env:
   dt_hours: 0.25 # 1/4小时
 
   # 约束模式与物理后端
+  # 提示：论文实验建议用 CLI 覆盖该字段，避免频繁复制 YAML：
+  #   uv run python -m cchp_physical_env train --constraint-mode reward_only ...
   constraint_mode: physics_in_loop
   physics_backend: tespy
 
