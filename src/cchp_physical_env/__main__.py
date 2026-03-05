@@ -5,6 +5,7 @@ CLI 入口：数据校验、训练、评估、标定、消融。
 本模块是 `python -m cchp_physical_env` 的主入口，职责包括：
 - 解析 CLI 参数与环境配置文件（config.yaml）
 - 路由到不同子命令（summary/train/eval/sb3-train/sb3-eval/calibrate/ablation）
+  - 也支持 collect：扫描 runs 下的 eval 结果并汇总为论文表格 CSV
 - 协调数据加载、环境构建、策略训练与评估
 
 参数优先级（从高到低）：
@@ -45,6 +46,7 @@ from .pipeline.calibration import (
     validate_calibration_config,
 )
 from .pipeline.ablation import run_constraint_ablation
+from .pipeline.collect import write_benchmark_tables
 from .pipeline.sequence import SUPPORTED_SEQUENCE_ADAPTERS
 from .pipeline.runner import evaluate_baseline, train_baseline
 from .policy.sb3 import SB3TrainConfig, evaluate_sb3_policy, train_sb3_policy
@@ -440,6 +442,18 @@ def _command_ablation(args: argparse.Namespace) -> None:
     print(json.dumps(output, indent=2, ensure_ascii=False))
 
 
+def _command_collect(args: argparse.Namespace) -> None:
+    """
+    collect 子命令：扫描 runs/ 下的 eval/summary.json，汇总为论文表格 CSV（Task-011）。
+    """
+    result = write_benchmark_tables(
+        runs_root=args.runs_root,
+        output_csv=args.output,
+        full_output_csv=args.full_output,
+    )
+    print(json.dumps({"mode": "collect", **result}, indent=2, ensure_ascii=False))
+
+
 def build_parser() -> argparse.ArgumentParser:
     """
     构建 CLI 参数解析器。
@@ -452,6 +466,7 @@ def build_parser() -> argparse.ArgumentParser:
     - sb3-eval: 显式调用 SB3 评估
     - calibrate: 物理参数标定搜索
     - ablation: 约束方式消融实验
+    - collect: 汇总 runs 下的 eval 结果到论文表格 CSV
     """
     parser = argparse.ArgumentParser(
         prog="python -m cchp_physical_env",
@@ -646,6 +661,21 @@ def build_parser() -> argparse.ArgumentParser:
     ablation_parser.add_argument("--run-root", type=Path, default=Path("runs"))
     ablation_parser.add_argument("--params", type=Path, default=None, help="可选参数覆盖 JSON")
 
+    collect_parser = subparsers.add_parser("collect", help="汇总 runs 下的 eval 结果到论文表格 CSV（Task-011）。")
+    collect_parser.add_argument("--runs-root", type=Path, default=Path("runs"))
+    collect_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("runs/paper/benchmark_summary.csv"),
+        help="精选列输出 CSV（论文表格友好）。",
+    )
+    collect_parser.add_argument(
+        "--full-output",
+        type=Path,
+        default=Path("runs/paper/benchmark_summary_full.csv"),
+        help="全量列输出 CSV（便于二次筛选）。",
+    )
+
     return parser
 
 
@@ -674,6 +704,9 @@ def main() -> None:
         return
     if command == "ablation":
         _command_ablation(args)
+        return
+    if command == "collect":
+        _command_collect(args)
         return
     raise ValueError(f"未知命令: {command}")
 

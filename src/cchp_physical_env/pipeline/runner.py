@@ -17,6 +17,7 @@ from ..core.data import (
     dump_statistics_json,
     make_episode_sampler,
 )
+from ..core.reporting import write_paper_eval_artifacts
 from ..env.cchp_env import CCHPPhysicalEnv, EnvConfig
 from .sequence import SUPPORTED_SEQUENCE_ADAPTERS, SequenceRulePolicy
 
@@ -371,5 +372,12 @@ def evaluate_baseline(
         json.dumps(summary, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-    pd.DataFrame(step_rows).to_csv(output_run_dir / "eval" / "step_log.csv", index=False)
+    step_df = pd.DataFrame(step_rows)
+    step_df.to_csv(output_run_dir / "eval" / "step_log.csv", index=False)
+    write_paper_eval_artifacts(
+        output_run_dir / "eval",
+        summary=summary,
+        step_log=step_df,
+        dt_h=float(config.dt_hours),
+    )
     return summary

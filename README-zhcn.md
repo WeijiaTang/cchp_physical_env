@@ -231,6 +231,19 @@ uv run python -m cchp_physical_env sb3-eval `
 
 `eval --checkpoint .../checkpoints/...` 会自动从 checkpoint 路径反推 `run_dir`。
 
+论文作图/写作友好的 eval 额外导出（`eval` 自动生成）：
+
+- `eval/summary_flat.csv`（一行扁平化指标表，便于跨 run 汇总）
+- `eval/cost_breakdown.csv`、`eval/violation_counts.csv`、`eval/diagnostic_counts.csv`
+- `eval/step_log_light.csv`（去掉逐步 JSON 字段，更适合画曲线）
+- `eval/daily_agg.csv`（按日聚合，更适合论文图表）
+
+跨 runs 汇总论文表格：
+
+```bash
+uv run python -m cchp_physical_env collect
+```
+
 ## 配置说明
 
 `src/cchp_physical_env/config/config.yaml` 顶层分两段：
