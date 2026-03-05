@@ -80,7 +80,11 @@ class EnvConfig:
     grid_import_cap_mw: float
     grid_export_cap_mw: float
     sell_price_ratio: float
+    sell_price_cap_per_mwh: float
     penalty_curtail_per_mwh: float
+    penalty_export_per_mwh: float
+    grid_export_soft_cap_mw: float
+    penalty_export_over_soft_cap_per_mwh: float
 
     gt_emission_ton_per_mwh_th: float
     boiler_emission_ton_per_mwh_th: float
@@ -299,6 +303,8 @@ class CCHPPhysicalEnv:
         row = self.episode_df.iloc[self.current_step]
         t_amb_k = float(row["t_amb_k"])
         is_physics_mode = self._is_physics_in_loop()
+        t_hot_k = float(self.thermal_storage.hot_water_temperature_k())
+        e_tes_mwh = float(self.thermal_storage.energy_mwh)
 
         # 说明：约束求解器需要一个“线性化的可用热量输入”（HRSG 回收热量）。
         # 这里先用当前 action 的 GT 目标做一次快速离线求解，得到 HRSG 的近似可用热量，
@@ -375,7 +381,7 @@ class CCHPPhysicalEnv:
             q_drive_alloc = min(q_drive_req, max(0.0, heat_after_heating))
             abs_result = self.abs_chiller.solve(
                 q_drive_request_mw=q_drive_alloc,
-                t_hot_k=self.thermal_storage.hot_water_temperature_k(),
+                t_hot_k=t_hot_k,
             )
             heat_after_drive = heat_after_heating - abs_result.q_drive_used_mw
 
@@ -392,7 +398,7 @@ class CCHPPhysicalEnv:
             # heat_overcommit_flag 用于标记这种“热侧超配”，供奖励/诊断使用。
             abs_result = self.abs_chiller.solve(
                 q_drive_request_mw=q_drive_req,
-                t_hot_k=self.thermal_storage.hot_water_temperature_k(),
+                t_hot_k=t_hot_k,
             )
             tes_result = self.thermal_storage.apply(
                 charge_request_mw=tes_charge_req,
@@ -457,6 +463,10 @@ class CCHPPhysicalEnv:
         # 仅 reward_only 下记录 heat_overcommit：physics_in_loop 已按分配策略避免该情况。
         violation_flags["heat_overcommit_reward_only"] = (not is_physics_mode) and heat_overcommit_flag
 
+        diagnostic_flags: dict[str, bool] = {
+            "abs_drive_temp_low_state": t_hot_k < float(self.abs_chiller.design.t_drive_min_k),
+        }
+
         violation_count = sum(1 for flag in violation_flags.values() if flag)
         cost_breakdown = compute_cost_breakdown(
             dt_h=dt_h,
@@ -481,9 +491,23 @@ class CCHPPhysicalEnv:
         boiler_started = int((not self.boiler_prev_on) and (boiler_result.q_heat_mw > 1e-9))
         ech_started = int((not self.ech_prev_on) and (ech_result.q_cool_mw > 1e-9))
 
+        sell_price_raw = float(row["price_e"]) * float(self.config.sell_price_ratio)
+        sell_price = (
+            min(sell_price_raw, float(self.config.sell_price_cap_per_mwh))
+            if float(self.config.sell_price_cap_per_mwh) > 0.0
+            else sell_price_raw
+        )
+        grid_export_over_soft_cap_mw = max(
+            0.0, float(grid_balance["grid_export_mw"]) - float(self.config.grid_export_soft_cap_mw)
+        )
+
         step_info = {
             "timestamp": pd.to_datetime(row["timestamp"]).isoformat(),
             "cost_total": float(cost_breakdown.cost_total),
+            "cost_grid_import": float(cost_breakdown.cost_grid_import),
+            "cost_grid_export_revenue": float(cost_breakdown.cost_grid_export_revenue),
+            "cost_grid_curtail": float(cost_breakdown.cost_grid_curtail),
+            "cost_grid_export_penalty": float(cost_breakdown.cost_grid_export_penalty),
             "cost_grid": float(cost_breakdown.cost_grid),
             "cost_gt_fuel": float(cost_breakdown.cost_gt_fuel),
             "cost_gt_om": float(cost_breakdown.cost_gt_om),
@@ -497,12 +521,16 @@ class CCHPPhysicalEnv:
             "fuel_input_gt_mw_raw": float(gt_result.fuel_input_mw),
             "fuel_input_gt_effective_mw": float(fuel_input_gt_effective_mw),
             "fuel_input_gt_startup_extra_mw": float(startup_extra_fuel_mw),
+            "t_tes_hot_k": float(t_hot_k),
+            "e_tes_mwh": float(e_tes_mwh),
             "energy_demand_e_mwh": float(float(row["p_dem_mw"]) * dt_h),
             "energy_demand_h_mwh": float(qh_demand_mw * dt_h),
             "energy_demand_c_mwh": float(qc_demand_mw * dt_h),
             "energy_unmet_e_mwh": float(grid_balance["p_unmet_e_mw"] * dt_h),
             "energy_unmet_h_mwh": float(qh_unmet_mw * dt_h),
             "energy_unmet_c_mwh": float(qc_unmet_mw * dt_h),
+            "price_e_buy": float(row["price_e"]),
+            "price_e_sell": float(sell_price),
             "p_gt_mw": float(p_gt_mw),
             "p_gt_target_mw": float(solver_result["p_gt_target_mw"]),
             "p_gt_applied_mw": float(solver_result["p_gt_applied_mw"]),
@@ -512,6 +540,7 @@ class CCHPPhysicalEnv:
             "p_re_mw": float(p_re_mw),
             "p_grid_import_mw": float(grid_balance["grid_import_mw"]),
             "p_grid_export_mw": float(grid_balance["grid_export_mw"]),
+            "p_grid_export_over_soft_cap_mw": float(grid_export_over_soft_cap_mw),
             "p_ech_mw": float(ech_result.p_electric_mw),
             "q_hrsg_rec_mw": float(hrsg_result.q_rec_mw),
             "q_boiler_mw": float(boiler_result.q_heat_mw),
@@ -527,6 +556,7 @@ class CCHPPhysicalEnv:
             "solver_termination": str(solver_result["solver_termination"]),
             "solver_error": solver_result["solver_error"],
             "violation_flags": violation_flags,
+            "diagnostic_flags": diagnostic_flags,
             "gt_started": gt_started,
             "boiler_started": boiler_started,
             "ech_started": ech_started,

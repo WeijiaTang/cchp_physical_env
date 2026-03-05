@@ -80,6 +80,7 @@ def load_policy_predictor(
     n_features = int(metadata["n_features"])
     n_actions = int(metadata["n_actions"])
     model_kwargs = dict(metadata.get("model_kwargs", {}))
+    model_kwargs.setdefault("history_steps", int(metadata.get("history_steps", 0)))
     action_keys = tuple(metadata.get("action_keys", DEFAULT_SEQUENCE_ACTION_KEYS))
 
     model = build_policy_network(

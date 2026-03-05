@@ -29,6 +29,7 @@ from .pipeline.calibration import (
 from .pipeline.ablation import run_constraint_ablation
 from .pipeline.sequence import SUPPORTED_SEQUENCE_ADAPTERS
 from .pipeline.runner import evaluate_baseline, train_baseline
+from .policy.sb3 import SB3TrainConfig, evaluate_sb3_policy, train_sb3_policy
 
 DEFAULT_TRAIN_PATH = Path("data/processed/cchp_main_15min_2024.csv")
 DEFAULT_EVAL_PATH = Path("data/processed/cchp_main_15min_2025.csv")
@@ -45,6 +46,13 @@ TRAINING_OPTION_KEYS = (
     "update_epochs",
     "lr",
     "device",
+    "sb3_enabled",
+    "sb3_algo",
+    "sb3_total_timesteps",
+    "sb3_n_envs",
+    "sb3_learning_rate",
+    "sb3_batch_size",
+    "sb3_gamma",
 )
 
 
@@ -92,9 +100,29 @@ def _command_train(args: argparse.Namespace) -> None:
     env_overrides = load_env_overrides(_resolve_env_config_path(args))
     env_config = build_env_config_from_overrides(env_overrides)
     training_options = _resolve_training_options(args)
+    if bool(training_options.get("sb3_enabled", False)):
+        config = SB3TrainConfig(
+            algo=training_options["sb3_algo"],
+            total_timesteps=training_options["sb3_total_timesteps"],
+            episode_days=training_options["episode_days"],
+            n_envs=training_options["sb3_n_envs"],
+            learning_rate=training_options["sb3_learning_rate"],
+            batch_size=training_options["sb3_batch_size"],
+            gamma=training_options["sb3_gamma"],
+            seed=training_options["seed"],
+            device=training_options["device"],
+        )
+        result = train_sb3_policy(
+            train_df=train_df,
+            env_config=env_config,
+            config=config,
+            run_root=args.run_root,
+        )
+        print(json.dumps({"mode": "train", "train_year": TRAIN_YEAR, "policy": "sb3", **result}, indent=2, ensure_ascii=False))
+        return
     if (
         training_options["policy"] == "sequence_rule"
-        and training_options["sequence_adapter"] in {"transformer", "mamba"}
+        and training_options["sequence_adapter"] in {"mlp", "transformer", "mamba"}
     ):
         from .policy.trainer import SequenceTrainerConfig, train_sequence_policy
 
@@ -168,6 +196,29 @@ def _command_eval(args: argparse.Namespace) -> None:
     env_config = build_env_config_from_overrides(env_overrides)
     training_options = _resolve_training_options(args)
 
+    if args.checkpoint is not None:
+        try:
+            checkpoint_payload = json.loads(Path(args.checkpoint).read_text(encoding="utf-8"))
+        except Exception:
+            checkpoint_payload = {}
+        if isinstance(checkpoint_payload, dict) and checkpoint_payload.get("artifact_type") == "sb3_policy":
+            if args.run_dir is None:
+                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                run_dir = Path("runs") / f"{stamp}_eval_sb3_auto"
+            else:
+                run_dir = Path(args.run_dir)
+            summary = evaluate_sb3_policy(
+                eval_df=eval_df,
+                env_config=env_config,
+                checkpoint_json=args.checkpoint,
+                run_dir=run_dir,
+                seed=training_options["seed"],
+                deterministic=True,
+                device=training_options["device"],
+            )
+            print(json.dumps({"mode": "eval", "eval_year": EVAL_YEAR, "run_dir": str(run_dir), "summary": summary}, indent=2, ensure_ascii=False))
+            return
+
     if args.run_dir is not None:
         run_dir = Path(args.run_dir)
     elif args.checkpoint is not None:
@@ -190,6 +241,46 @@ def _command_eval(args: argparse.Namespace) -> None:
     output = {"mode": "eval", "eval_year": EVAL_YEAR, "run_dir": str(run_dir), "summary": summary}
     print(json.dumps(output, indent=2, ensure_ascii=False))
 
+
+def _command_sb3_train(args: argparse.Namespace) -> None:
+    train_df = load_exogenous_data(args.train_path)
+    env_overrides = load_env_overrides(_resolve_env_config_path(args))
+    env_config = build_env_config_from_overrides(env_overrides)
+
+    config = SB3TrainConfig(
+        algo=args.algo,
+        total_timesteps=args.total_timesteps,
+        episode_days=args.episode_days,
+        n_envs=args.n_envs,
+        learning_rate=args.learning_rate,
+        batch_size=args.batch_size,
+        gamma=args.gamma,
+        seed=args.seed,
+        device=args.device,
+    )
+    result = train_sb3_policy(
+        train_df=train_df,
+        env_config=env_config,
+        config=config,
+        run_root=args.run_root,
+    )
+    print(json.dumps({"mode": "sb3_train", **result}, indent=2, ensure_ascii=False))
+
+
+def _command_sb3_eval(args: argparse.Namespace) -> None:
+    eval_df = load_exogenous_data(args.eval_path)
+    env_overrides = load_env_overrides(_resolve_env_config_path(args))
+    env_config = build_env_config_from_overrides(env_overrides)
+    summary = evaluate_sb3_policy(
+        eval_df=eval_df,
+        env_config=env_config,
+        checkpoint_json=args.checkpoint,
+        run_dir=args.run_dir,
+        seed=args.seed,
+        deterministic=not args.stochastic,
+        device=args.device,
+    )
+    print(json.dumps({"mode": "sb3_eval", "run_dir": str(args.run_dir), "summary": summary}, indent=2, ensure_ascii=False))
 
 def _command_calibrate(args: argparse.Namespace) -> None:
     train_df = load_exogenous_data(args.train_path)
@@ -295,6 +386,18 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--update-epochs", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument("--device", type=str, default=argparse.SUPPRESS)
     train_parser.add_argument("--seed", type=int, default=argparse.SUPPRESS)
+    train_parser.add_argument(
+        "--sb3-enabled",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="启用 SB3 多算法训练（否则走 baseline/sequence trainer）。",
+    )
+    train_parser.add_argument("--sb3-algo", type=str, default=argparse.SUPPRESS, choices=["ppo", "sac", "td3", "ddpg"])
+    train_parser.add_argument("--sb3-total-timesteps", type=int, default=argparse.SUPPRESS)
+    train_parser.add_argument("--sb3-n-envs", type=int, default=argparse.SUPPRESS)
+    train_parser.add_argument("--sb3-learning-rate", type=float, default=argparse.SUPPRESS)
+    train_parser.add_argument("--sb3-batch-size", type=int, default=argparse.SUPPRESS)
+    train_parser.add_argument("--sb3-gamma", type=float, default=argparse.SUPPRESS)
 
     eval_parser = subparsers.add_parser("eval", help="运行 baseline 评估（固定 2025）。")
     eval_parser.add_argument("--run-dir", type=Path, default=None)
@@ -318,6 +421,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     eval_parser.add_argument("--device", type=str, default=argparse.SUPPRESS)
     eval_parser.add_argument("--seed", type=int, default=argparse.SUPPRESS)
+
+    sb3_train_parser = subparsers.add_parser("sb3-train", help="用 SB3 训练 PPO/SAC/TD3/DDPG（Task-011，可选依赖）。")
+    sb3_train_parser.add_argument("--run-root", type=Path, default=Path("runs"))
+    sb3_train_parser.add_argument("--algo", type=str, choices=["ppo", "sac", "td3", "ddpg"], default="ppo")
+    sb3_train_parser.add_argument("--total-timesteps", type=int, default=200_000)
+    sb3_train_parser.add_argument("--episode-days", type=int, default=14)
+    sb3_train_parser.add_argument("--n-envs", type=int, default=1)
+    sb3_train_parser.add_argument("--learning-rate", type=float, default=3e-4)
+    sb3_train_parser.add_argument("--batch-size", type=int, default=256)
+    sb3_train_parser.add_argument("--gamma", type=float, default=0.99)
+    sb3_train_parser.add_argument("--device", type=str, default="auto")
+    sb3_train_parser.add_argument("--seed", type=int, default=42)
+    sb3_train_parser.add_argument(
+        "--env-config",
+        type=Path,
+        default=argparse.SUPPRESS,
+        help="环境参数配置文件路径（支持放在子命令后）。",
+    )
+
+    sb3_eval_parser = subparsers.add_parser("sb3-eval", help="用 SB3 checkpoint 跑 2025 年评估（Task-011）。")
+    sb3_eval_parser.add_argument("--run-dir", type=Path, required=True)
+    sb3_eval_parser.add_argument("--checkpoint", type=Path, required=True, help="sb3-train 产出的 baseline_policy.json")
+    sb3_eval_parser.add_argument("--device", type=str, default="auto")
+    sb3_eval_parser.add_argument("--seed", type=int, default=42)
+    sb3_eval_parser.add_argument("--stochastic", action="store_true", help="使用随机动作采样（默认 deterministic）。")
+    sb3_eval_parser.add_argument(
+        "--env-config",
+        type=Path,
+        default=argparse.SUPPRESS,
+        help="环境参数配置文件路径（支持放在子命令后）。",
+    )
 
     calibrate_parser = subparsers.add_parser("calibrate", help="运行物理参数标定搜索（Task-002）。")
     calibrate_parser.add_argument(
@@ -388,6 +522,12 @@ def main() -> None:
         return
     if command == "eval":
         _command_eval(args)
+        return
+    if command == "sb3-train":
+        _command_sb3_train(args)
+        return
+    if command == "sb3-eval":
+        _command_sb3_eval(args)
         return
     if command == "calibrate":
         _command_calibrate(args)

@@ -15,6 +15,8 @@ class KPITracker:
     energies_mwh: dict[str, float] = field(default_factory=dict)
     violation_counts: dict[str, int] = field(default_factory=dict)
     violation_step_count: int = 0
+    diagnostic_counts: dict[str, int] = field(default_factory=dict)
+    diagnostic_step_count: int = 0
     starts: dict[str, int] = field(default_factory=dict)
 
     def reset(self) -> None:
@@ -23,6 +25,10 @@ class KPITracker:
         self.total_cost = 0.0
         self.costs = {
             "grid": 0.0,
+            "grid_import": 0.0,
+            "grid_export_revenue": 0.0,
+            "grid_curtail": 0.0,
+            "grid_export_penalty": 0.0,
             "gt_fuel": 0.0,
             "gt_om": 0.0,
             "carbon": 0.0,
@@ -43,6 +49,8 @@ class KPITracker:
         }
         self.violation_counts = {}
         self.violation_step_count = 0
+        self.diagnostic_counts = {}
+        self.diagnostic_step_count = 0
         self.starts = {"gt": 0, "boiler": 0, "ech": 0}
 
     def record(self, reward: float, step_info: dict) -> None:
@@ -64,6 +72,14 @@ class KPITracker:
         if any_violation:
             self.violation_step_count += 1
 
+        any_diagnostic = False
+        for key, flag in step_info.get("diagnostic_flags", {}).items():
+            if flag:
+                self.diagnostic_counts[key] = self.diagnostic_counts.get(key, 0) + 1
+                any_diagnostic = True
+        if any_diagnostic:
+            self.diagnostic_step_count += 1
+
         for key in self.starts:
             self.starts[key] += int(step_info.get(f"{key}_started", 0))
 
@@ -73,6 +89,8 @@ class KPITracker:
         elec_demand = max(1e-9, self.energies_mwh["demand_e"])
         violation_total = int(sum(self.violation_counts.values()))
         violation_rate = float(self.violation_step_count / max(1, self.step_count))
+        diagnostic_total = int(sum(self.diagnostic_counts.values()))
+        diagnostic_rate = float(self.diagnostic_step_count / max(1, self.step_count))
 
         return {
             "step_count": int(self.step_count),
@@ -93,5 +111,9 @@ class KPITracker:
             "violation_step_count": int(self.violation_step_count),
             "violation_rate": violation_rate,
             "violation_counts": {key: int(value) for key, value in self.violation_counts.items()},
+            "diagnostic_total": diagnostic_total,
+            "diagnostic_step_count": int(self.diagnostic_step_count),
+            "diagnostic_rate": diagnostic_rate,
+            "diagnostic_counts": {key: int(value) for key, value in self.diagnostic_counts.items()},
             "starts": {key: int(value) for key, value in self.starts.items()},
         }

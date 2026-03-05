@@ -17,7 +17,7 @@ except ModuleNotFoundError:  # pragma: no cover
     MambaBlock = None
 
 
-SUPPORTED_POLICY_BACKBONES = ("transformer", "mamba")
+SUPPORTED_POLICY_BACKBONES = ("mlp", "transformer", "mamba")
 
 
 def _require_torch() -> None:
@@ -54,6 +54,49 @@ if torch is not None:
             mean = self.forward(window)
             std = torch.exp(self.log_std).clamp(min=1e-3, max=2.0).expand_as(mean)
             return torch.distributions.Normal(mean, std)
+
+    class MLPPolicyNet(SequencePolicyNetBase):
+        """MLP backbone：输入 (B,K,D) flatten 后输出 (B,A) 动作均值。"""
+
+        def __init__(
+            self,
+            *,
+            history_steps: int,
+            n_features: int,
+            n_actions: int,
+            hidden_sizes: tuple[int, ...] = (256, 256, 256),
+            dropout: float = 0.0,
+        ) -> None:
+            super().__init__(n_features=n_features, n_actions=n_actions)
+            if history_steps <= 0:
+                raise ValueError("history_steps 必须 > 0。")
+            self.history_steps = int(history_steps)
+            input_dim = int(self.history_steps * self.n_features)
+
+            layers: list[nn.Module] = []
+            prev = input_dim
+            for width in hidden_sizes:
+                width_int = int(width)
+                if width_int <= 0:
+                    raise ValueError("hidden_sizes 中每个值必须 > 0。")
+                layers.append(nn.Linear(prev, width_int))
+                layers.append(nn.GELU())
+                if dropout > 0.0:
+                    layers.append(nn.Dropout(float(dropout)))
+                prev = width_int
+            layers.append(nn.Linear(prev, self.n_actions))
+            self.net = nn.Sequential(*layers)
+
+        def forward(self, window: Tensor) -> Tensor:
+            if window.dim() != 3:
+                raise ValueError("MLPPolicyNet 输入必须是 3D 张量 (B,K,D)。")
+            if int(window.shape[1]) != self.history_steps:
+                raise ValueError(
+                    f"history_steps 不匹配：模型={self.history_steps}，输入={int(window.shape[1])}"
+                )
+            flat = window.reshape(window.shape[0], -1)
+            action_mean = torch.tanh(self.net(flat))
+            return action_mean
 
 
     class TransformerPolicyNet(SequencePolicyNetBase):
@@ -152,6 +195,10 @@ else:
         pass
 
 
+    class MLPPolicyNet(SequencePolicyNetBase):  # pragma: no cover
+        pass
+
+
 def build_policy_network(
     *,
     policy_backbone: str,
@@ -164,6 +211,13 @@ def build_policy_network(
     _require_torch()
     kwargs = dict(model_kwargs or {})
     normalized = policy_backbone.strip().lower()
+    if normalized == "mlp":
+        if "history_steps" not in kwargs:
+            raise ValueError("mlp backbone 需要在 model_kwargs 中提供 history_steps。")
+        history_steps = int(kwargs.pop("history_steps"))
+        return MLPPolicyNet(
+            history_steps=history_steps, n_features=n_features, n_actions=n_actions, **kwargs
+        )
     if normalized == "transformer":
         return TransformerPolicyNet(
             n_features=n_features, n_actions=n_actions, **kwargs

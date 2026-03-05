@@ -31,6 +31,14 @@ TRAINING_DEFAULTS: dict[str, Any] = {
     "update_epochs": 4,
     "lr": 3e-4,
     "device": "auto",
+    # Task-011：可选 SB3 多算法（SAC/TD3/DDPG/PPO）
+    "sb3_enabled": False,
+    "sb3_algo": "ppo",
+    "sb3_total_timesteps": 200_000,
+    "sb3_n_envs": 1,
+    "sb3_learning_rate": 3e-4,
+    "sb3_batch_size": 256,
+    "sb3_gamma": 0.99,
 }
 
 # env 参数校验规则表：
@@ -50,6 +58,26 @@ ENV_STRIP_STRING_KEYS = {"pyomo_solver"}
 ENV_BOOL_KEYS = {"bes_dod_add_calendar_age"}
 # 数值范围规则：仅对需要额外范围约束的字段登记，其余数值字段只做“类型 + finite”校验。
 ENV_NUMERIC_RULES: dict[str, tuple[Callable[[float], bool], str]] = {
+    "sell_price_ratio": (
+        lambda value: 0.0 <= value <= 1.0,
+        "sell_price_ratio 必须在 [0,1]。",
+    ),
+    "sell_price_cap_per_mwh": (
+        lambda value: value >= 0.0,
+        "sell_price_cap_per_mwh 必须 >= 0（0 表示不封顶）。",
+    ),
+    "penalty_export_per_mwh": (
+        lambda value: value >= 0.0,
+        "penalty_export_per_mwh 必须 >= 0。",
+    ),
+    "grid_export_soft_cap_mw": (
+        lambda value: value >= 0.0,
+        "grid_export_soft_cap_mw 必须 >= 0。",
+    ),
+    "penalty_export_over_soft_cap_per_mwh": (
+        lambda value: value >= 0.0,
+        "penalty_export_over_soft_cap_per_mwh 必须 >= 0。",
+    ),
     "bes_self_discharge_per_hour": (
         lambda value: 0.0 <= value <= 1.0,
         "bes_self_discharge_per_hour 必须在 [0,1]。",
@@ -205,6 +233,7 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
     if unknown:
         raise ValueError(f"`training` 包含未知参数: {unknown}")
 
+    bool_keys = {"sb3_enabled"}
     int_keys = {
         "seed",
         "history_steps",
@@ -213,11 +242,22 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
         "train_steps",
         "batch_size",
         "update_epochs",
+        "sb3_total_timesteps",
+        "sb3_n_envs",
+        "sb3_batch_size",
     }
     for key, value in overrides.items():
         if key in {"policy", "sequence_adapter", "device"}:
             if len(str(value).strip()) == 0:
                 raise ValueError(f"{key} 不能为空。")
+            continue
+        if key in {"sb3_algo"}:
+            if len(str(value).strip()) == 0:
+                raise ValueError("sb3_algo 不能为空。")
+            continue
+        if key in bool_keys:
+            if not isinstance(value, bool):
+                raise ValueError(f"{key} 必须是布尔值（true/false）。")
             continue
         if key in int_keys:
             if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -225,11 +265,18 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
             if int(value) <= 0 and key != "seed":
                 raise ValueError(f"{key} 必须 > 0。")
             continue
-        if key == "lr":
+        if key in {"lr", "sb3_learning_rate"}:
             if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise ValueError("lr 必须是数值类型。")
+                raise ValueError(f"{key} 必须是数值类型。")
             if float(value) <= 0.0:
-                raise ValueError("lr 必须 > 0。")
+                raise ValueError(f"{key} 必须 > 0。")
+            continue
+        if key == "sb3_gamma":
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError("sb3_gamma 必须是数值类型。")
+            numeric = float(value)
+            if not (0.0 < numeric <= 1.0):
+                raise ValueError("sb3_gamma 必须在 (0,1]。")
             continue
 
     policy = str(overrides.get("policy", TRAINING_DEFAULTS["policy"])).strip().lower()
@@ -238,11 +285,15 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
     sequence_adapter = str(
         overrides.get("sequence_adapter", TRAINING_DEFAULTS["sequence_adapter"])
     ).strip().lower()
-    if sequence_adapter not in {"rule", "transformer", "mamba"}:
-        raise ValueError("training.sequence_adapter 仅支持 rule/transformer/mamba。")
+    if sequence_adapter not in {"rule", "mlp", "transformer", "mamba"}:
+        raise ValueError("training.sequence_adapter 仅支持 rule/mlp/transformer/mamba。")
     device = str(overrides.get("device", TRAINING_DEFAULTS["device"])).strip().lower()
     if device not in {"auto", "cpu", "cuda"} and not device.startswith("cuda:"):
         raise ValueError("training.device 仅支持 auto/cpu/cuda/cuda:<index>。")
+
+    sb3_algo = str(overrides.get("sb3_algo", TRAINING_DEFAULTS["sb3_algo"])).strip().lower()
+    if sb3_algo not in {"ppo", "sac", "td3", "ddpg"}:
+        raise ValueError("training.sb3_algo 仅支持 ppo/sac/td3/ddpg。")
 
 
 def build_training_options(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -263,4 +314,11 @@ def build_training_options(overrides: dict[str, Any] | None = None) -> dict[str,
     normalized["policy"] = str(normalized["policy"]).strip().lower()
     normalized["sequence_adapter"] = str(normalized["sequence_adapter"]).strip().lower()
     normalized["device"] = str(normalized["device"]).strip().lower()
+    normalized["sb3_enabled"] = bool(normalized["sb3_enabled"])
+    normalized["sb3_algo"] = str(normalized["sb3_algo"]).strip().lower()
+    normalized["sb3_total_timesteps"] = int(normalized["sb3_total_timesteps"])
+    normalized["sb3_n_envs"] = int(normalized["sb3_n_envs"])
+    normalized["sb3_learning_rate"] = float(normalized["sb3_learning_rate"])
+    normalized["sb3_batch_size"] = int(normalized["sb3_batch_size"])
+    normalized["sb3_gamma"] = float(normalized["sb3_gamma"])
     return normalized
