@@ -1,4 +1,4 @@
-English[README-en.md](README.md)|中文[README-zhcn.md](README-zhcn.md)|
+[README-en.md](README.md) | [README-zhcn.md](README-zhcn.md)|
 # CCHP（冷热电三联供）+ 新能源调度研究仓库
 
 本仓库提供一个 **Python** CCHP 物理环境（电-热-冷耦合）以及最小化的 CLI 训练/评估流程，用于可复现实验与研究对比。
