@@ -3,7 +3,7 @@ name = "cchp"
 version = "0.1.0"
 description = "cchp"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.9"
 dependencies = [
   "numpy>=1.26",
   "pandas>=2.2",
