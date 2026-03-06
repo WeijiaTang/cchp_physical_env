@@ -214,8 +214,7 @@ python -m venv .venv
 ```
 
 ```bash
-# PowerShell
-.\.venv\Scripts\Activate.ps1
+source .venv/bin/activate
 pip install -e .
 python -m cchp_physical_env --help
 ```
@@ -223,7 +222,7 @@ python -m cchp_physical_env --help
 If you want to explicitly specify the config path:
 
 ```bash
-uv run python -m cchp_physical_env summary --env-config src/cchp_physical_env/config/config.yaml
+python -m cchp_physical_env summary --env-config src/cchp_physical_env/config/config.yaml
 ```
 
 ## CLI commands
@@ -236,7 +235,7 @@ uv run python -m cchp_physical_env summary --env-config src/cchp_physical_env/co
 - `sb3-train`: run optional Stable-Baselines3 training (`ppo`/`sac`/`td3`/`ddpg`)
 - `sb3-eval`: evaluate a Stable-Baselines3 checkpoint run
 
-Run `uv run python -m cchp_physical_env --help` to see all options.
+Run `python -m cchp_physical_env --help` to see all options.
 
 ## Policy / algorithm selection
 
@@ -335,7 +334,7 @@ Supported SB3 algorithms: `ppo`, `sac`, `td3`, `ddpg`.
 If you are running on a remote Ubuntu server via SSH and want to run long experiments in the background (no `uv`), install the package in a venv first:
 
 ```bash
-python3 -m venv .venv
+python -m venv .venv
 source .venv/bin/activate
 pip install -e '.[sb3]'
 # Install torch separately (CPU/CUDA wheel depends on your machine).
@@ -344,9 +343,11 @@ pip install -e '.[sb3]'
 Then run a paper-grade long training job with `nohup` (example: **SAC + Transformer**, ~millions of steps). This will automatically run `eval` and then `collect`:
 
 ```bash
-set -euo pipefail
 mkdir -p logs
+nohup bash -c '
+set -euo pipefail
 
+PYTHON=python
 SEED=42
 MODE=physics_in_loop
 K=16
@@ -354,40 +355,39 @@ EPISODE_DAYS=14
 TIMESTEPS=2000000
 RUN_ROOT=runs/vps
 
-nohup bash -lc "
-python -m cchp_physical_env sb3-train \\
-  --algo sac \\
-  --backbone transformer \\
-  --history-steps \${K} \\
-  --total-timesteps \${TIMESTEPS} \\
-  --episode-days \${EPISODE_DAYS} \\
-  --n-envs 1 \\
-  --learning-rate 0.0003 \\
-  --batch-size 256 \\
-  --gamma 0.99 \\
-  --device auto \\
-  --constraint-mode \${MODE} \\
-  --seed \${SEED} \\
-  --run-root \${RUN_ROOT} ;
+${PYTHON} -m cchp_physical_env sb3-train \
+  --algo sac \
+  --backbone transformer \
+  --history-steps ${K} \
+  --total-timesteps ${TIMESTEPS} \
+  --episode-days ${EPISODE_DAYS} \
+  --n-envs 1 \
+  --learning-rate 0.0003 \
+  --batch-size 256 \
+  --gamma 0.99 \
+  --device cuda \
+  --constraint-mode ${MODE} \
+  --seed ${SEED} \
+  --run-root ${RUN_ROOT}
 
-run_dir=\\\$(ls -1dt \${RUN_ROOT}/*/ | head -n 1) ;
-ckpt=\\\${run_dir%/}/checkpoints/baseline_policy.json ;
+run_dir="$(ls -1dt ${RUN_ROOT}/*/ | head -n 1)"
+ckpt="${run_dir%/}/checkpoints/baseline_policy.json"
 
-python -m cchp_physical_env eval \\
-  --checkpoint \"\\\$ckpt\" \\
-  --constraint-mode \${MODE} \\
-  --seed \${SEED} ;
+${PYTHON} -m cchp_physical_env eval \
+  --checkpoint "$ckpt" \
+  --constraint-mode ${MODE} \
+  --seed ${SEED}
 
-python -m cchp_physical_env collect
-" > logs/sb3_sac_transformer_\${MODE}_k\${K}_t\${TIMESTEPS}_seed\${SEED}.out 2>&1 &
+${PYTHON} -m cchp_physical_env collect --runs-root ${RUN_ROOT}
+' > logs/launch_seed42.out 2>&1 &
 
-echo \$! > logs/sb3_sac_transformer_\${MODE}_seed\${SEED}.pid
+echo $! > logs/launch_seed42.pid
 ```
 
 Monitor:
 
 ```bash
-tail -f logs/sb3_sac_transformer_physics_in_loop_k16_t2000000_seed42.out
+tail -f logs/launch_seed42.out
 ```
 
 ## Training & evaluation flow
@@ -425,7 +425,7 @@ Paper-friendly eval exports (generated automatically on `eval`):
 Collect benchmark tables across runs:
 
 ```bash
-uv run python -m cchp_physical_env collect
+python -m cchp_physical_env collect
 ```
 
 ## Config notes
