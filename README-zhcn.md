@@ -206,6 +206,66 @@ uv run python -m cchp_physical_env sb3-eval `
 
 当前支持的 SB3 算法：`ppo`、`sac`、`td3`、`ddpg`。
 
+## Ubuntu VPS / SSH（仅 python，后台长训）
+
+如果你在 Ubuntu 服务器上通过 SSH 运行、且不使用 `uv`，建议先创建 venv 并安装依赖：
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e '.[sb3]'
+# torch 需按 CPU/CUDA 环境单独安装
+```
+
+然后用 `nohup` 跑“论文级长训”（示例：**SAC + Transformer**，百万级步数），训练结束自动 `eval` 再 `collect`：
+
+```bash
+set -euo pipefail
+mkdir -p logs
+
+SEED=42
+MODE=physics_in_loop
+K=16
+EPISODE_DAYS=14
+TIMESTEPS=2000000
+RUN_ROOT=runs/vps
+
+nohup bash -lc "
+python -m cchp_physical_env sb3-train \\
+  --algo sac \\
+  --backbone transformer \\
+  --history-steps \${K} \\
+  --total-timesteps \${TIMESTEPS} \\
+  --episode-days \${EPISODE_DAYS} \\
+  --n-envs 1 \\
+  --learning-rate 0.0003 \\
+  --batch-size 256 \\
+  --gamma 0.99 \\
+  --device auto \\
+  --constraint-mode \${MODE} \\
+  --seed \${SEED} \\
+  --run-root \${RUN_ROOT} ;
+
+run_dir=\\\$(ls -1dt \${RUN_ROOT}/*/ | head -n 1) ;
+ckpt=\\\${run_dir%/}/checkpoints/baseline_policy.json ;
+
+python -m cchp_physical_env eval \\
+  --checkpoint \"\\\$ckpt\" \\
+  --constraint-mode \${MODE} \\
+  --seed \${SEED} ;
+
+python -m cchp_physical_env collect
+" > logs/sb3_sac_transformer_\${MODE}_k\${K}_t\${TIMESTEPS}_seed\${SEED}.out 2>&1 &
+
+echo \$! > logs/sb3_sac_transformer_\${MODE}_seed\${SEED}.pid
+```
+
+监控：
+
+```bash
+tail -f logs/sb3_sac_transformer_physics_in_loop_k16_t2000000_seed42.out
+```
+
 ## 训练与评估流程
 
 - `summary`：读取两份年度 CSV，执行冻结 schema 校验，输出 JSON 摘要
@@ -284,51 +344,53 @@ uv run python -m cchp_physical_env collect
 ### 2) Tier-2（必做）：策略结构消融（rule / 启发式序列 / 深度序列骨干）
 
 ```powershell
-$seed = 42
+$seeds = 40,41,42
 $K = 16
 $episodeDays = 28
 $trainSteps = 409600
 
-# (1) rule
-uv run python -m cchp_physical_env train `
-  --policy rule `
-  --episodes 800 `
-  --episode-days 14 `
-  --seed $seed
-$runDir = Get-ChildItem runs -Directory | Sort-Object Name | Select-Object -Last 1
-$ckpt = Join-Path $runDir.FullName 'checkpoints/baseline_policy.json'
-uv run python -m cchp_physical_env eval --checkpoint $ckpt --seed $seed
-
-# (2) 启发式序列（需要 train_statistics 来确定阈值）
-uv run python -m cchp_physical_env train `
-  --policy sequence_rule `
-  --sequence-adapter rule `
-  --history-steps $K `
-  --episodes 800 `
-  --episode-days 14 `
-  --seed $seed
-$runDir = Get-ChildItem runs -Directory | Sort-Object Name | Select-Object -Last 1
-$ckpt = Join-Path $runDir.FullName 'checkpoints/baseline_policy.json'
-uv run python -m cchp_physical_env eval --checkpoint $ckpt --seed $seed
-
-# (3) 深度序列：MLP / Transformer / Mamba（PPO-style）
-$adapters = 'mlp','transformer','mamba'
-foreach ($adapter in $adapters) {
+foreach ($seed in $seeds) {
+  # (1) rule
   uv run python -m cchp_physical_env train `
-    --policy sequence_rule `
-    --sequence-adapter $adapter `
-    --history-steps $K `
-    --episode-days $episodeDays `
-    --train-steps $trainSteps `
-    --batch-size 1024 `
-    --update-epochs 4 `
-    --lr 0.0003 `
-    --device auto `
+    --policy rule `
+    --episodes 800 `
+    --episode-days 14 `
     --seed $seed
-
   $runDir = Get-ChildItem runs -Directory | Sort-Object Name | Select-Object -Last 1
   $ckpt = Join-Path $runDir.FullName 'checkpoints/baseline_policy.json'
   uv run python -m cchp_physical_env eval --checkpoint $ckpt --seed $seed
+
+  # (2) 启发式序列（需要 train_statistics 来确定阈值）
+  uv run python -m cchp_physical_env train `
+    --policy sequence_rule `
+    --sequence-adapter rule `
+    --history-steps $K `
+    --episodes 800 `
+    --episode-days 14 `
+    --seed $seed
+  $runDir = Get-ChildItem runs -Directory | Sort-Object Name | Select-Object -Last 1
+  $ckpt = Join-Path $runDir.FullName 'checkpoints/baseline_policy.json'
+  uv run python -m cchp_physical_env eval --checkpoint $ckpt --seed $seed
+
+  # (3) 深度序列：MLP / Transformer / Mamba（PPO-style）
+  $adapters = 'mlp','transformer','mamba'
+  foreach ($adapter in $adapters) {
+    uv run python -m cchp_physical_env train `
+      --policy sequence_rule `
+      --sequence-adapter $adapter `
+      --history-steps $K `
+      --episode-days $episodeDays `
+      --train-steps $trainSteps `
+      --batch-size 1024 `
+      --update-epochs 4 `
+      --lr 0.0003 `
+      --device auto `
+      --seed $seed
+
+    $runDir = Get-ChildItem runs -Directory | Sort-Object Name | Select-Object -Last 1
+    $ckpt = Join-Path $runDir.FullName 'checkpoints/baseline_policy.json'
+    uv run python -m cchp_physical_env eval --checkpoint $ckpt --seed $seed
+  }
 }
 
 uv run python -m cchp_physical_env collect
@@ -338,13 +400,14 @@ uv run python -m cchp_physical_env collect
 
 ```powershell
 $seeds = 40,41,42
+$totalTimesteps = 2000000  # 论文级预算（小时级）。快跑可用 200000。
 
 foreach ($seed in $seeds) {
   uv run python -m cchp_physical_env sb3-train `
     --algo sac `
     --backbone transformer `
     --history-steps 16 `
-    --total-timesteps 200000 `
+    --total-timesteps $totalTimesteps `
     --episode-days 14 `
     --n-envs 1 `
     --learning-rate 0.0003 `

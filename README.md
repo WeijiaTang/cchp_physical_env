@@ -126,51 +126,53 @@ Compare:
 - deep sequence backbones: `mlp` / `transformer` / `mamba` (PPO-style trainer)
 
 ```powershell
-$seed = 42
+$seeds = 40,41,42
 $K = 16
 $episodeDays = 28
 $trainSteps = 409600
 
-# (1) rule baseline
-uv run python -m cchp_physical_env train `
-  --policy rule `
-  --episodes 800 `
-  --episode-days 14 `
-  --seed $seed
-$runDir = Get-ChildItem runs -Directory | Sort-Object Name | Select-Object -Last 1
-$ckpt = Join-Path $runDir.FullName 'checkpoints/baseline_policy.json'
-uv run python -m cchp_physical_env eval --checkpoint $ckpt --seed $seed
-
-# (2) heuristic sequence baseline (needs train_statistics for thresholds)
-uv run python -m cchp_physical_env train `
-  --policy sequence_rule `
-  --sequence-adapter rule `
-  --history-steps $K `
-  --episodes 800 `
-  --episode-days 14 `
-  --seed $seed
-$runDir = Get-ChildItem runs -Directory | Sort-Object Name | Select-Object -Last 1
-$ckpt = Join-Path $runDir.FullName 'checkpoints/baseline_policy.json'
-uv run python -m cchp_physical_env eval --checkpoint $ckpt --seed $seed
-
-# (3) deep sequence: MLP/Transformer/Mamba (PPO-style)
-$adapters = 'mlp','transformer','mamba'
-foreach ($adapter in $adapters) {
+foreach ($seed in $seeds) {
+  # (1) rule baseline
   uv run python -m cchp_physical_env train `
-    --policy sequence_rule `
-    --sequence-adapter $adapter `
-    --history-steps $K `
-    --episode-days $episodeDays `
-    --train-steps $trainSteps `
-    --batch-size 1024 `
-    --update-epochs 4 `
-    --lr 0.0003 `
-    --device auto `
+    --policy rule `
+    --episodes 800 `
+    --episode-days 14 `
     --seed $seed
-
   $runDir = Get-ChildItem runs -Directory | Sort-Object Name | Select-Object -Last 1
   $ckpt = Join-Path $runDir.FullName 'checkpoints/baseline_policy.json'
   uv run python -m cchp_physical_env eval --checkpoint $ckpt --seed $seed
+
+  # (2) heuristic sequence baseline (needs train_statistics for thresholds)
+  uv run python -m cchp_physical_env train `
+    --policy sequence_rule `
+    --sequence-adapter rule `
+    --history-steps $K `
+    --episodes 800 `
+    --episode-days 14 `
+    --seed $seed
+  $runDir = Get-ChildItem runs -Directory | Sort-Object Name | Select-Object -Last 1
+  $ckpt = Join-Path $runDir.FullName 'checkpoints/baseline_policy.json'
+  uv run python -m cchp_physical_env eval --checkpoint $ckpt --seed $seed
+
+  # (3) deep sequence: MLP/Transformer/Mamba (PPO-style)
+  $adapters = 'mlp','transformer','mamba'
+  foreach ($adapter in $adapters) {
+    uv run python -m cchp_physical_env train `
+      --policy sequence_rule `
+      --sequence-adapter $adapter `
+      --history-steps $K `
+      --episode-days $episodeDays `
+      --train-steps $trainSteps `
+      --batch-size 1024 `
+      --update-epochs 4 `
+      --lr 0.0003 `
+      --device auto `
+      --seed $seed
+
+    $runDir = Get-ChildItem runs -Directory | Sort-Object Name | Select-Object -Last 1
+    $ckpt = Join-Path $runDir.FullName 'checkpoints/baseline_policy.json'
+    uv run python -m cchp_physical_env eval --checkpoint $ckpt --seed $seed
+  }
 }
 uv run python -m cchp_physical_env collect
 ```
@@ -179,13 +181,14 @@ uv run python -m cchp_physical_env collect
 
 ```powershell
 $seeds = 40,41,42
+$totalTimesteps = 2000000  # paper-grade budget (hours-level). For a quick run try 200000.
 
 foreach ($seed in $seeds) {
   uv run python -m cchp_physical_env sb3-train `
     --algo sac `
     --backbone transformer `
     --history-steps 16 `
-    --total-timesteps 200000 `
+    --total-timesteps $totalTimesteps `
     --episode-days 14 `
     --n-envs 1 `
     --learning-rate 0.0003 `
@@ -326,6 +329,66 @@ uv run python -m cchp_physical_env sb3-eval `
 ```
 
 Supported SB3 algorithms: `ppo`, `sac`, `td3`, `ddpg`.
+
+## Ubuntu VPS / SSH (python only, long runs)
+
+If you are running on a remote Ubuntu server via SSH and want to run long experiments in the background (no `uv`), install the package in a venv first:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e '.[sb3]'
+# Install torch separately (CPU/CUDA wheel depends on your machine).
+```
+
+Then run a paper-grade long training job with `nohup` (example: **SAC + Transformer**, ~millions of steps). This will automatically run `eval` and then `collect`:
+
+```bash
+set -euo pipefail
+mkdir -p logs
+
+SEED=42
+MODE=physics_in_loop
+K=16
+EPISODE_DAYS=14
+TIMESTEPS=2000000
+RUN_ROOT=runs/vps
+
+nohup bash -lc "
+python -m cchp_physical_env sb3-train \\
+  --algo sac \\
+  --backbone transformer \\
+  --history-steps \${K} \\
+  --total-timesteps \${TIMESTEPS} \\
+  --episode-days \${EPISODE_DAYS} \\
+  --n-envs 1 \\
+  --learning-rate 0.0003 \\
+  --batch-size 256 \\
+  --gamma 0.99 \\
+  --device auto \\
+  --constraint-mode \${MODE} \\
+  --seed \${SEED} \\
+  --run-root \${RUN_ROOT} ;
+
+run_dir=\\\$(ls -1dt \${RUN_ROOT}/*/ | head -n 1) ;
+ckpt=\\\${run_dir%/}/checkpoints/baseline_policy.json ;
+
+python -m cchp_physical_env eval \\
+  --checkpoint \"\\\$ckpt\" \\
+  --constraint-mode \${MODE} \\
+  --seed \${SEED} ;
+
+python -m cchp_physical_env collect
+" > logs/sb3_sac_transformer_\${MODE}_k\${K}_t\${TIMESTEPS}_seed\${SEED}.out 2>&1 &
+
+echo \$! > logs/sb3_sac_transformer_\${MODE}_seed\${SEED}.pid
+```
+
+Monitor:
+
+```bash
+tail -f logs/sb3_sac_transformer_physics_in_loop_k16_t2000000_seed42.out
+```
 
 ## Training & evaluation flow
 

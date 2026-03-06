@@ -118,7 +118,7 @@ training:
   episodes: 800
   # 深度训练总环境步数预算（sequence_rule 生效）：达到该步数后停止训练。
   # 15min 数据下，train_steps=4096 约等于 42.7 天的交互步数（4096/96）。
-  train_steps: 4096
+  train_steps: 4096 # 论文级建议：409600（~4267 天步交互预算，耗时取决于硬件）
   # 深度训练 batch 大小（sequence_rule 生效）。越大训练更稳但更吃显存。
   batch_size: 128
   # 每次更新重复训练轮数（sequence_rule 生效）。越大拟合更充分但更慢，过大可能过拟合。
@@ -142,7 +142,7 @@ training:
   # SB3 输入窗口长度（步），与 sequence_rule 的 history_steps 概念一致
   sb3_history_steps: 16
   # SB3 总交互步数（训练预算）
-  sb3_total_timesteps: 200000
+  sb3_total_timesteps: 200000 # 论文级建议：2000000（小时级训练）
   # 并行环境数量（DummyVecEnv），>1 可加速但更吃资源
   sb3_n_envs: 1
   # 学习率（SB3）
