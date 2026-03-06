@@ -75,6 +75,14 @@ $ckpt = Join-Path $runDir.FullName 'checkpoints/baseline_policy.json'
 uv run python -m cchp_physical_env eval --checkpoint $ckpt --seed 2
 ```
 
+Linux/macOS（bash）：
+
+```bash
+run_dir="$(ls -1dt runs/*/ | head -n 1)"
+ckpt="${run_dir%/}/checkpoints/baseline_policy.json"
+python -m cchp_physical_env eval --checkpoint "$ckpt" --seed 2
+```
+
 ### 3) 不使用 `uv` 的本地运行方式
 
 如果你希望用 `pip` + `python` 直接运行：
@@ -84,8 +92,12 @@ python -m venv .venv
 ```
 
 ```bash
-# PowerShell
-.\.venv\Scripts\Activate.ps1
+# Linux/macOS
+source .venv/bin/activate
+
+# Windows PowerShell
+# .\.venv\Scripts\Activate.ps1
+
 pip install -e .
 python -m cchp_physical_env --help
 ```
@@ -93,7 +105,7 @@ python -m cchp_physical_env --help
 如需显式指定配置文件路径：
 
 ```bash
-uv run python -m cchp_physical_env summary --env-config src/cchp_physical_env/config/config.yaml
+python -m cchp_physical_env summary --env-config src/cchp_physical_env/config/config.yaml
 ```
 
 ## CLI 子命令说明
@@ -211,7 +223,7 @@ uv run python -m cchp_physical_env sb3-eval `
 如果你在 Ubuntu 服务器上通过 SSH 运行、且不使用 `uv`，建议先创建 venv 并安装依赖：
 
 ```bash
-python3 -m venv .venv
+python -m venv .venv
 source .venv/bin/activate
 pip install -e '.[sb3]'
 # torch 需按 CPU/CUDA 环境单独安装
@@ -220,9 +232,12 @@ pip install -e '.[sb3]'
 然后用 `nohup` 跑“论文级长训”（示例：**SAC + Transformer**，百万级步数），训练结束自动 `eval` 再 `collect`：
 
 ```bash
-set -euo pipefail
 mkdir -p logs
 
+nohup bash -c '
+set -euo pipefail
+
+PYTHON=python
 SEED=42
 MODE=physics_in_loop
 K=16
@@ -230,40 +245,39 @@ EPISODE_DAYS=14
 TIMESTEPS=2000000
 RUN_ROOT=runs/vps
 
-nohup bash -lc "
-python -m cchp_physical_env sb3-train \\
-  --algo sac \\
-  --backbone transformer \\
-  --history-steps \${K} \\
-  --total-timesteps \${TIMESTEPS} \\
-  --episode-days \${EPISODE_DAYS} \\
-  --n-envs 1 \\
-  --learning-rate 0.0003 \\
-  --batch-size 256 \\
-  --gamma 0.99 \\
-  --device auto \\
-  --constraint-mode \${MODE} \\
-  --seed \${SEED} \\
-  --run-root \${RUN_ROOT} ;
+${PYTHON} -m cchp_physical_env sb3-train \
+  --algo sac \
+  --backbone transformer \
+  --history-steps ${K} \
+  --total-timesteps ${TIMESTEPS} \
+  --episode-days ${EPISODE_DAYS} \
+  --n-envs 1 \
+  --learning-rate 0.0003 \
+  --batch-size 256 \
+  --gamma 0.99 \
+  --device cuda \
+  --constraint-mode ${MODE} \
+  --seed ${SEED} \
+  --run-root ${RUN_ROOT}
 
-run_dir=\\\$(ls -1dt \${RUN_ROOT}/*/ | head -n 1) ;
-ckpt=\\\${run_dir%/}/checkpoints/baseline_policy.json ;
+run_dir="$(ls -1dt ${RUN_ROOT}/*/ | head -n 1)"
+ckpt="${run_dir%/}/checkpoints/baseline_policy.json"
 
-python -m cchp_physical_env eval \\
-  --checkpoint \"\\\$ckpt\" \\
-  --constraint-mode \${MODE} \\
-  --seed \${SEED} ;
+${PYTHON} -m cchp_physical_env eval \
+  --checkpoint "$ckpt" \
+  --constraint-mode ${MODE} \
+  --seed ${SEED}
 
-python -m cchp_physical_env collect
-" > logs/sb3_sac_transformer_\${MODE}_k\${K}_t\${TIMESTEPS}_seed\${SEED}.out 2>&1 &
+${PYTHON} -m cchp_physical_env collect --runs-root ${RUN_ROOT}
+' > logs/launch_seed42.out 2>&1 &
 
-echo \$! > logs/sb3_sac_transformer_\${MODE}_seed\${SEED}.pid
+echo $! > logs/launch_seed42.pid
 ```
 
 监控：
 
 ```bash
-tail -f logs/sb3_sac_transformer_physics_in_loop_k16_t2000000_seed42.out
+tail -f logs/launch_seed42.out
 ```
 
 ## 训练与评估流程
