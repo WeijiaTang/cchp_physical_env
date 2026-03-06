@@ -507,9 +507,23 @@ def build_parser() -> argparse.ArgumentParser:
         default=argparse.SUPPRESS,
         help="环境参数配置文件路径（支持放在子命令后）。",
     )
+    summary_parser.add_argument(
+        "--constraint-mode",
+        type=str,
+        default=argparse.SUPPRESS,
+        choices=list(DEFAULT_CONSTRAINT_MODES),
+        help="覆盖 env.constraint_mode（子命令级覆盖）。",
+    )
 
     train_parser = subparsers.add_parser("train", help="运行 baseline 训练骨架（2024）。")
     train_parser.add_argument("--run-root", type=Path, default=Path("runs"))
+    train_parser.add_argument(
+        "--constraint-mode",
+        type=str,
+        default=argparse.SUPPRESS,
+        choices=list(DEFAULT_CONSTRAINT_MODES),
+        help="覆盖 env.constraint_mode（子命令级覆盖）。",
+    )
     train_parser.add_argument("--episode-days", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument("--episodes", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument(
@@ -567,6 +581,13 @@ def build_parser() -> argparse.ArgumentParser:
     eval_parser.add_argument("--run-dir", type=Path, default=None)
     eval_parser.add_argument("--checkpoint", type=Path, default=None)
     eval_parser.add_argument(
+        "--constraint-mode",
+        type=str,
+        default=argparse.SUPPRESS,
+        choices=list(DEFAULT_CONSTRAINT_MODES),
+        help="覆盖 env.constraint_mode（子命令级覆盖）。",
+    )
+    eval_parser.add_argument(
         "--policy", type=str, default=argparse.SUPPRESS, choices=["rule", "random", "sequence_rule"]
     )
     eval_parser.add_argument(
@@ -588,6 +609,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     sb3_train_parser = subparsers.add_parser("sb3-train", help="用 SB3 训练 PPO/SAC/TD3/DDPG（Task-011，可选依赖）。")
     sb3_train_parser.add_argument("--run-root", type=Path, default=Path("runs"))
+    sb3_train_parser.add_argument(
+        "--constraint-mode",
+        type=str,
+        default=argparse.SUPPRESS,
+        choices=list(DEFAULT_CONSTRAINT_MODES),
+        help="覆盖 env.constraint_mode（子命令级覆盖）。",
+    )
     sb3_train_parser.add_argument("--algo", type=str, choices=["ppo", "sac", "td3", "ddpg"], default="ppo")
     sb3_train_parser.add_argument(
         "--backbone",
@@ -620,6 +648,13 @@ def build_parser() -> argparse.ArgumentParser:
     sb3_eval_parser = subparsers.add_parser("sb3-eval", help="用 SB3 checkpoint 跑 2025 年评估（Task-011）。")
     sb3_eval_parser.add_argument("--run-dir", type=Path, required=True)
     sb3_eval_parser.add_argument("--checkpoint", type=Path, required=True, help="sb3-train 产出的 baseline_policy.json")
+    sb3_eval_parser.add_argument(
+        "--constraint-mode",
+        type=str,
+        default=argparse.SUPPRESS,
+        choices=list(DEFAULT_CONSTRAINT_MODES),
+        help="覆盖 env.constraint_mode（子命令级覆盖）。",
+    )
     sb3_eval_parser.add_argument("--device", type=str, default="auto")
     sb3_eval_parser.add_argument("--seed", type=int, default=42)
     sb3_eval_parser.add_argument("--stochastic", action="store_true", help="使用随机动作采样（默认 deterministic）。")
@@ -636,6 +671,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("docs/spec/calibration_config.json"),
         help="标定配置 JSON",
+    )
+    calibrate_parser.add_argument(
+        "--constraint-mode",
+        type=str,
+        default=argparse.SUPPRESS,
+        choices=list(DEFAULT_CONSTRAINT_MODES),
+        help="覆盖 env.constraint_mode（子命令级覆盖）。",
     )
     calibrate_parser.add_argument("--n-samples", type=int, default=6)
     calibrate_parser.add_argument(
@@ -663,6 +705,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="逗号分隔，例如 physics_in_loop,reward_only",
     )
     ablation_parser.add_argument(
+        "--constraint-mode",
+        type=str,
+        default=argparse.SUPPRESS,
+        choices=list(DEFAULT_CONSTRAINT_MODES),
+        help="覆盖 env.constraint_mode（子命令级覆盖；通常不需要，ablation 会按 --modes 生成）。",
+    )
+    ablation_parser.add_argument(
         "--policy", type=str, default=argparse.SUPPRESS, choices=["rule", "random", "sequence_rule"]
     )
     ablation_parser.add_argument(
@@ -685,6 +734,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     collect_parser = subparsers.add_parser("collect", help="汇总 runs 下的 eval 结果到论文表格 CSV（Task-011）。")
     collect_parser.add_argument("--runs-root", type=Path, default=Path("runs"))
+    collect_parser.add_argument(
+        "--constraint-mode",
+        type=str,
+        default=argparse.SUPPRESS,
+        choices=list(DEFAULT_CONSTRAINT_MODES),
+        help="保留字段：collect 不使用 constraint_mode，仅用于兼容统一脚本参数。",
+    )
     collect_parser.add_argument(
         "--output",
         type=Path,
