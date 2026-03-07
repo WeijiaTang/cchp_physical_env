@@ -1,452 +1,706 @@
-[README-en.md](README.md) | [README-zhcn.md](README-zhcn.md)|
-## CCHP (Combined Cooling, Heating, and Power) + Renewables Scheduling Research
+[README-en.md](README.md) | [README-zhcn.md](README-zhcn.md) |
+# CCHP (Combined Cooling, Heating, and Power) + Renewables Scheduling Research
 
-This repository provides a **Python** physical environment for a CCHP energy system (electricity-heat-cooling coupling) and a minimal CLI pipeline for reproducible experiments.
+A Python research codebase for a CCHP physical environment, reproducible training/evaluation pipelines, and benchmark-style experiment collection.
 
-The project started from an upstream baseline (`reference/repo/joint_bes_gt_dispatch`) and is being extended towards a CCHP / multi-energy system research codebase.
+This project supports:
+- rule-based baselines
+- deep sequence policy training (`mlp` / `transformer` / `mamba`)
+- SB3 multi-algorithm training (`ppo` / `sac` / `td3` / `ddpg`) with sequence backbones
+- unified CLI for `summary`, `train`, `eval`, `sb3-train`, `sb3-eval`, `ablation`, `calibrate`, and `collect`
 
-- Notebook entry (Kaggle-ready): `main.ipynb`
+- Notebook entry: `main.ipynb`
+- CLI entry: `python -m cchp_physical_env`
 
-## Repository structure (core modules)
+## What This Repo Is
 
-- `src/cchp_physical_env/__main__.py`: CLI entrypoint (`summary/train/eval/calibrate/ablation/sb3-train/sb3-eval`)
-- `src/cchp_physical_env/core/data.py`: frozen-schema data loading, validation, missing-value repair, episode sampling
-- `src/cchp_physical_env/core/config_loader.py`: load/merge config and CLI overrides
-- `src/cchp_physical_env/pipeline/runner.py`: baseline train/eval runner (`rule`, `random`, `sequence_rule`)
-- `src/cchp_physical_env/pipeline/sequence.py`: sequence policy wrapper and adapters
-- `src/cchp_physical_env/policy/trainer.py`: PPO-style deep sequence trainer (`transformer`/`mamba`/`mlp`)
-- `src/cchp_physical_env/policy/sb3.py`: optional Stable-Baselines3 train/eval integration (`ppo`/`sac`/`td3`/`ddpg`)
-- `src/cchp_physical_env/config/config.yaml`: unified environment + training config
+Core modules:
+- `src/cchp_physical_env/__main__.py`: unified CLI entry
+- `src/cchp_physical_env/core/data.py`: frozen-schema loading, validation, repair, sampling
+- `src/cchp_physical_env/core/config_loader.py`: config loading and CLI override merge
+- `src/cchp_physical_env/pipeline/runner.py`: baseline train/eval runner
+- `src/cchp_physical_env/pipeline/sequence.py`: sequence policy utilities and adapters
+- `src/cchp_physical_env/policy/trainer.py`: PPO-style deep sequence trainer
+- `src/cchp_physical_env/policy/sb3.py`: SB3 training/evaluation integration
+- `src/cchp_physical_env/config/config.yaml`: environment + training config
 
-## Data (frozen paths)
+## Data Convention
 
-The CLI expects the following files under the repo root (do not rename):
+Expected processed files under repo root:
+- train: `data/processed/cchp_main_15min_2024.csv`
+- eval: `data/processed/cchp_main_15min_2025.csv`
 
-- Train: `data/processed/cchp_main_15min_2024.csv`
-- Eval: `data/processed/cchp_main_15min_2025.csv`
+Frozen convention:
+- timezone: `Asia/Shanghai`
+- resolution: `15min`
+- yearly steps: `35040`
+- leap-day handling: drop `02/29`
 
-Time convention:
+Frozen schema includes:
+- load / renewables: `p_dem_mw`, `qh_dem_mw`, `qc_dem_mw`, `pv_mw`, `wt_mw`
+- weather: `t_amb_k`, `sp_pa`, `rh_pct`, `wind_speed`, `wind_direction`, `ghi_wm2`, `dni_wm2`, `dhi_wm2`
+- price / tax: `price_e`, `price_gas`, `carbon_tax`
 
-- Timezone: `Asia/Shanghai`
-- Resolution: `15min`
-- Yearly steps: `35040`
-- Leap day handling: drop `02/29`
+Validation / repair rules:
+- timestamps must be unique and monotonic increasing
+- data must be single-year and aligned to the frozen 15min index
+- load-like columns: time interpolation + boundary fill
+- weather columns: forward fill
+- price/tax columns: hard fail on missing values
 
-Frozen schema (`core/data.py`) includes:
+## Installation
 
-- Load/renewables: `p_dem_mw`, `qh_dem_mw`, `qc_dem_mw`, `pv_mw`, `wt_mw`
-- Weather: `t_amb_k`, `sp_pa`, `rh_pct`, `wind_speed`, `wind_direction`, `ghi_wm2`, `dni_wm2`, `dhi_wm2`
-- Price/tax: `price_e`, `price_gas`, `carbon_tax`
+Python 3.11+ is recommended.
 
-Validation/repair behavior:
-
-- Timestamp must be monotonic increasing and unique
-- Data must be single-year and aligned to expected 15min index
-- Load-like columns: time interpolation + boundary fill
-- Weather columns: forward fill (ZOH)
-- Price/tax missing values: hard fail (no implicit fill)
-
-## Quickstart (recommended: `uv`)
-
-This project uses Python 3.11+. We recommend using `uv` for dependency management.
-
-### 1) Install dependencies
+Using `uv`:
 
 ```bash
 uv sync
 ```
 
-### 2) Run CLI
-
-By default the CLI reads the environment config:
-
-`src/cchp_physical_env/config/config.yaml`
-
-```bash
-uv run python -m cchp_physical_env summary
-uv run python -m cchp_physical_env train --episodes 1 --episode-days 7 --policy rule --seed 2
-```
-
-Then evaluate the latest run:
-
-```powershell
-$runDir = Get-ChildItem runs -Directory | Sort-Object Name | Select-Object -Last 1
-$ckpt = Join-Path $runDir.FullName 'checkpoints/baseline_policy.json'
-uv run python -m cchp_physical_env eval --checkpoint $ckpt --seed 2
-```
-
-## Paper-grade experiment protocol (PowerShell)
-
-The paper results should be produced from a **matrix** of runs (multiple methods × multiple seeds), then evaluated on the frozen 2025 year, and finally collected into one benchmark table.
-
-### 0) Data health check (must-do)
-
-```powershell
-uv run python -m cchp_physical_env summary
-```
-
-### 1) Tier-1 (must-do): constraint paradigm ablation
-
-Run the same method under two constraint modes:
-
-- `physics_in_loop` (feasible projection / solver-in-the-loop)
-- `reward_only` (no solver, projection-based execution + penalties)
-
-```powershell
-$seeds = 40,41,42
-
-foreach ($seed in $seeds) {
-  foreach ($mode in @('physics_in_loop', 'reward_only')) {
-    uv run python -m cchp_physical_env train `
-      --policy rule `
-      --episodes 800 `
-      --episode-days 14 `
-      --constraint-mode $mode `
-      --seed $seed
-
-    $runDir = Get-ChildItem runs -Directory | Sort-Object Name | Select-Object -Last 1
-    $ckpt = Join-Path $runDir.FullName 'checkpoints/baseline_policy.json'
-
-    uv run python -m cchp_physical_env eval `
-      --checkpoint $ckpt `
-      --constraint-mode $mode `
-      --seed $seed
-  }
-}
-
-uv run python -m cchp_physical_env collect
-```
-
-### 2) Tier-2 (must-do): policy structure ablation
-
-Compare:
-
-- `rule` (non-learning baseline)
-- `sequence_rule` with `sequence_adapter=rule` (heuristic sequence baseline, no deep learning)
-- deep sequence backbones: `mlp` / `transformer` / `mamba` (PPO-style trainer)
-
-```powershell
-$seeds = 40,41,42
-$K = 16
-$episodeDays = 28
-$trainSteps = 409600
-
-foreach ($seed in $seeds) {
-  # (1) rule baseline
-  uv run python -m cchp_physical_env train `
-    --policy rule `
-    --episodes 800 `
-    --episode-days 14 `
-    --seed $seed
-  $runDir = Get-ChildItem runs -Directory | Sort-Object Name | Select-Object -Last 1
-  $ckpt = Join-Path $runDir.FullName 'checkpoints/baseline_policy.json'
-  uv run python -m cchp_physical_env eval --checkpoint $ckpt --seed $seed
-
-  # (2) heuristic sequence baseline (needs train_statistics for thresholds)
-  uv run python -m cchp_physical_env train `
-    --policy sequence_rule `
-    --sequence-adapter rule `
-    --history-steps $K `
-    --episodes 800 `
-    --episode-days 14 `
-    --seed $seed
-  $runDir = Get-ChildItem runs -Directory | Sort-Object Name | Select-Object -Last 1
-  $ckpt = Join-Path $runDir.FullName 'checkpoints/baseline_policy.json'
-  uv run python -m cchp_physical_env eval --checkpoint $ckpt --seed $seed
-
-  # (3) deep sequence: MLP/Transformer/Mamba (PPO-style)
-  $adapters = 'mlp','transformer','mamba'
-  foreach ($adapter in $adapters) {
-    uv run python -m cchp_physical_env train `
-      --policy sequence_rule `
-      --sequence-adapter $adapter `
-      --history-steps $K `
-      --episode-days $episodeDays `
-      --train-steps $trainSteps `
-      --batch-size 1024 `
-      --update-epochs 4 `
-      --lr 0.0003 `
-      --device auto `
-      --seed $seed
-
-    $runDir = Get-ChildItem runs -Directory | Sort-Object Name | Select-Object -Last 1
-    $ckpt = Join-Path $runDir.FullName 'checkpoints/baseline_policy.json'
-    uv run python -m cchp_physical_env eval --checkpoint $ckpt --seed $seed
-  }
-}
-uv run python -m cchp_physical_env collect
-```
-
-### 3) Tier-3 (recommended): multi-RL algorithm benchmark (SB3)
-
-```powershell
-$seeds = 40,41,42
-$totalTimesteps = 2000000  # paper-grade budget (hours-level). For a quick run try 200000.
-
-foreach ($seed in $seeds) {
-  uv run python -m cchp_physical_env sb3-train `
-    --algo sac `
-    --backbone transformer `
-    --history-steps 16 `
-    --total-timesteps $totalTimesteps `
-    --episode-days 14 `
-    --n-envs 1 `
-    --learning-rate 0.0003 `
-    --batch-size 256 `
-    --gamma 0.99 `
-    --device auto `
-    --seed $seed
-
-  $runDir = Get-ChildItem runs -Directory | Sort-Object Name | Select-Object -Last 1
-  $ckpt = Join-Path $runDir.FullName 'checkpoints/baseline_policy.json'
-  uv run python -m cchp_physical_env eval --checkpoint $ckpt --seed $seed
-}
-
-uv run python -m cchp_physical_env collect
-```
-
-### 3) Run CLI (without `uv`)
-
-If you prefer plain `pip` + `python`:
+Using plain `pip`:
 
 ```bash
 python -m venv .venv
-```
-
-```bash
 source .venv/bin/activate
 pip install -e .
+```
+
+Optional dependencies:
+- SB3: `uv pip install -e '.[sb3]'`
+- Mamba: `uv pip install -e '.[mamba]'`
+
+PyTorch is intentionally not pinned in `pyproject.toml`. Install the correct CPU/CUDA build for your machine before long deep-learning runs.
+
+## CLI Quick Start
+
+Windows / PowerShell (`pwsh`):
+
+```powershell
+uv run python -m cchp_physical_env summary
+uv run python -m cchp_physical_env --help
+```
+
+Linux / Debian / bash:
+
+```bash
+python -m cchp_physical_env summary
 python -m cchp_physical_env --help
 ```
 
-If you want to explicitly specify the config path:
+## Shell Conventions
 
-```bash
-python -m cchp_physical_env summary --env-config src/cchp_physical_env/config/config.yaml
+PowerShell (`pwsh`) line continuation uses the backtick:
+
+```powershell
+uv run python -m cchp_physical_env train `
+  --policy rule `
+  --episodes 800 `
+  --episode-days 14 `
+  --seed 40
 ```
 
-## CLI commands
-
-- `summary`: validate 2024/2025 datasets (schema consistency + basic stats)
-- `train`: run baseline training skeleton (2024)
-- `eval`: evaluate on 2025 (supports loading a checkpoint)
-- `calibrate`: run calibration search (minimal sampling)
-- `ablation`: compare constraint modes (e.g. `physics_in_loop` vs `reward_only`)
-- `sb3-train`: run optional Stable-Baselines3 training (`ppo`/`sac`/`td3`/`ddpg`)
-- `sb3-eval`: evaluate a Stable-Baselines3 checkpoint run
-
-Run `python -m cchp_physical_env --help` to see all options.
-
-## Policy / algorithm selection
-
-The training/evaluation entrypoints share a unified `policy` option:
-
-- **`policy=random`**
-  Baseline random policy (no learning).
-- **`policy=rule`**
-  Baseline rule-based policy (no deep learning).
-- **`policy=sequence_rule`**
-  Sequence policy. If `sequence_adapter=transformer|mamba|mlp`, training uses PPO-style update (`SequencePolicyTrainer._ppo_update`).
-
-For `policy=sequence_rule`, the following backbones are supported:
-
-- **`sequence_adapter=transformer`**
-- **`sequence_adapter=mamba`**
-- **`sequence_adapter=mlp`** (structure ablation baseline under the same PPO-style sequence trainer)
-
-Typical config knobs are under `training:` in `src/cchp_physical_env/config/config.yaml`:
-
-- **Common**: `seed`, `episode_days` (constrained to `[7, 30]`)
-- **Baseline (rule/random)**: `episodes`
-- **Sequence (PPO-style)**: `history_steps`, `train_steps`, `batch_size`, `update_epochs`, `lr`, `device`
-
-Example (sequence training, `mlp` ablation):
+Linux / Debian / bash line continuation uses `\`:
 
 ```bash
+python -m cchp_physical_env train \
+  --policy rule \
+  --episodes 800 \
+  --episode-days 14 \
+  --seed 40
+```
+
+Below, Windows examples use `uv run python -m ...`, while Linux examples use direct `python -m ...`.
+
+## Training Parameter Guide
+
+### Deep sequence training arguments
+
+Use these arguments when `train` runs the built-in PPO-style sequence trainer, i.e.:
+- `--policy sequence_rule`
+- `--sequence-adapter mlp|transformer|mamba`
+
+Recommended meaning of major arguments:
+- `--history-steps`: sequence window length fed into the backbone; larger values give longer temporal context but increase memory and compute.
+- `--episode-days`: number of days sampled per training episode; controls horizon length and rollout diversity.
+- `--train-steps`: total rollout steps collected for training updates.
+- `--batch-size`: minibatch size per gradient update.
+- `--update-epochs`: how many passes are made over each rollout batch.
+- `--lr`: optimizer learning rate.
+- `--device`: `auto`, `cpu`, `cuda`, or `cuda:<index>`.
+- `--seed`: random seed for reproducibility.
+
+Practical interpretation:
+- if GPU memory is tight, reduce `--history-steps` or `--batch-size`
+- if training is unstable, first lower `--lr`
+- if policy underfits, increase `--train-steps`
+- if rollout horizon is too short for storage dynamics, increase `--episode-days`
+
+### Baseline / heuristic arguments
+
+Use these arguments for lightweight baselines:
+- `--policy rule`
+- `--policy random`
+- `--policy sequence_rule --sequence-adapter rule`
+
+Main arguments:
+- `--episodes`: number of sampled episodes for baseline training.
+- `--episode-days`: length of each sampled episode.
+- `--history-steps`: only meaningful for `sequence_rule` variants.
+- `--seed`: reproducibility control.
+
+### SB3 training arguments
+
+Use these arguments with either explicit `sb3-train` or unified `train --sb3-enabled`.
+
+Algorithm / agent arguments:
+- `--algo` or `--sb3-algo`: RL algorithm, one of `ppo`, `sac`, `td3`, `ddpg`.
+- `--backbone` or `--sb3-backbone`: feature extractor backbone, one of `mlp`, `transformer`, `mamba`.
+- `--history-steps` or `--sb3-history-steps`: sequence window length for the SB3 observation tensor.
+- `--total-timesteps` or `--sb3-total-timesteps`: total environment interaction steps.
+- `--n-envs` or `--sb3-n-envs`: number of parallel environments.
+- `--learning-rate` or `--sb3-learning-rate`: optimizer learning rate.
+- `--batch-size` or `--sb3-batch-size`: batch size used by the algorithm.
+- `--gamma` or `--sb3-gamma`: reward discount factor.
+- `--device`: `auto`, `cpu`, `cuda`, or `cuda:<index>`.
+- `--seed`: reproducibility control.
+
+Practical interpretation:
+- `ppo` is usually the safest starting point
+- `sac` is often a strong continuous-control baseline
+- `transformer` / `mamba` backbones are heavier and slower than `mlp`
+- `--n-envs` speeds up collection but increases CPU / RAM load
+- `--total-timesteps` is the first knob to increase for longer runs
+
+## Full CLI Command Coverage
+
+This section lists every supported top-level CLI subcommand in `python -m cchp_physical_env`.
+
+### 1) `summary`
+
+Validate train/eval data and print frozen-schema summary.
+
+Windows / `pwsh`:
+
+```powershell
+uv run python -m cchp_physical_env summary
+```
+
+Linux / Debian / bash:
+
+```bash
+python -m cchp_physical_env summary
+```
+
+Override environment config or constraint mode if needed:
+
+```bash
+python -m cchp_physical_env summary \
+  --env-config src/cchp_physical_env/config/config.yaml \
+  --constraint-mode physics_in_loop
+```
+
+### 2) `train`
+
+The unified training entry has three routing modes:
+- baseline route: `rule`, `random`, `sequence_rule + rule`
+- built-in deep sequence route: `sequence_rule + mlp|transformer|mamba`
+- SB3 route: `--sb3-enabled`
+
+### 3) `eval`
+
+The unified evaluation entry:
+- evaluates baseline checkpoints
+- auto-detects SB3 checkpoints when `artifact_type=sb3_policy`
+- can infer `run_dir` from checkpoint if not provided
+
+### 4) `sb3-train`
+
+Explicit Stable-Baselines3 training entry.
+
+### 5) `sb3-eval`
+
+Explicit SB3 evaluation entry. Requires both `--run-dir` and `--checkpoint`.
+
+### 6) `calibrate`
+
+Run parameter calibration search on train/eval data.
+
+### 7) `ablation`
+
+Run constraint-mode ablation across `physics_in_loop` and/or `reward_only`.
+
+### 8) `collect`
+
+Scan `runs/` and aggregate evaluation outputs into benchmark CSV tables.
+
+## Training + Evaluation Recipes
+
+This section is organized by actual experiment type. Every training example is followed by an evaluation command.
+
+### 1) Rule Baseline
+
+Train (`pwsh`):
+
+```powershell
+uv run python -m cchp_physical_env train `
+  --policy rule `
+  --episodes 800 `
+  --episode-days 14 `
+  --seed 40
+```
+
+Train (Linux / Debian / bash):
+
+```bash
+python -m cchp_physical_env train \
+  --policy rule \
+  --episodes 800 \
+  --episode-days 14 \
+  --seed 40
+```
+
+Eval:
+
+```bash
+python -m cchp_physical_env eval \
+  --checkpoint runs/<train_run>/checkpoints/baseline_policy.json \
+  --seed 40
+```
+
+### 2) Random Baseline
+
+Train (`pwsh`):
+
+```powershell
+uv run python -m cchp_physical_env train `
+  --policy random `
+  --episodes 800 `
+  --episode-days 14 `
+  --seed 40
+```
+
+Train (Linux / Debian / bash):
+
+```bash
+python -m cchp_physical_env train \
+  --policy random \
+  --episodes 800 \
+  --episode-days 14 \
+  --seed 40
+```
+
+Eval:
+
+```bash
+python -m cchp_physical_env eval \
+  --checkpoint runs/<train_run>/checkpoints/baseline_policy.json \
+  --seed 40
+```
+
+### 3) Heuristic Sequence Baseline
+
+This uses `policy=sequence_rule` with `sequence_adapter=rule`.
+
+Train (`pwsh`):
+
+```powershell
+uv run python -m cchp_physical_env train `
+  --policy sequence_rule `
+  --sequence-adapter rule `
+  --history-steps 16 `
+  --episodes 800 `
+  --episode-days 14 `
+  --seed 40
+```
+
+Train (Linux / Debian / bash):
+
+```bash
+python -m cchp_physical_env train \
+  --policy sequence_rule \
+  --sequence-adapter rule \
+  --history-steps 16 \
+  --episodes 800 \
+  --episode-days 14 \
+  --seed 40
+```
+
+Eval:
+
+```bash
+python -m cchp_physical_env eval \
+  --checkpoint runs/<train_run>/checkpoints/baseline_policy.json \
+  --seed 40
+```
+
+### 4) Deep Sequence Policy: MLP
+
+This goes through the built-in PPO-style sequence trainer.
+
+Train (`pwsh`):
+
+```powershell
 uv run python -m cchp_physical_env train `
   --policy sequence_rule `
   --sequence-adapter mlp `
   --history-steps 16 `
-  --episode-days 7 `
-  --train-steps 4096 `
-  --batch-size 256 `
-  --device cpu
+  --episode-days 28 `
+  --train-steps 409600 `
+  --batch-size 1024 `
+  --update-epochs 4 `
+  --lr 0.0003 `
+  --device auto `
+  --seed 40
 ```
 
-## SB3 multi-algorithm comparison (optional dependency)
-
-Install optional dependency first:
+Train (Linux / Debian / bash):
 
 ```bash
-uv pip install -e '.[sb3]'
+python -m cchp_physical_env train \
+  --policy sequence_rule \
+  --sequence-adapter mlp \
+  --history-steps 16 \
+  --episode-days 28 \
+  --train-steps 409600 \
+  --batch-size 1024 \
+  --update-epochs 4 \
+  --lr 0.0003 \
+  --device auto \
+  --seed 40
 ```
 
-If your environment does not have `torch`, install it according to your platform (CPU/CUDA) before running `sb3-train`.
-
-Recommended usage (route via `train`):
-
-- Set `training.sb3_enabled: true` and `training.sb3_algo: sac` in `src/cchp_physical_env/config/config.yaml`
-- Then run:
+Eval:
 
 ```bash
-uv run python -m cchp_physical_env train
+python -m cchp_physical_env eval \
+  --checkpoint runs/<train_run>/checkpoints/baseline_policy.json \
+  --seed 40
 ```
 
-CLI override example (force `td3` and override config):
+### 5) Deep Sequence Policy: Transformer
 
-```bash
+Train (`pwsh`):
+
+```powershell
 uv run python -m cchp_physical_env train `
-  --sb3-enabled `
-  --sb3-algo td3 `
-  --sb3-total-timesteps 200000
+  --policy sequence_rule `
+  --sequence-adapter transformer `
+  --history-steps 16 `
+  --episode-days 28 `
+  --train-steps 409600 `
+  --batch-size 1024 `
+  --update-epochs 4 `
+  --lr 0.0003 `
+  --device auto `
+  --seed 40
 ```
 
-Explicit SB3 entrypoint (equivalent, optional):
+Train (Linux / Debian / bash):
 
 ```bash
+python -m cchp_physical_env train \
+  --policy sequence_rule \
+  --sequence-adapter transformer \
+  --history-steps 16 \
+  --episode-days 28 \
+  --train-steps 409600 \
+  --batch-size 1024 \
+  --update-epochs 4 \
+  --lr 0.0003 \
+  --device auto \
+  --seed 40
+```
+
+Eval:
+
+```bash
+python -m cchp_physical_env eval \
+  --checkpoint runs/<train_run>/checkpoints/baseline_policy.json \
+  --seed 40
+```
+
+### 6) Deep Sequence Policy: Mamba
+
+Train (`pwsh`):
+
+```powershell
+uv run python -m cchp_physical_env train `
+  --policy sequence_rule `
+  --sequence-adapter mamba `
+  --history-steps 16 `
+  --episode-days 28 `
+  --train-steps 409600 `
+  --batch-size 1024 `
+  --update-epochs 4 `
+  --lr 0.0003 `
+  --device auto `
+  --seed 40
+```
+
+Train (Linux / Debian / bash):
+
+```bash
+python -m cchp_physical_env train \
+  --policy sequence_rule \
+  --sequence-adapter mamba \
+  --history-steps 16 \
+  --episode-days 28 \
+  --train-steps 409600 \
+  --batch-size 1024 \
+  --update-epochs 4 \
+  --lr 0.0003 \
+  --device auto \
+  --seed 40
+```
+
+Eval:
+
+```bash
+python -m cchp_physical_env eval \
+  --checkpoint runs/<train_run>/checkpoints/baseline_policy.json \
+  --seed 40
+```
+
+### 7) SB3: SAC + Transformer
+
+You can either use `train --sb3-enabled ...` or the explicit `sb3-train` command. README uses the explicit command here.
+
+Train (`pwsh`):
+
+```powershell
 uv run python -m cchp_physical_env sb3-train `
   --algo sac `
-  --total-timesteps 200000 `
+  --backbone transformer `
+  --history-steps 16 `
+  --total-timesteps 2000000 `
   --episode-days 14 `
   --n-envs 1 `
-  --device auto
+  --learning-rate 0.0003 `
+  --batch-size 256 `
+  --gamma 0.99 `
+  --device auto `
+  --seed 40
 ```
 
-Evaluation:
+Train (Linux / Debian / bash):
 
 ```bash
-uv run python -m cchp_physical_env eval `
-  --checkpoint runs/<sb3_train_run>/checkpoints/baseline_policy.json
-```
-
-Optional explicit SB3 evaluation (fallback):
-
-```bash
-uv run python -m cchp_physical_env sb3-eval `
-  --run-dir runs/<new_eval_dir> `
-  --checkpoint runs/<sb3_train_run>/checkpoints/baseline_policy.json
-```
-
-Supported SB3 algorithms: `ppo`, `sac`, `td3`, `ddpg`.
-
-## Ubuntu VPS / SSH (python only, long runs)
-
-If you are running on a remote Ubuntu server via SSH and want to run long experiments in the background (no `uv`), install the package in a venv first:
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e '.[sb3]'
-# Install torch separately (CPU/CUDA wheel depends on your machine).
-```
-
-Then run a paper-grade long training job with `nohup` (example: **SAC + Transformer**, ~millions of steps). This will automatically run `eval` and then `collect`:
-
-```bash
-mkdir -p logs
-nohup bash -c '
-set -euo pipefail
-
-PYTHON=python
-SEED=42
-MODE=physics_in_loop
-K=16
-EPISODE_DAYS=14
-TIMESTEPS=2000000
-RUN_ROOT=runs/vps
-
-${PYTHON} -m cchp_physical_env sb3-train \
+python -m cchp_physical_env sb3-train \
   --algo sac \
   --backbone transformer \
-  --history-steps ${K} \
-  --total-timesteps ${TIMESTEPS} \
-  --episode-days ${EPISODE_DAYS} \
+  --history-steps 16 \
+  --total-timesteps 2000000 \
+  --episode-days 14 \
   --n-envs 1 \
   --learning-rate 0.0003 \
   --batch-size 256 \
   --gamma 0.99 \
-  --device cuda \
-  --constraint-mode ${MODE} \
-  --seed ${SEED} \
-  --run-root ${RUN_ROOT}
-
-run_dir="$(ls -1dt ${RUN_ROOT}/*/ | head -n 1)"
-ckpt="${run_dir%/}/checkpoints/baseline_policy.json"
-
-${PYTHON} -m cchp_physical_env eval \
-  --checkpoint "$ckpt" \
-  --constraint-mode ${MODE} \
-  --seed ${SEED}
-
-${PYTHON} -m cchp_physical_env collect --runs-root ${RUN_ROOT}
-' > logs/launch_seed42.out 2>&1 &
-
-echo $! > logs/launch_seed42.pid
+  --device auto \
+  --seed 40
 ```
 
-Monitor:
+Eval (`sb3-eval`):
 
 ```bash
-tail -f logs/launch_seed42.out
+python -m cchp_physical_env sb3-eval \
+  --run-dir runs/<new_eval_run> \
+  --checkpoint runs/<sb3_train_run>/checkpoints/baseline_policy.json \
+  --device auto \
+  --seed 40
 ```
 
-## Training & evaluation flow
-
-- `summary`: load two yearly CSV files, run frozen-schema checks, print JSON summary
-- `train`:
-  - baseline path (`rule/random`): use `pipeline/runner.py` and save train artifacts
-  - sequence deep path (`sequence_rule + transformer/mamba/mlp`): use `policy/trainer.py`
-- `eval`: run 2025 evaluation and export evaluation summary
-- `sb3-train/sb3-eval`: optional SB3 train/eval path via `policy/sb3.py`
-
-Year constraints in code:
-
-- Training year must be `2024`
-- Evaluation year must be `2025`
-
-## Run artifacts
-
-All runs are saved under `runs/<timestamp>_<mode>_<policy>/` (or sequence/SB3 variant), typically including:
-
-- `train/train_statistics.json`
-- `train/episodes.csv` (baseline training episodes)
-- `eval/` outputs (evaluation logs/summary)
-- `checkpoints/` (e.g. `baseline_policy.json` or deep model artifacts)
-
-`eval --checkpoint .../checkpoints/...` will infer `run_dir` from checkpoint parent path.
-
-Paper-friendly eval exports (generated automatically on `eval`):
-
-- `eval/summary_flat.csv` (1-row flattened KPI table)
-- `eval/cost_breakdown.csv`, `eval/violation_counts.csv`, `eval/diagnostic_counts.csv`
-- `eval/step_log_light.csv` (drops per-step JSON fields, easier for plotting)
-- `eval/daily_agg.csv` (daily aggregation for curves/figures)
-
-Collect benchmark tables across runs:
+You can also use the unified `eval` entry for the same checkpoint:
 
 ```bash
-python -m cchp_physical_env collect
+python -m cchp_physical_env eval \
+  --checkpoint runs/<sb3_train_run>/checkpoints/baseline_policy.json \
+  --seed 40
 ```
 
-## Config notes
+### 8) SB3: PPO + Mamba
 
-`src/cchp_physical_env/config/config.yaml` has two top-level blocks:
+Train (`pwsh`):
 
-- `env`: physical/environment and penalty parameters (Option-C: fully configurable)
-- `training`: policy/training hyperparameters
+```powershell
+uv run python -m cchp_physical_env sb3-train `
+  --algo ppo `
+  --backbone mamba `
+  --history-steps 16 `
+  --total-timesteps 2000000 `
+  --episode-days 14 `
+  --n-envs 1 `
+  --learning-rate 0.0003 `
+  --batch-size 256 `
+  --gamma 0.99 `
+  --device auto `
+  --seed 40
+```
 
-CLI argument precedence:
+Train (Linux / Debian / bash):
 
-- Explicit CLI args override `training:` defaults from YAML
-- Unspecified options fall back to YAML
+```bash
+python -m cchp_physical_env sb3-train \
+  --algo ppo \
+  --backbone mamba \
+  --history-steps 16 \
+  --total-timesteps 2000000 \
+  --episode-days 14 \
+  --n-envs 1 \
+  --learning-rate 0.0003 \
+  --batch-size 256 \
+  --gamma 0.99 \
+  --device auto \
+  --seed 40
+```
 
-## Kaggle
+Eval:
 
-Use `main.ipynb`.
+```bash
+python -m cchp_physical_env sb3-eval \
+  --run-dir runs/<new_eval_run> \
+  --checkpoint runs/<sb3_train_run>/checkpoints/baseline_policy.json \
+  --device auto \
+  --seed 40
+```
 
-In Kaggle, add two datasets:
+## Unified `train` Entry for SB3
 
-- A code dataset that contains `pyproject.toml` and `src/`
-- A data dataset that contains `data/processed/*.csv`
+If you prefer using one single training entry, the `train` command can also route into SB3.
 
-The notebook will rsync both into a writable working directory and then run `summary/train/eval`.
+`pwsh`:
+
+```powershell
+uv run python -m cchp_physical_env train `
+  --sb3-enabled `
+  --sb3-algo sac `
+  --sb3-backbone transformer `
+  --sb3-history-steps 16 `
+  --sb3-total-timesteps 2000000 `
+  --episode-days 14 `
+  --sb3-learning-rate 0.0003 `
+  --sb3-batch-size 256 `
+  --sb3-gamma 0.99 `
+  --device auto `
+  --seed 40
+```
+
+Linux / Debian / bash:
+
+```bash
+python -m cchp_physical_env train \
+  --sb3-enabled \
+  --sb3-algo sac \
+  --sb3-backbone transformer \
+  --sb3-history-steps 16 \
+  --sb3-total-timesteps 2000000 \
+  --episode-days 14 \
+  --sb3-learning-rate 0.0003 \
+  --sb3-batch-size 256 \
+  --sb3-gamma 0.99 \
+  --device auto \
+  --seed 40
+```
+
+Eval:
+
+```bash
+python -m cchp_physical_env eval \
+  --checkpoint runs/<sb3_train_run>/checkpoints/baseline_policy.json \
+  --seed 40
+```
+
+## Experiment Utilities
+
+### Constraint Ablation
+
+`pwsh`:
+
+```powershell
+uv run python -m cchp_physical_env ablation `
+  --policy rule `
+  --modes physics_in_loop,reward_only `
+  --seed 40
+```
+
+Linux / Debian / bash:
+
+```bash
+python -m cchp_physical_env ablation \
+  --policy rule \
+  --modes physics_in_loop,reward_only \
+  --seed 40
+```
+
+Sequence variant example:
+
+```bash
+python -m cchp_physical_env ablation \
+  --policy sequence_rule \
+  --sequence-adapter rule \
+  --history-steps 16 \
+  --modes physics_in_loop,reward_only \
+  --seed 40
+```
+
+### Calibration
+
+`pwsh`:
+
+```powershell
+uv run python -m cchp_physical_env calibrate `
+  --config docs/spec/calibration_config.json `
+  --n-samples 6 `
+  --run-root runs
+```
+
+Linux / Debian / bash:
+
+```bash
+python -m cchp_physical_env calibrate \
+  --config docs/spec/calibration_config.json \
+  --n-samples 6 \
+  --run-root runs
+```
+
+With sequence-related overrides:
+
+```bash
+python -m cchp_physical_env calibrate \
+  --config docs/spec/calibration_config.json \
+  --n-samples 6 \
+  --history-steps 16 \
+  --sequence-adapter rule \
+  --seed 40 \
+  --run-root runs
+```
+
+### Collect benchmark tables
+
+`pwsh`:
+
+```powershell
+uv run python -m cchp_physical_env collect `
+  --runs-root runs `
+  --output runs/paper/benchmark_summary.csv `
+  --full-output runs/paper/benchmark_summary_full.csv
+```
+
+Linux / Debian / bash:
+
+```bash
+python -m cchp_physical_env collect \
+  --runs-root runs \
+  --output runs/paper/benchmark_summary.csv \
+  --full-output runs/paper/benchmark_summary_full.csv
+```
+
+## Important Notes
+
+- `train` always uses 2024 processed data.
+- `eval` and `sb3-eval` always use 2025 processed data.
+- `summary` checks frozen-schema consistency between train and eval files.
+- `eval` automatically dispatches to SB3 evaluation when the checkpoint has `artifact_type=sb3_policy`.
+- `sb3-eval` requires `--run-dir`; unified `eval` can auto-create or infer it.
+- `--constraint-mode` is supported by most subcommands as an override to `env.constraint_mode`.
+- `collect` accepts `--constraint-mode` only for compatibility; it is not used by the aggregation logic.
