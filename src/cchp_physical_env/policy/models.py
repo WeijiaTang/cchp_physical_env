@@ -12,9 +12,10 @@ except ModuleNotFoundError:  # pragma: no cover
     nn = Any
 
 try:
-    from mamba_ssm import Mamba as MambaBlock
-except ModuleNotFoundError:  # pragma: no cover
-    MambaBlock = None
+    from transformers import MambaConfig, MambaModel
+except (ModuleNotFoundError, ImportError):  # pragma: no cover
+    MambaConfig = None
+    MambaModel = None
 
 
 SUPPORTED_POLICY_BACKBONES = ("mlp", "transformer", "mamba")
@@ -29,10 +30,25 @@ def _require_torch() -> None:
 
 
 def _require_mamba() -> None:
-    if MambaBlock is None:
+    if MambaConfig is None or MambaModel is None:
         raise ModuleNotFoundError(
-            "未检测到 mamba-ssm。请安装 mamba-ssm>=1.2（通常需 CUDA 环境）。"
+            "未检测到 Transformers 中的 Mamba 实现。"
+            "请安装/升级 transformers，并确保 torch 可用。"
         )
+
+
+def _build_mamba_config(*, d_model: int, n_layer: int, d_state: int, d_conv: int, expand: int):
+    _require_mamba()
+    return MambaConfig(
+        vocab_size=1,
+        hidden_size=int(d_model),
+        state_size=int(d_state),
+        num_hidden_layers=int(n_layer),
+        conv_kernel=int(d_conv),
+        expand=int(expand),
+        use_cache=False,
+        use_mambapy=False,
+    )
 
 
 if torch is not None:
@@ -153,17 +169,16 @@ if torch is not None:
         ) -> None:
             _require_mamba()
             super().__init__(n_features=n_features, n_actions=n_actions)
+            self.input_norm = nn.LayerNorm(self.n_features)
             self.input_proj = nn.Linear(self.n_features, d_model)
-            self.blocks = nn.ModuleList(
-                [
-                    MambaBlock(
-                        d_model=d_model,
-                        d_state=d_state,
-                        d_conv=d_conv,
-                        expand=expand,
-                    )
-                    for _ in range(n_layer)
-                ]
+            self.mamba = MambaModel(
+                _build_mamba_config(
+                    d_model=int(d_model),
+                    n_layer=int(n_layer),
+                    d_state=int(d_state),
+                    d_conv=int(d_conv),
+                    expand=int(expand),
+                )
             )
             self.dropout = nn.Dropout(dropout)
             self.output_norm = nn.LayerNorm(d_model)
@@ -172,10 +187,9 @@ if torch is not None:
         def forward(self, window: Tensor) -> Tensor:
             if window.dim() != 3:
                 raise ValueError("MambaPolicyNet 输入必须是 3D 张量 (B,K,D)。")
-            hidden = self.input_proj(window)
-            for block in self.blocks:
-                hidden = hidden + self.dropout(block(hidden))
-            hidden_last = self.output_norm(hidden[:, -1, :])
+            hidden = self.input_proj(self.input_norm(window))
+            outputs = self.mamba(inputs_embeds=hidden, use_cache=False, return_dict=True)
+            hidden_last = self.dropout(self.output_norm(outputs.last_hidden_state[:, -1, :]))
             action_mean = torch.tanh(self.action_head(hidden_last))
             return action_mean
 

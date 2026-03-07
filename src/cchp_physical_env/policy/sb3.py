@@ -24,9 +24,10 @@ except ModuleNotFoundError:  # pragma: no cover
     nn = Any
 
 try:
-    from mamba_ssm import Mamba as MambaBlock
-except ModuleNotFoundError:  # pragma: no cover
-    MambaBlock = None
+    from transformers import MambaConfig, MambaModel
+except (ModuleNotFoundError, ImportError):  # pragma: no cover
+    MambaConfig = None
+    MambaModel = None
 
 try:
     from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
@@ -71,10 +72,25 @@ def _require_torch() -> None:
 
 
 def _require_mamba() -> None:
-    if MambaBlock is None:  # pragma: no cover
+    if MambaConfig is None or MambaModel is None:  # pragma: no cover
         raise ModuleNotFoundError(
-            "未检测到 mamba-ssm。请安装：uv pip install -e '.[mamba]'"
+            "未检测到 Transformers 中的 Mamba 实现。"
+            "请安装/升级 transformers，并确保 torch 可用。"
         )
+
+
+def _build_mamba_config(*, d_model: int, n_layer: int, d_state: int, d_conv: int, expand: int):
+    _require_mamba()
+    return MambaConfig(
+        vocab_size=1,
+        hidden_size=int(d_model),
+        state_size=int(d_state),
+        num_hidden_layers=int(n_layer),
+        conv_kernel=int(d_conv),
+        expand=int(expand),
+        use_cache=False,
+        use_mambapy=False,
+    )
 
 
 def _require_sb3_modules():
@@ -278,6 +294,15 @@ def make_train_env_factory(
 
 if torch is not None and BaseFeaturesExtractor is not object:
 
+    def _sanitize_window_observations(observations: Tensor, *, clip_value: float = 1e6) -> Tensor:
+        safe = torch.nan_to_num(
+            observations,
+            nan=0.0,
+            posinf=float(clip_value),
+            neginf=-float(clip_value),
+        )
+        return torch.clamp(safe, min=-float(clip_value), max=float(clip_value))
+
     class SB3TransformerWindowExtractor(BaseFeaturesExtractor):
         def __init__(
             self,
@@ -293,6 +318,7 @@ if torch is not None and BaseFeaturesExtractor is not object:
                 raise ValueError("TransformerWindowExtractor 仅支持 Box(K,D) observation_space。")
             _, obs_dim = int(shape[0]), int(shape[1])
             super().__init__(observation_space, features_dim=int(d_model))
+            self.input_norm = nn.LayerNorm(obs_dim)
             self.input_proj = nn.Linear(obs_dim, int(d_model))
             encoder_layer = nn.TransformerEncoderLayer(
                 d_model=int(d_model),
@@ -301,6 +327,7 @@ if torch is not None and BaseFeaturesExtractor is not object:
                 dropout=float(dropout),
                 activation="gelu",
                 batch_first=True,
+                norm_first=True,
             )
             self.transformer = nn.TransformerEncoder(encoder_layer=encoder_layer, num_layers=int(n_layer))
             self.output_norm = nn.LayerNorm(int(d_model))
@@ -308,8 +335,11 @@ if torch is not None and BaseFeaturesExtractor is not object:
         def forward(self, observations: Tensor) -> Tensor:
             if observations.dim() != 3:
                 raise ValueError("SB3 Transformer extractor 输入必须是 (B,K,D)。")
-            hidden = self.input_proj(observations)
+            safe_observations = _sanitize_window_observations(observations)
+            normalized_observations = self.input_norm(safe_observations)
+            hidden = self.input_proj(normalized_observations)
             hidden = self.transformer(hidden)
+            hidden = torch.nan_to_num(hidden, nan=0.0, posinf=1e4, neginf=-1e4)
             hidden_last = self.output_norm(hidden[:, -1, :])
             return hidden_last
 
@@ -332,17 +362,16 @@ if torch is not None and BaseFeaturesExtractor is not object:
                 raise ValueError("MambaWindowExtractor 仅支持 Box(K,D) observation_space。")
             _, obs_dim = int(shape[0]), int(shape[1])
             super().__init__(observation_space, features_dim=int(d_model))
+            self.input_norm = nn.LayerNorm(obs_dim)
             self.input_proj = nn.Linear(obs_dim, int(d_model))
-            self.blocks = nn.ModuleList(
-                [
-                    MambaBlock(
-                        d_model=int(d_model),
-                        d_state=int(d_state),
-                        d_conv=int(d_conv),
-                        expand=int(expand),
-                    )
-                    for _ in range(int(n_layer))
-                ]
+            self.mamba = MambaModel(
+                _build_mamba_config(
+                    d_model=int(d_model),
+                    n_layer=int(n_layer),
+                    d_state=int(d_state),
+                    d_conv=int(d_conv),
+                    expand=int(expand),
+                )
             )
             self.dropout = nn.Dropout(float(dropout))
             self.output_norm = nn.LayerNorm(int(d_model))
@@ -350,10 +379,12 @@ if torch is not None and BaseFeaturesExtractor is not object:
         def forward(self, observations: Tensor) -> Tensor:
             if observations.dim() != 3:
                 raise ValueError("SB3 Mamba extractor 输入必须是 (B,K,D)。")
-            hidden = self.input_proj(observations)
-            for block in self.blocks:
-                hidden = hidden + self.dropout(block(hidden))
-            hidden_last = self.output_norm(hidden[:, -1, :])
+            safe_observations = _sanitize_window_observations(observations)
+            normalized_observations = self.input_norm(safe_observations)
+            hidden = self.input_proj(normalized_observations)
+            outputs = self.mamba(inputs_embeds=hidden, use_cache=False, return_dict=True)
+            hidden = torch.nan_to_num(outputs.last_hidden_state, nan=0.0, posinf=1e4, neginf=-1e4)
+            hidden_last = self.dropout(self.output_norm(hidden[:, -1, :]))
             return hidden_last
 
 
