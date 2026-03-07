@@ -68,9 +68,10 @@ pip install -e .
 
 可选依赖：
 - SB3：`uv pip install -e '.[sb3]'`
-- Mamba：`uv pip install -e '.[mamba]'`
 
 `pyproject.toml` 中没有写死 PyTorch，请根据本机 CPU/CUDA 环境安装正确版本，再进行长时间深度学习训练。
+
+`sequence_rule` 与 SB3 使用的 `mamba` 骨干现在均由 `transformers` 提供，因此本仓库不再单独提供 `mamba-ssm` 包或 extra。
 
 ## CLI 快速开始
 

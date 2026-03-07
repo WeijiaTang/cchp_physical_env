@@ -68,9 +68,10 @@ pip install -e .
 
 Optional dependencies:
 - SB3: `uv pip install -e '.[sb3]'`
-- Mamba: `uv pip install -e '.[mamba]'`
 
 PyTorch is intentionally not pinned in `pyproject.toml`. Install the correct CPU/CUDA build for your machine before long deep-learning runs.
+
+The `mamba` backbone used by both `sequence_rule` and SB3 now comes from `transformers`, so there is no separate `mamba-ssm` package or extra in this repo.
 
 ## CLI Quick Start
 
