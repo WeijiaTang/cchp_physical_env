@@ -208,6 +208,47 @@ The unified training entry has three routing modes:
 - built-in deep sequence route: `sequence_rule + mlp|transformer|mamba`
 - SB3 route: `--sb3-enabled`
 
+### Notebook override mapping for `main.ipynb`
+
+The parameter block in [`main.ipynb`](main.ipynb) is not obsolete. Those keys still map to the current `train` / `eval` pipeline.
+
+Environment overrides:
+- `env_overrides.constraint_mode` -> `--constraint-mode`
+- `env_overrides.physics_backend` -> environment backend override in config loading
+
+Training overrides:
+- `policy` -> `--policy`
+- `sequence_adapter` -> `--sequence-adapter`
+- `history_steps` -> `--history-steps`
+- `episode_days` -> `--episode-days`
+- `episodes` -> `--episodes`
+- `train_steps` -> `--train-steps`
+- `batch_size` -> `--batch-size`
+- `update_epochs` -> `--update-epochs`
+- `lr` -> `--lr`
+- `device` -> `--device`
+- `seed` -> `--seed`
+- `sb3_enabled` -> `--sb3-enabled`
+- `sb3_algo` -> `--sb3-algo`
+- `sb3_backbone` -> `--sb3-backbone`
+- `sb3_history_steps` -> `--sb3-history-steps`
+- `sb3_total_timesteps` -> `--sb3-total-timesteps`
+- `sb3_n_envs` -> `--sb3-n-envs`
+- `sb3_learning_rate` -> `--sb3-learning-rate`
+- `sb3_batch_size` -> `--sb3-batch-size`
+- `sb3_gamma` -> `--sb3-gamma`
+
+How to enable each experiment path in the notebook parameter block:
+- random baseline: set `policy='random'`, keep `sb3_enabled=false`
+- rule baseline: set `policy='rule'`, keep `sb3_enabled=false`
+- sequence rule baseline: set `policy='sequence_rule'`, `sequence_adapter='rule'`, keep `sb3_enabled=false`
+- deep sequence training: set `policy='sequence_rule'`, `sequence_adapter='mlp'|'transformer'|'mamba'`, keep `sb3_enabled=false`
+- SB3 training: set `sb3_enabled=true`, then choose `sb3_algo` and `sb3_backbone`
+
+Important routing note:
+- if `sb3_enabled=true`, `train` will prioritize the SB3 route even if `policy='sequence_rule'`
+- therefore the notebook default keeps `policy='rule'` when SB3 is enabled, only to avoid misleading run metadata
+
 ### 3) `eval`
 
 The unified evaluation entry:
