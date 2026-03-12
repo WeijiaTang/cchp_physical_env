@@ -233,10 +233,14 @@ def build_policy_network(
             history_steps=history_steps, n_features=n_features, n_actions=n_actions, **kwargs
         )
     if normalized == "transformer":
+        # transformer/mamba backbone 不需要 history_steps（输入可变长）。
+        # 但训练/恢复 checkpoint 时会把 history_steps 写入 model_kwargs，需忽略避免参数不匹配。
+        kwargs.pop("history_steps", None)
         return TransformerPolicyNet(
             n_features=n_features, n_actions=n_actions, **kwargs
         )
     if normalized == "mamba":
+        kwargs.pop("history_steps", None)
         return MambaPolicyNet(n_features=n_features, n_actions=n_actions, **kwargs)
     raise ValueError(
         f"不支持的 policy_backbone: {policy_backbone}，支持 {SUPPORTED_POLICY_BACKBONES}"

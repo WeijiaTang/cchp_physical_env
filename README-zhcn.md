@@ -208,6 +208,47 @@ python -m cchp_physical_env summary \
 - 内置深度序列路由：`sequence_rule + mlp|transformer|mamba`
 - SB3 路由：`--sb3-enabled`
 
+### `main.ipynb` 的 Notebook 参数映射
+
+[`main.ipynb`](main.ipynb) 里的参数配置区目前没有过时；这些键仍然会映射到当前 `train` / `eval` 流程。
+
+环境覆盖：
+- `env_overrides.constraint_mode` -> `--constraint-mode`
+- `env_overrides.physics_backend` -> 配置加载时的环境后端覆盖
+
+训练覆盖：
+- `policy` -> `--policy`
+- `sequence_adapter` -> `--sequence-adapter`
+- `history_steps` -> `--history-steps`
+- `episode_days` -> `--episode-days`
+- `episodes` -> `--episodes`
+- `train_steps` -> `--train-steps`
+- `batch_size` -> `--batch-size`
+- `update_epochs` -> `--update-epochs`
+- `lr` -> `--lr`
+- `device` -> `--device`
+- `seed` -> `--seed`
+- `sb3_enabled` -> `--sb3-enabled`
+- `sb3_algo` -> `--sb3-algo`
+- `sb3_backbone` -> `--sb3-backbone`
+- `sb3_history_steps` -> `--sb3-history-steps`
+- `sb3_total_timesteps` -> `--sb3-total-timesteps`
+- `sb3_n_envs` -> `--sb3-n-envs`
+- `sb3_learning_rate` -> `--sb3-learning-rate`
+- `sb3_batch_size` -> `--sb3-batch-size`
+- `sb3_gamma` -> `--sb3-gamma`
+
+在 Notebook 参数块里开启不同实验的方式：
+- 随机基线：设置 `policy='random'`，并保持 `sb3_enabled=false`
+- 规则基线：设置 `policy='rule'`，并保持 `sb3_enabled=false`
+- `sequence_rule` 规则路由：设置 `policy='sequence_rule'`、`sequence_adapter='rule'`，并保持 `sb3_enabled=false`
+- 深度序列训练：设置 `policy='sequence_rule'`、`sequence_adapter='mlp'|'transformer'|'mamba'`，并保持 `sb3_enabled=false`
+- SB3 训练：设置 `sb3_enabled=true`，然后再选择 `sb3_algo` 与 `sb3_backbone`
+
+重要路由说明：
+- 只要 `sb3_enabled=true`，`train` 就会优先走 SB3 路径，即使 `policy='sequence_rule'`
+- 因此 Notebook 默认把 `policy='rule'` 和 `sequence_adapter='rule'` 留着，主要是为了避免运行记录文案产生歧义
+
 ### 3）`eval`
 
 统一评估入口：
