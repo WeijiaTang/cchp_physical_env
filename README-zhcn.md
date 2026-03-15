@@ -254,7 +254,7 @@ python -m cchp_physical_env summary \
 统一评估入口：
 - 可评估 baseline checkpoint
 - 遇到 `artifact_type=sb3_policy` 时会自动识别为 SB3 checkpoint
-- 未显式给出 `run_dir` 时可自动推断或自动创建
+- 未显式给出 `run_dir` 时可自动推断（baseline + SB3）；必要时也可自动创建
 
 ### 4）`sb3-train`
 
@@ -263,6 +263,10 @@ python -m cchp_physical_env summary \
 ### 5）`sb3-eval`
 
 显式 SB3 评估入口，要求同时提供 `--run-dir` 与 `--checkpoint`。
+
+说明：
+- `--run-dir` 应该指向 *run 根目录*（包含 `train/`、`eval/`、`checkpoints/` 的目录），不要填 `.../eval`。
+- 如需随机动作采样，可加 `--stochastic`（默认 deterministic）。
 
 ### 6）`calibrate`
 
@@ -542,11 +546,13 @@ python -m cchp_physical_env sb3-train \
   --seed 40
 ```
 
+可选：在 `sb3-train`（或 `train --sb3-enabled`）后追加 `--eval-after-train`，训练结束会立即跑一次完整 2025 评估，并把结果写入同一 `run_dir/eval/`（较耗时）。
+
 评估（`sb3-eval`）：
 
 ```bash
 python -m cchp_physical_env sb3-eval \
-  --run-dir runs/<new_eval_run> \
+  --run-dir runs/<sb3_train_run> \
   --checkpoint runs/<sb3_train_run>/checkpoints/baseline_policy.json \
   --device auto \
   --seed 40
@@ -600,7 +606,7 @@ python -m cchp_physical_env sb3-train \
 
 ```bash
 python -m cchp_physical_env sb3-eval \
-  --run-dir runs/<new_eval_run> \
+  --run-dir runs/<sb3_train_run> \
   --checkpoint runs/<sb3_train_run>/checkpoints/baseline_policy.json \
   --device auto \
   --seed 40

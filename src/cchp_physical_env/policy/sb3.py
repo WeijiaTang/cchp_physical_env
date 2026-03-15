@@ -11,7 +11,13 @@ from typing import Any, Callable
 import numpy as np
 import pandas as pd
 
-from ..core.data import EVAL_YEAR, TRAIN_YEAR, load_exogenous_data, make_episode_sampler
+from ..core.data import (
+    EVAL_YEAR,
+    TRAIN_YEAR,
+    compute_training_statistics,
+    load_exogenous_data,
+    make_episode_sampler,
+)
 from ..core.reporting import flatten_mapping, write_one_row_csv, write_paper_eval_artifacts
 from ..env.cchp_env import CCHPPhysicalEnv, EnvConfig
 
@@ -54,6 +60,7 @@ OBS_KEYS: tuple[str, ...] = (
     "dhi_wm2",
     "soc_bes",
     "gt_on",
+    "gt_state",
     "e_tes_mwh",
     "t_tes_hot_k",
     "sin_t",
@@ -129,8 +136,63 @@ def _extract_year(df: pd.DataFrame) -> int:
     return years[0]
 
 
-def _observation_dict_to_vector(observation: dict[str, float]) -> np.ndarray:
-    return np.asarray([float(observation[key]) for key in OBS_KEYS], dtype=np.float32)
+def _observation_dict_to_vector(observation: dict[str, float], *, keys: tuple[str, ...]) -> np.ndarray:
+    return np.asarray([float(observation[key]) for key in keys], dtype=np.float32)
+
+
+@dataclass(slots=True)
+class ObservationAffineNormalizer:
+    offset: np.ndarray
+    scale: np.ndarray
+    clip_value: float = 10.0
+
+    def apply(self, vector: np.ndarray) -> np.ndarray:
+        raw = np.asarray(vector, dtype=np.float32).reshape(-1)
+        normalized = (raw - self.offset) / self.scale
+        clipped = np.clip(normalized, -float(self.clip_value), float(self.clip_value))
+        return clipped.astype(np.float32, copy=False)
+
+
+def _build_observation_normalizer(
+    *, train_statistics: dict, env_config: EnvConfig, keys: tuple[str, ...], eps: float = 1e-6
+) -> ObservationAffineNormalizer:
+    stats = dict(train_statistics.get("stats", {}) or {})
+    offsets: list[float] = []
+    scales: list[float] = []
+    for key in keys:
+        if key in stats:
+            mean = float(stats[key].get("mean", 0.0))
+            std = float(stats[key].get("std", 1.0))
+            offsets.append(mean)
+            scales.append(max(float(eps), float(std)))
+            continue
+
+        if key == "soc_bes":
+            offsets.append(0.5)
+            scales.append(0.5)
+        elif key == "gt_on":
+            offsets.append(0.5)
+            scales.append(0.5)
+        elif key == "gt_state":
+            offsets.append(1.0)
+            scales.append(1.0)
+        elif key == "e_tes_mwh":
+            cap = max(float(eps), float(getattr(env_config, "e_tes_cap_mwh", 0.0)))
+            offsets.append(0.5 * cap)
+            scales.append(0.5 * cap)
+        elif key == "t_tes_hot_k":
+            offsets.append(360.0)
+            scales.append(20.0)
+        elif key.startswith("sin_") or key.startswith("cos_"):
+            offsets.append(0.0)
+            scales.append(1.0)
+        else:
+            offsets.append(0.0)
+            scales.append(1.0)
+
+    offset_arr = np.asarray(offsets, dtype=np.float32)
+    scale_arr = np.asarray(scales, dtype=np.float32)
+    return ObservationAffineNormalizer(offset=offset_arr, scale=scale_arr, clip_value=10.0)
 
 
 class WindowBuffer:
@@ -216,7 +278,7 @@ class SB3TrainConfig:
         self.device = str(self.device).strip().lower()
 
 
-def _build_spaces(*, history_steps: int):
+def _build_spaces(*, history_steps: int, obs_dim: int):
     _, spaces, *_ = _require_sb3_modules()
     # action: [u_gt,u_bes,u_boiler,u_abs,u_ech,u_tes]
     action_space = spaces.Box(
@@ -228,7 +290,9 @@ def _build_spaces(*, history_steps: int):
     history_steps_int = int(history_steps)
     if history_steps_int <= 0:
         raise ValueError("history_steps 必须 > 0。")
-    obs_dim = len(OBS_KEYS)
+    obs_dim = int(obs_dim)
+    if obs_dim <= 0:
+        raise ValueError("obs_dim 必须 > 0。")
     # observation: windowed floats (K,D)
     # 这里采用保守的大范围有限边界，避免依赖外部统计文件；论文口径建议再加归一化消融。
     obs_low = np.full((history_steps_int, obs_dim), -1e9, dtype=np.float32)
@@ -249,9 +313,13 @@ def make_train_env_factory(
     seed: int,
     episode_days: int,
     history_steps: int,
+    observation_keys: tuple[str, ...],
+    normalizer: ObservationAffineNormalizer | None,
 ) -> Callable[[], Any]:
     gym, *_ = _require_sb3_modules()
-    observation_space, action_space = _build_spaces(history_steps=history_steps)
+    observation_space, action_space = _build_spaces(
+        history_steps=history_steps, obs_dim=len(observation_keys)
+    )
 
     class _CCHPSB3TrainEnv(gym.Env):
         metadata = {"render_modes": []}
@@ -266,7 +334,7 @@ def make_train_env_factory(
             )
             self.env = CCHPPhysicalEnv(exogenous_df=train_df, config=env_config, seed=int(seed))
             self.observation: dict[str, float] | None = None
-            self.buffer = WindowBuffer(history_steps=int(history_steps), obs_dim=len(OBS_KEYS))
+            self.buffer = WindowBuffer(history_steps=int(history_steps), obs_dim=len(observation_keys))
 
         def reset(self, *, seed: int | None = None, options: dict | None = None):
             del options
@@ -275,7 +343,9 @@ def make_train_env_factory(
             _, episode_df = next(self.sampler)
             observation, _ = self.env.reset(seed=int(seed or 0), episode_df=episode_df)
             self.observation = observation
-            vector = _observation_dict_to_vector(observation)
+            vector = _observation_dict_to_vector(observation, keys=observation_keys)
+            if normalizer is not None:
+                vector = normalizer.apply(vector)
             window = self.buffer.reset(vector)
             return window.copy(), {}
 
@@ -285,7 +355,9 @@ def make_train_env_factory(
             action_dict = _action_vector_to_env_action(action)
             next_obs, reward, terminated, truncated, info = self.env.step(action_dict)
             self.observation = next_obs
-            vector = _observation_dict_to_vector(next_obs)
+            vector = _observation_dict_to_vector(next_obs, keys=observation_keys)
+            if normalizer is not None:
+                vector = normalizer.apply(vector)
             window = self.buffer.push(vector)
             return window.copy(), float(reward), bool(terminated), bool(truncated), dict(info)
 
@@ -447,8 +519,21 @@ def train_sb3_policy(
         history_steps=config.history_steps,
     )
     train_summary_path = run_dir / "train" / "summary.json"
+    train_statistics_path = run_dir / "train" / "train_statistics.json"
     checkpoint_path = run_dir / "checkpoints" / "baseline_policy.json"
     model_path = run_dir / "checkpoints" / "sb3_model.zip"
+
+    train_statistics = compute_training_statistics(train_df)
+    train_statistics_path.write_text(
+        json.dumps(train_statistics, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    observation_keys = tuple(OBS_KEYS)
+    normalizer = _build_observation_normalizer(
+        train_statistics=train_statistics,
+        env_config=env_config,
+        keys=observation_keys,
+    )
 
     env_fns = [
         make_train_env_factory(
@@ -457,6 +542,8 @@ def train_sb3_policy(
             seed=config.seed + idx,
             episode_days=config.episode_days,
             history_steps=config.history_steps,
+            observation_keys=observation_keys,
+            normalizer=normalizer,
         )
         for idx in range(config.n_envs)
     ]
@@ -497,7 +584,7 @@ def train_sb3_policy(
         verbose=1,
     )
     model.set_logger(sb3_configure_logger(folder=str(run_dir / "train"), format_strings=["stdout", "csv"]))
-    model.learn(total_timesteps=int(config.total_timesteps))
+    # 先保存一次初始模型与 checkpoint_json，便于 Kaggle 等环境中断时仍可评估/继续分析。
     model.save(str(model_path))
 
     payload = {
@@ -511,19 +598,87 @@ def train_sb3_policy(
         "episode_days": int(config.episode_days),
         "n_envs": int(config.n_envs),
         "total_timesteps": int(config.total_timesteps),
+        "training_complete": False,
         "learning_rate": float(config.learning_rate),
         "batch_size": int(config.batch_size),
         "gamma": float(config.gamma),
         "device": str(config.device),
-        "observation_keys": list(OBS_KEYS),
+        "observation_keys": list(observation_keys),
+        "obs_norm": {"mode": "zscore_affine_v1", "clip_value": 10.0},
         "policy_kwargs": policy_kwargs_serializable,
         "model_path": str(model_path).replace("\\", "/"),
+        "train_statistics_path": str(train_statistics_path).replace("\\", "/"),
         "run_dir": str(run_dir).replace("\\", "/"),
     }
     checkpoint_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     train_summary_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     write_one_row_csv(run_dir / "train" / "summary_flat.csv", flatten_mapping(payload))
+
+    try:
+        from stable_baselines3.common.callbacks import BaseCallback
+    except ModuleNotFoundError:
+        BaseCallback = None  # type: ignore[assignment]
+
+    callback = None
+    if BaseCallback is not None:
+
+        class _OverwriteCheckpointCallback(BaseCallback):
+            def __init__(self, *, path: Path, save_every_steps: int = 100_000):
+                super().__init__()
+                self.path = Path(path)
+                self.save_every_steps = int(save_every_steps)
+                self._last_saved = 0
+
+            def _on_step(self) -> bool:
+                if self.num_timesteps - self._last_saved < self.save_every_steps:
+                    return True
+                self.model.save(str(self.path))
+                self._last_saved = int(self.num_timesteps)
+                return True
+
+        callback = _OverwriteCheckpointCallback(path=model_path, save_every_steps=100_000)
+
+    model.learn(total_timesteps=int(config.total_timesteps), callback=callback)
+    model.save(str(model_path))
+    payload["training_complete"] = True
+    checkpoint_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    train_summary_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    write_one_row_csv(run_dir / "train" / "summary_flat.csv", flatten_mapping(payload))
     return payload
+
+
+def _resolve_sb3_model_path(*, checkpoint_json: Path, model_path_value: str, run_dir_value: str | None) -> Path:
+    candidates: list[Path] = []
+    raw = Path(str(model_path_value))
+    candidates.append(raw)
+
+    checkpoint_dir = checkpoint_json.resolve().parent
+    if not raw.is_absolute():
+        candidates.append(checkpoint_dir / raw)
+
+    if run_dir_value:
+        run_dir_path = Path(str(run_dir_value))
+        candidates.append(run_dir_path / "checkpoints" / "sb3_model.zip")
+        # 常见场景：checkpoint_json 位于 <run_dir>/checkpoints/baseline_policy.json，直接回退到该 run_dir。
+        candidates.append(checkpoint_dir.parent / "checkpoints" / "sb3_model.zip")
+
+    candidates.append(checkpoint_dir / "sb3_model.zip")
+
+    for item in candidates:
+        try:
+            if item.exists():
+                return item
+        except OSError:
+            continue
+
+    searched = "\n".join(f"- {item.as_posix()}" for item in candidates)
+    raise FileNotFoundError(
+        "无法定位 SB3 模型文件（sb3_model.zip）。\n"
+        f"checkpoint_json={checkpoint_json.as_posix()}\n"
+        f"model_path={model_path_value}\n"
+        "已尝试路径：\n"
+        f"{searched}"
+    )
 
 
 def evaluate_sb3_policy(
@@ -554,20 +709,41 @@ def evaluate_sb3_policy(
         raise ValueError("checkpoint_json 缺少 model_path。")
 
     algo_cls = {"ppo": PPO, "sac": SAC, "td3": TD3, "ddpg": DDPG}[algo]
-    model = algo_cls.load(str(model_path), device=device)
+    resolved_model_path = _resolve_sb3_model_path(
+        checkpoint_json=Path(checkpoint_json),
+        model_path_value=str(model_path),
+        run_dir_value=ckpt.get("run_dir"),
+    )
+    model = algo_cls.load(str(resolved_model_path), device=device)
 
     history_steps = int(ckpt.get("history_steps", 1))
     if history_steps <= 0:
         raise ValueError("checkpoint_json.history_steps 必须 > 0。")
-    obs_dim = len(OBS_KEYS)
+    observation_keys = tuple(ckpt.get("observation_keys") or OBS_KEYS)
+    obs_dim = len(observation_keys)
     buffer = WindowBuffer(history_steps=history_steps, obs_dim=obs_dim)
+    normalizer = None
+    obs_norm = ckpt.get("obs_norm") or {}
+    if isinstance(obs_norm, dict) and obs_norm.get("mode"):
+        train_statistics_path = ckpt.get("train_statistics_path")
+        if not train_statistics_path:
+            raise ValueError("checkpoint_json 启用了 obs_norm 但缺少 train_statistics_path。")
+        train_statistics = json.loads(Path(train_statistics_path).read_text(encoding="utf-8"))
+        normalizer = _build_observation_normalizer(
+            train_statistics=train_statistics,
+            env_config=env_config,
+            keys=observation_keys,
+        )
 
     output_run_dir = Path(run_dir)
     (output_run_dir / "eval").mkdir(parents=True, exist_ok=True)
 
     env = CCHPPhysicalEnv(exogenous_df=eval_df, config=env_config, seed=seed)
     observation, _ = env.reset(seed=seed, episode_df=eval_df)
-    window = buffer.reset(_observation_dict_to_vector(observation)).copy()
+    first_vec = _observation_dict_to_vector(observation, keys=observation_keys)
+    if normalizer is not None:
+        first_vec = normalizer.apply(first_vec)
+    window = buffer.reset(first_vec).copy()
     terminated = False
     total_reward = 0.0
     step_rows: list[dict[str, Any]] = []
@@ -577,7 +753,10 @@ def evaluate_sb3_policy(
         action_vec, _ = model.predict(window, deterministic=bool(deterministic))
         action_dict = _action_vector_to_env_action(action_vec)
         observation, reward, terminated, _, info = env.step(action_dict)
-        window = buffer.push(_observation_dict_to_vector(observation)).copy()
+        vec = _observation_dict_to_vector(observation, keys=observation_keys)
+        if normalizer is not None:
+            vec = normalizer.apply(vec)
+        window = buffer.push(vec).copy()
         total_reward += float(reward)
         final_info = dict(info)
         log_row = {key: value for key, value in info.items() if key not in {"violation_flags", "diagnostic_flags"}}

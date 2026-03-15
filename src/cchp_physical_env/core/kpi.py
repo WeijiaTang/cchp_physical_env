@@ -18,6 +18,7 @@ class KPITracker:
     diagnostic_counts: dict[str, int] = field(default_factory=dict)
     diagnostic_step_count: int = 0
     starts: dict[str, int] = field(default_factory=dict)
+    emissions_ton: dict[str, float] = field(default_factory=dict)
 
     def reset(self) -> None:
         self.step_count = 0
@@ -52,6 +53,7 @@ class KPITracker:
         self.diagnostic_counts = {}
         self.diagnostic_step_count = 0
         self.starts = {"gt": 0, "boiler": 0, "ech": 0}
+        self.emissions_ton = {"gt": 0.0, "boiler": 0.0, "total": 0.0}
 
     def record(self, reward: float, step_info: dict) -> None:
         self.step_count += 1
@@ -82,6 +84,10 @@ class KPITracker:
 
         for key in self.starts:
             self.starts[key] += int(step_info.get(f"{key}_started", 0))
+
+        self.emissions_ton["gt"] += float(step_info.get("emission_gt_ton", 0.0))
+        self.emissions_ton["boiler"] += float(step_info.get("emission_boiler_ton", 0.0))
+        self.emissions_ton["total"] += float(step_info.get("emission_total_ton", 0.0))
 
     def summary(self) -> dict:
         heat_demand = max(1e-9, self.energies_mwh["demand_h"])
@@ -116,4 +122,5 @@ class KPITracker:
             "diagnostic_rate": diagnostic_rate,
             "diagnostic_counts": {key: int(value) for key, value in self.diagnostic_counts.items()},
             "starts": {key: int(value) for key, value in self.starts.items()},
+            "emissions_ton": {key: float(value) for key, value in self.emissions_ton.items()},
         }

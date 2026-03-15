@@ -40,6 +40,7 @@ DEFAULT_PAPER_COLUMNS: tuple[str, ...] = (
     "cost_breakdown__unmet_h",
     "cost_breakdown__unmet_c",
     "cost_breakdown__viol",
+    "emissions_ton__total",
 )
 
 
@@ -99,4 +100,3 @@ def write_benchmark_tables(
         result["full_output_csv"] = str(Path(full_output_csv))
     result["n_runs"] = str(int(len(df)))
     return result
-

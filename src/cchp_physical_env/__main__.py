@@ -179,7 +179,21 @@ def _command_train(args: argparse.Namespace) -> None:
             config=config,
             run_root=args.run_root,
         )
-        print(json.dumps({"mode": "train", "train_year": TRAIN_YEAR, "policy": "sb3", **result}, indent=2, ensure_ascii=False))
+        output: dict[str, object] = {"mode": "train", "train_year": TRAIN_YEAR, "policy": "sb3", **result}
+        if bool(getattr(args, "eval_after_train", False)):
+            eval_df = load_exogenous_data(args.eval_path)
+            run_dir = Path(str(result.get("run_dir", "") or "")).resolve()
+            checkpoint_json = run_dir / "checkpoints" / "baseline_policy.json"
+            output["eval_summary"] = evaluate_sb3_policy(
+                eval_df=eval_df,
+                env_config=env_config,
+                checkpoint_json=checkpoint_json,
+                run_dir=run_dir,
+                seed=training_options["seed"],
+                deterministic=True,
+                device=training_options["device"],
+            )
+        print(json.dumps(output, indent=2, ensure_ascii=False))
         return
     if (
         training_options["policy"] == "sequence_rule"
@@ -273,11 +287,12 @@ def _command_eval(args: argparse.Namespace) -> None:
         except Exception:
             checkpoint_payload = {}
         if isinstance(checkpoint_payload, dict) and checkpoint_payload.get("artifact_type") == "sb3_policy":
-            if args.run_dir is None:
-                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                run_dir = Path("runs") / f"{stamp}_eval_sb3_auto"
-            else:
+            if args.run_dir is not None:
                 run_dir = Path(args.run_dir)
+            else:
+                # 与 baseline eval 对齐：默认把评估写回训练 run_dir（checkpoint 的 parent.parent）。
+                # 这会填充训练 run 下预创建的 eval/ 目录，避免“评估结果缺失”的错觉。
+                run_dir = Path(args.checkpoint).resolve().parent.parent
             summary = evaluate_sb3_policy(
                 eval_df=eval_df,
                 env_config=env_config,
@@ -346,7 +361,21 @@ def _command_sb3_train(args: argparse.Namespace) -> None:
         config=config,
         run_root=args.run_root,
     )
-    print(json.dumps({"mode": "sb3_train", **result}, indent=2, ensure_ascii=False))
+    output: dict[str, object] = {"mode": "sb3_train", **result}
+    if bool(getattr(args, "eval_after_train", False)):
+        eval_df = load_exogenous_data(args.eval_path)
+        run_dir = Path(str(result.get("run_dir", "") or "")).resolve()
+        checkpoint_json = run_dir / "checkpoints" / "baseline_policy.json"
+        output["eval_summary"] = evaluate_sb3_policy(
+            eval_df=eval_df,
+            env_config=env_config,
+            checkpoint_json=checkpoint_json,
+            run_dir=run_dir,
+            seed=args.seed,
+            deterministic=True,
+            device=args.device,
+        )
+    print(json.dumps(output, indent=2, ensure_ascii=False))
 
 
 def _command_sb3_eval(args: argparse.Namespace) -> None:
@@ -550,6 +579,12 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--device", type=str, default=argparse.SUPPRESS)
     train_parser.add_argument("--seed", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument(
+        "--eval-after-train",
+        action="store_true",
+        default=False,
+        help="训练结束后立即跑一次 2025 评估，并将结果写入同一 run_dir/eval/（可选，较耗时）。",
+    )
+    train_parser.add_argument(
         "--sb3-enabled",
         action="store_true",
         default=argparse.SUPPRESS,
@@ -638,6 +673,12 @@ def build_parser() -> argparse.ArgumentParser:
     sb3_train_parser.add_argument("--gamma", type=float, default=0.99)
     sb3_train_parser.add_argument("--device", type=str, default="auto")
     sb3_train_parser.add_argument("--seed", type=int, default=42)
+    sb3_train_parser.add_argument(
+        "--eval-after-train",
+        action="store_true",
+        default=False,
+        help="训练结束后立即跑一次 2025 评估，并将结果写入训练 run_dir/eval/（可选，较耗时）。",
+    )
     sb3_train_parser.add_argument(
         "--env-config",
         type=Path,

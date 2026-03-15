@@ -192,6 +192,7 @@ class CCHPPhysicalEnv:
 
         self.gt_prev_p_mw = 0.0
         self.gt_prev_on = False
+        self.gt_on_steps = 0
         self.bes_soc = self._init_bes_soc()
         self.boiler_prev_on = False
         self.ech_prev_on = False
@@ -301,6 +302,7 @@ class CCHPPhysicalEnv:
         self.current_step = 0
         self.gt_prev_p_mw = 0.0
         self.gt_prev_on = False
+        self.gt_on_steps = 0
         self.bes_soc = self._init_bes_soc()
         self.boiler_prev_on = False
         self.ech_prev_on = False
@@ -591,6 +593,10 @@ class CCHPPhysicalEnv:
             config=self.config,
         )
 
+        emission_gt_ton = fuel_input_gt_effective_mw * dt_h * float(self.config.gt_emission_ton_per_mwh_th)
+        emission_boiler_ton = float(boiler_result.fuel_input_mw) * dt_h * float(self.config.boiler_emission_ton_per_mwh_th)
+        emission_total_ton = float(emission_gt_ton + emission_boiler_ton)
+
         boiler_started = int((not self.boiler_prev_on) and (boiler_result.q_heat_mw > 1e-9))
         ech_started = int((not self.ech_prev_on) and (ech_result.q_cool_mw > 1e-9))
 
@@ -624,6 +630,9 @@ class CCHPPhysicalEnv:
             "fuel_input_gt_mw_raw": float(gt_result.fuel_input_mw),
             "fuel_input_gt_effective_mw": float(fuel_input_gt_effective_mw),
             "fuel_input_gt_startup_extra_mw": float(startup_extra_fuel_mw),
+            "emission_gt_ton": float(emission_gt_ton),
+            "emission_boiler_ton": float(emission_boiler_ton),
+            "emission_total_ton": float(emission_total_ton),
             "t_tes_hot_k": float(t_hot_k),
             "e_tes_mwh": float(e_tes_mwh),
             "energy_demand_e_mwh": float(float(row["p_dem_mw"]) * dt_h),
@@ -669,6 +678,10 @@ class CCHPPhysicalEnv:
 
         self.gt_prev_p_mw = p_gt_mw
         self.gt_prev_on = p_gt_mw > 1e-9
+        if self.gt_prev_on:
+            self.gt_on_steps = int(self.gt_on_steps) + 1
+        else:
+            self.gt_on_steps = 0
         self.boiler_prev_on = boiler_result.q_heat_mw > 1e-9
         self.ech_prev_on = ech_result.q_cool_mw > 1e-9
 
@@ -686,10 +699,19 @@ class CCHPPhysicalEnv:
         return next_observation, float(cost_breakdown.reward), terminated, truncated, step_info
 
     def _build_observation(self, row: pd.Series) -> dict[str, float]:
+        dt_h = float(self.config.dt_hours)
+        long_threshold_steps = max(1, int(round(1.0 / max(1e-9, dt_h))))
+        if not self.gt_prev_on:
+            gt_state = 0.0
+        elif int(self.gt_on_steps) >= long_threshold_steps:
+            gt_state = 2.0
+        else:
+            gt_state = 1.0
         return build_observation(
             row=row,
             bes_soc=self.bes_soc,
             gt_prev_on=self.gt_prev_on,
+            gt_state=float(gt_state),
             tes_energy_mwh=self.thermal_storage.energy_mwh,
             tes_hot_k=self.thermal_storage.hot_water_temperature_k(),
         )

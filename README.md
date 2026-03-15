@@ -254,7 +254,7 @@ Important routing note:
 The unified evaluation entry:
 - evaluates baseline checkpoints
 - auto-detects SB3 checkpoints when `artifact_type=sb3_policy`
-- can infer `run_dir` from checkpoint if not provided
+- can infer `run_dir` from checkpoint if not provided (baseline + SB3)
 
 ### 4) `sb3-train`
 
@@ -263,6 +263,10 @@ Explicit Stable-Baselines3 training entry.
 ### 5) `sb3-eval`
 
 Explicit SB3 evaluation entry. Requires both `--run-dir` and `--checkpoint`.
+
+Notes:
+- `--run-dir` should point to the *run root directory* (the folder that contains `train/`, `eval/`, `checkpoints/`), not `.../eval`.
+- Add `--stochastic` to sample actions stochastically (default is deterministic).
 
 ### 6) `calibrate`
 
@@ -542,17 +546,19 @@ python -m cchp_physical_env sb3-train \
   --seed 40
 ```
 
+Optional: add `--eval-after-train` to run the full 2025 evaluation immediately after training, and write outputs into the same `run_dir/eval/`.
+
 Eval (`sb3-eval`):
 
 ```bash
 python -m cchp_physical_env sb3-eval \
-  --run-dir runs/<new_eval_run> \
+  --run-dir runs/<sb3_train_run> \
   --checkpoint runs/<sb3_train_run>/checkpoints/baseline_policy.json \
   --device auto \
   --seed 40
 ```
 
-You can also use the unified `eval` entry for the same checkpoint:
+You can also use the unified `eval` entry for the same checkpoint (by default, it writes back into the training `run_dir` inferred from the checkpoint):
 
 ```bash
 python -m cchp_physical_env eval \
@@ -600,7 +606,7 @@ Eval:
 
 ```bash
 python -m cchp_physical_env sb3-eval \
-  --run-dir runs/<new_eval_run> \
+  --run-dir runs/<sb3_train_run> \
   --checkpoint runs/<sb3_train_run>/checkpoints/baseline_policy.json \
   --device auto \
   --seed 40

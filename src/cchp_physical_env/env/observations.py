@@ -11,6 +11,7 @@ def build_observation(
     row: pd.Series,
     bes_soc: float,
     gt_prev_on: bool,
+    gt_state: float,
     tes_energy_mwh: float,
     tes_hot_k: float,
 ) -> dict[str, float]:
@@ -39,6 +40,7 @@ def build_observation(
         "dhi_wm2": float(row["dhi_wm2"]),
         "soc_bes": float(bes_soc),
         "gt_on": float(1.0 if gt_prev_on else 0.0),
+        "gt_state": float(gt_state),
         "e_tes_mwh": float(tes_energy_mwh),
         "t_tes_hot_k": float(tes_hot_k),
         "sin_t": float(math.sin(day_angle)),
