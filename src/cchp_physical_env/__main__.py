@@ -25,6 +25,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+import pandas as pd
+
 from .core.data import (
     EXPECTED_STEPS_PER_YEAR,
     EVAL_YEAR,
@@ -80,6 +82,26 @@ TRAINING_OPTION_KEYS = (
     "sb3_batch_size",
     "sb3_gamma",
 )
+
+
+def _parse_seed_list(value: object) -> list[int]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [int(item) for item in value]
+    if isinstance(value, str):
+        tokens = [token.strip() for token in value.replace(";", ",").split(",")]
+        return [int(token) for token in tokens if token]
+    return [int(value)]
+
+
+def _normalize_seed_list(value: object, fallback: int = 42) -> list[int]:
+    seeds = _parse_seed_list(value)
+    return seeds or [int(fallback)]
+
+
+def _maybe_seed_run_dir(base: Path, seed: int, multi: bool) -> Path:
+    return base if not multi else base / f"seed_{seed}"
 
 
 def _resolve_env_config_path(args: argparse.Namespace) -> Path:
@@ -159,110 +181,131 @@ def _command_train(args: argparse.Namespace) -> None:
     force_mode = getattr(args, "constraint_mode", None)
     env_config = build_env_config_from_overrides(env_overrides, force_constraint_mode=force_mode)
     training_options = _resolve_training_options(args)
+    seed_values = _normalize_seed_list(training_options.get("seed", 42), fallback=42)
+    multi_seed = len(seed_values) > 1
+
     if bool(training_options.get("sb3_enabled", False)):
-        config = SB3TrainConfig(
-            algo=training_options["sb3_algo"],
-            backbone=training_options["sb3_backbone"],
-            history_steps=training_options["sb3_history_steps"],
-            total_timesteps=training_options["sb3_total_timesteps"],
-            episode_days=training_options["episode_days"],
-            n_envs=training_options["sb3_n_envs"],
-            learning_rate=training_options["sb3_learning_rate"],
-            batch_size=training_options["sb3_batch_size"],
-            gamma=training_options["sb3_gamma"],
-            seed=training_options["seed"],
-            device=training_options["device"],
-        )
-        result = train_sb3_policy(
-            train_df=train_df,
-            env_config=env_config,
-            config=config,
-            run_root=args.run_root,
-        )
-        output: dict[str, object] = {"mode": "train", "train_year": TRAIN_YEAR, "policy": "sb3", **result}
-        if bool(getattr(args, "eval_after_train", False)):
-            eval_df = load_exogenous_data(args.eval_path)
-            run_dir = Path(str(result.get("run_dir", "") or "")).resolve()
-            checkpoint_json = run_dir / "checkpoints" / "baseline_policy.json"
-            output["eval_summary"] = evaluate_sb3_policy(
-                eval_df=eval_df,
-                env_config=env_config,
-                checkpoint_json=checkpoint_json,
-                run_dir=run_dir,
-                seed=training_options["seed"],
-                deterministic=True,
-                device=training_options["device"],
+        eval_df_cache: pd.DataFrame | None = None
+        outputs: list[dict[str, object]] = []
+        for seed in seed_values:
+            current_options = dict(training_options)
+            current_options["seed"] = seed
+            config = SB3TrainConfig(
+                algo=current_options["sb3_algo"],
+                backbone=current_options["sb3_backbone"],
+                history_steps=current_options["sb3_history_steps"],
+                total_timesteps=current_options["sb3_total_timesteps"],
+                episode_days=current_options["episode_days"],
+                n_envs=current_options["sb3_n_envs"],
+                learning_rate=current_options["sb3_learning_rate"],
+                batch_size=current_options["sb3_batch_size"],
+                gamma=current_options["sb3_gamma"],
+                seed=seed,
+                device=current_options["device"],
             )
-        print(json.dumps(output, indent=2, ensure_ascii=False))
+            result = train_sb3_policy(
+                train_df=train_df,
+                env_config=env_config,
+                config=config,
+                run_root=args.run_root,
+            )
+            payload: dict[str, object] = {
+                "mode": "train",
+                "train_year": TRAIN_YEAR,
+                "policy": "sb3",
+                "seed": seed,
+                **result,
+            }
+            if bool(getattr(args, "eval_after_train", False)):
+                if eval_df_cache is None:
+                    eval_df_cache = load_exogenous_data(args.eval_path)
+                run_dir = Path(str(result.get("run_dir", "") or "")).resolve()
+                checkpoint_json = run_dir / "checkpoints" / "baseline_policy.json"
+                payload["eval_summary"] = evaluate_sb3_policy(
+                    eval_df=eval_df_cache,
+                    env_config=env_config,
+                    checkpoint_json=checkpoint_json,
+                    run_dir=run_dir,
+                    seed=seed,
+                    deterministic=True,
+                    device=current_options["device"],
+                )
+            outputs.append(payload)
+        print(json.dumps(outputs[0] if not multi_seed else outputs, indent=2, ensure_ascii=False))
         return
-    if (
+
+    sequence_enabled = (
         training_options["policy"] == "sequence_rule"
         and training_options["sequence_adapter"] in {"mlp", "transformer", "mamba"}
-    ):
+    )
+    if sequence_enabled:
         from .policy.trainer import SequenceTrainerConfig, train_sequence_policy
 
         train_statistics = compute_training_statistics(train_df)
-        trainer_config = SequenceTrainerConfig(
-            policy_backbone=training_options["sequence_adapter"],
-            history_steps=training_options["history_steps"],
-            episode_days=training_options["episode_days"],
-            train_steps=training_options["train_steps"],
-            batch_size=training_options["batch_size"],
-            update_epochs=training_options["update_epochs"],
-            lr=training_options["lr"],
-            seed=training_options["seed"],
-            device=training_options["device"],
-        )
-        result = train_sequence_policy(
-            train_df=train_df,
-            train_statistics=train_statistics,
-            env_config=env_config,
-            trainer_config=trainer_config,
-            run_root=args.run_root,
-        )
-        print(
-            json.dumps(
+        outputs: list[dict[str, object]] = []
+        for seed in seed_values:
+            current_options = dict(training_options)
+            current_options["seed"] = seed
+            trainer_config = SequenceTrainerConfig(
+                policy_backbone=current_options["sequence_adapter"],
+                history_steps=current_options["history_steps"],
+                episode_days=current_options["episode_days"],
+                train_steps=current_options["train_steps"],
+                batch_size=current_options["batch_size"],
+                update_epochs=current_options["update_epochs"],
+                lr=current_options["lr"],
+                seed=seed,
+                device=current_options["device"],
+            )
+            result = train_sequence_policy(
+                train_df=train_df,
+                train_statistics=train_statistics,
+                env_config=env_config,
+                trainer_config=trainer_config,
+                run_root=args.run_root,
+            )
+            outputs.append(
                 {
                     "mode": "train",
                     "train_year": TRAIN_YEAR,
-                    "policy": training_options["policy"],
-                    "sequence_adapter": training_options["sequence_adapter"],
+                    "policy": current_options["policy"],
+                    "sequence_adapter": current_options["sequence_adapter"],
+                    "seed": seed,
                     **result,
-                },
-                indent=2,
-                ensure_ascii=False,
+                }
             )
-        )
+        print(json.dumps(outputs[0] if not multi_seed else outputs, indent=2, ensure_ascii=False))
         return
 
-    run_dir = train_baseline(
-        train_df=train_df,
-        episode_days=training_options["episode_days"],
-        episodes=training_options["episodes"],
-        policy_name=training_options["policy"],
-        history_steps=training_options["history_steps"],
-        sequence_adapter=training_options["sequence_adapter"],
-        seed=training_options["seed"],
-        run_root=args.run_root,
-        config=env_config,
-    )
-    print(
-        json.dumps(
+    outputs: list[dict[str, object]] = []
+    for seed in seed_values:
+        current_options = dict(training_options)
+        current_options["seed"] = seed
+        run_dir = train_baseline(
+            train_df=train_df,
+            episode_days=current_options["episode_days"],
+            episodes=current_options["episodes"],
+            policy_name=current_options["policy"],
+            history_steps=current_options["history_steps"],
+            sequence_adapter=current_options["sequence_adapter"],
+            seed=seed,
+            run_root=args.run_root,
+            config=env_config,
+        )
+        outputs.append(
             {
                 "mode": "train",
                 "train_year": TRAIN_YEAR,
                 "run_dir": str(run_dir),
-                "policy": training_options["policy"],
-                "history_steps": training_options["history_steps"],
-                "sequence_adapter": training_options["sequence_adapter"],
-                "episodes": training_options["episodes"],
-                "episode_days": training_options["episode_days"],
-                "seed": training_options["seed"],
-            },
-            indent=2,
-            ensure_ascii=False,
+                "policy": current_options["policy"],
+                "history_steps": current_options["history_steps"],
+                "sequence_adapter": current_options["sequence_adapter"],
+                "episodes": current_options["episodes"],
+                "episode_days": current_options["episode_days"],
+                "seed": seed,
+            }
         )
-    )
+    print(json.dumps(outputs[0] if not multi_seed else outputs, indent=2, ensure_ascii=False))
 
 
 def _command_eval(args: argparse.Namespace) -> None:
@@ -280,52 +323,64 @@ def _command_eval(args: argparse.Namespace) -> None:
     force_mode = getattr(args, "constraint_mode", None)
     env_config = build_env_config_from_overrides(env_overrides, force_constraint_mode=force_mode)
     training_options = _resolve_training_options(args)
+    seed_values = _normalize_seed_list(training_options.get("seed", 42), fallback=42)
+    multi_seed = len(seed_values) > 1
 
+    checkpoint_payload: dict[str, object] = {}
+    is_sb3_checkpoint = False
     if args.checkpoint is not None:
         try:
             checkpoint_payload = json.loads(Path(args.checkpoint).read_text(encoding="utf-8"))
         except Exception:
             checkpoint_payload = {}
         if isinstance(checkpoint_payload, dict) and checkpoint_payload.get("artifact_type") == "sb3_policy":
-            if args.run_dir is not None:
-                run_dir = Path(args.run_dir)
-            else:
-                # 与 baseline eval 对齐：默认把评估写回训练 run_dir（checkpoint 的 parent.parent）。
-                # 这会填充训练 run 下预创建的 eval/ 目录，避免“评估结果缺失”的错觉。
-                run_dir = Path(args.checkpoint).resolve().parent.parent
+            is_sb3_checkpoint = True
+
+    if args.run_dir is not None:
+        base_run_dir = Path(args.run_dir)
+    elif args.checkpoint is not None:
+        base_run_dir = Path(args.checkpoint).resolve().parent.parent
+    else:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base_run_dir = Path("runs") / f"{stamp}_eval_only"
+
+    outputs: list[dict[str, object]] = []
+    for seed in seed_values:
+        current_options = dict(training_options)
+        current_options["seed"] = seed
+        target_run_dir = _maybe_seed_run_dir(base_run_dir, seed, multi_seed)
+        if is_sb3_checkpoint:
             summary = evaluate_sb3_policy(
                 eval_df=eval_df,
                 env_config=env_config,
                 checkpoint_json=args.checkpoint,
-                run_dir=run_dir,
-                seed=training_options["seed"],
+                run_dir=target_run_dir,
+                seed=seed,
                 deterministic=True,
-                device=training_options["device"],
+                device=current_options["device"],
             )
-            print(json.dumps({"mode": "eval", "eval_year": EVAL_YEAR, "run_dir": str(run_dir), "summary": summary}, indent=2, ensure_ascii=False))
-            return
-
-    if args.run_dir is not None:
-        run_dir = Path(args.run_dir)
-    elif args.checkpoint is not None:
-        run_dir = Path(args.checkpoint).resolve().parent.parent
-    else:
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_dir = Path("runs") / f"{stamp}_eval_only"
-
-    summary = evaluate_baseline(
-        eval_df=eval_df,
-        run_dir=run_dir,
-        policy_name=training_options["policy"],
-        history_steps=training_options["history_steps"],
-        sequence_adapter=training_options["sequence_adapter"],
-        seed=training_options["seed"],
-        checkpoint_path=args.checkpoint,
-        device=training_options["device"],
-        config=env_config,
-    )
-    output = {"mode": "eval", "eval_year": EVAL_YEAR, "run_dir": str(run_dir), "summary": summary}
-    print(json.dumps(output, indent=2, ensure_ascii=False))
+        else:
+            summary = evaluate_baseline(
+                eval_df=eval_df,
+                run_dir=target_run_dir,
+                policy_name=current_options["policy"],
+                history_steps=current_options["history_steps"],
+                sequence_adapter=current_options["sequence_adapter"],
+                seed=seed,
+                checkpoint_path=args.checkpoint,
+                device=current_options["device"],
+                config=env_config,
+            )
+        outputs.append(
+            {
+                "mode": "eval",
+                "eval_year": EVAL_YEAR,
+                "run_dir": str(target_run_dir),
+                "seed": seed,
+                "summary": summary,
+            }
+        )
+    print(json.dumps(outputs[0] if not multi_seed else outputs, indent=2, ensure_ascii=False))
 
 
 def _command_sb3_train(args: argparse.Namespace) -> None:
@@ -342,40 +397,48 @@ def _command_sb3_train(args: argparse.Namespace) -> None:
     force_mode = getattr(args, "constraint_mode", None)
     env_config = build_env_config_from_overrides(env_overrides, force_constraint_mode=force_mode)
 
-    config = SB3TrainConfig(
-        algo=args.algo,
-        backbone=args.backbone,
-        history_steps=args.history_steps,
-        total_timesteps=args.total_timesteps,
-        episode_days=args.episode_days,
-        n_envs=args.n_envs,
-        learning_rate=args.learning_rate,
-        batch_size=args.batch_size,
-        gamma=args.gamma,
-        seed=args.seed,
-        device=args.device,
-    )
-    result = train_sb3_policy(
-        train_df=train_df,
-        env_config=env_config,
-        config=config,
-        run_root=args.run_root,
-    )
-    output: dict[str, object] = {"mode": "sb3_train", **result}
-    if bool(getattr(args, "eval_after_train", False)):
-        eval_df = load_exogenous_data(args.eval_path)
-        run_dir = Path(str(result.get("run_dir", "") or "")).resolve()
-        checkpoint_json = run_dir / "checkpoints" / "baseline_policy.json"
-        output["eval_summary"] = evaluate_sb3_policy(
-            eval_df=eval_df,
-            env_config=env_config,
-            checkpoint_json=checkpoint_json,
-            run_dir=run_dir,
-            seed=args.seed,
-            deterministic=True,
+    seed_values = _normalize_seed_list(args.seed, fallback=42)
+    multi_seed = len(seed_values) > 1
+    eval_df_cache: pd.DataFrame | None = None
+    outputs: list[dict[str, object]] = []
+
+    for seed in seed_values:
+        config = SB3TrainConfig(
+            algo=args.algo,
+            backbone=args.backbone,
+            history_steps=args.history_steps,
+            total_timesteps=args.total_timesteps,
+            episode_days=args.episode_days,
+            n_envs=args.n_envs,
+            learning_rate=args.learning_rate,
+            batch_size=args.batch_size,
+            gamma=args.gamma,
+            seed=seed,
             device=args.device,
         )
-    print(json.dumps(output, indent=2, ensure_ascii=False))
+        result = train_sb3_policy(
+            train_df=train_df,
+            env_config=env_config,
+            config=config,
+            run_root=args.run_root,
+        )
+        payload: dict[str, object] = {"mode": "sb3_train", "seed": seed, **result}
+        if bool(getattr(args, "eval_after_train", False)):
+            if eval_df_cache is None:
+                eval_df_cache = load_exogenous_data(args.eval_path)
+            run_dir = Path(str(result.get("run_dir", "") or "")).resolve()
+            checkpoint_json = run_dir / "checkpoints" / "baseline_policy.json"
+            payload["eval_summary"] = evaluate_sb3_policy(
+                eval_df=eval_df_cache,
+                env_config=env_config,
+                checkpoint_json=checkpoint_json,
+                run_dir=run_dir,
+                seed=seed,
+                deterministic=True,
+                device=args.device,
+            )
+        outputs.append(payload)
+    print(json.dumps(outputs[0] if not multi_seed else outputs, indent=2, ensure_ascii=False))
 
 
 def _command_sb3_eval(args: argparse.Namespace) -> None:
@@ -390,16 +453,30 @@ def _command_sb3_eval(args: argparse.Namespace) -> None:
     env_overrides = load_env_overrides(_resolve_env_config_path(args))
     force_mode = getattr(args, "constraint_mode", None)
     env_config = build_env_config_from_overrides(env_overrides, force_constraint_mode=force_mode)
-    summary = evaluate_sb3_policy(
-        eval_df=eval_df,
-        env_config=env_config,
-        checkpoint_json=args.checkpoint,
-        run_dir=args.run_dir,
-        seed=args.seed,
-        deterministic=not args.stochastic,
-        device=args.device,
-    )
-    print(json.dumps({"mode": "sb3_eval", "run_dir": str(args.run_dir), "summary": summary}, indent=2, ensure_ascii=False))
+    seed_values = _normalize_seed_list(args.seed, fallback=42)
+    multi_seed = len(seed_values) > 1
+    base_run_dir = Path(args.run_dir)
+    outputs: list[dict[str, object]] = []
+    for seed in seed_values:
+        target_run_dir = _maybe_seed_run_dir(base_run_dir, seed, multi_seed)
+        summary = evaluate_sb3_policy(
+            eval_df=eval_df,
+            env_config=env_config,
+            checkpoint_json=args.checkpoint,
+            run_dir=target_run_dir,
+            seed=seed,
+            deterministic=not args.stochastic,
+            device=args.device,
+        )
+        outputs.append(
+            {
+                "mode": "sb3_eval",
+                "run_dir": str(target_run_dir),
+                "seed": seed,
+                "summary": summary,
+            }
+        )
+    print(json.dumps(outputs[0] if not multi_seed else outputs, indent=2, ensure_ascii=False))
 
 def _command_calibrate(args: argparse.Namespace) -> None:
     """
@@ -577,7 +654,7 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--lr", type=float, default=argparse.SUPPRESS)
     train_parser.add_argument("--update-epochs", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument("--device", type=str, default=argparse.SUPPRESS)
-    train_parser.add_argument("--seed", type=int, default=argparse.SUPPRESS)
+    train_parser.add_argument("--seed", type=str, default=argparse.SUPPRESS)
     train_parser.add_argument(
         "--eval-after-train",
         action="store_true",
@@ -640,7 +717,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="当 policy=sequence_rule 时选择序列后端。",
     )
     eval_parser.add_argument("--device", type=str, default=argparse.SUPPRESS)
-    eval_parser.add_argument("--seed", type=int, default=argparse.SUPPRESS)
+    eval_parser.add_argument("--seed", type=str, default=argparse.SUPPRESS)
 
     sb3_train_parser = subparsers.add_parser("sb3-train", help="用 SB3 训练 PPO/SAC/TD3/DDPG（Task-011，可选依赖）。")
     sb3_train_parser.add_argument("--run-root", type=Path, default=Path("runs"))
@@ -672,7 +749,7 @@ def build_parser() -> argparse.ArgumentParser:
     sb3_train_parser.add_argument("--batch-size", type=int, default=256)
     sb3_train_parser.add_argument("--gamma", type=float, default=0.99)
     sb3_train_parser.add_argument("--device", type=str, default="auto")
-    sb3_train_parser.add_argument("--seed", type=int, default=42)
+    sb3_train_parser.add_argument("--seed", type=str, default="42")
     sb3_train_parser.add_argument(
         "--eval-after-train",
         action="store_true",
@@ -697,7 +774,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="覆盖 env.constraint_mode（子命令级覆盖）。",
     )
     sb3_eval_parser.add_argument("--device", type=str, default="auto")
-    sb3_eval_parser.add_argument("--seed", type=int, default=42)
+    sb3_eval_parser.add_argument("--seed", type=str, default="42")
     sb3_eval_parser.add_argument("--stochastic", action="store_true", help="使用随机动作采样（默认 deterministic）。")
     sb3_eval_parser.add_argument(
         "--env-config",

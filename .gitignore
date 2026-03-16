@@ -26,3 +26,5 @@ data/raw/load/industrial_park_scidata2023/osf/csv/Electric power load data
 # outputs
 runs/
 kaggle/
+context_portal/*
+${workspaceFolder}/

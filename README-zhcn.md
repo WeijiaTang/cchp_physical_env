@@ -173,6 +173,101 @@ python -m cchp_physical_env train \
 - `--n-envs` 会提升采样吞吐，但也增加 CPU / 内存压力
 - `--total-timesteps` 是长时间训练最先应该增加的主旋钮
 
+## 推荐 benchmark 配置
+
+全局参数（`--train-path` / `--eval-path` / `--env-config` 等）必须写在子命令前。CLI 现在支持逗号分隔的 `--seed`（例如 `--seed 0,42,123`），会依次跑完多个种子；如需整体表格，可继续用 `scripts/debug/_diag_run.py` 汇总。
+
+### Rule 基线（长跑）
+
+```bash
+python -m cchp_physical_env \
+  --train-path data/processed/cchp_main_15min_2024.csv \
+  --eval-path data/processed/cchp_main_15min_2025.csv \
+  train \
+  --policy rule \
+  --episodes 800 \
+  --episode-days 14 \
+  --seed 42 \
+  --run-root runs/baseline_rule
+```
+
+### 序列策略（Transformer）
+
+```bash
+python -m cchp_physical_env \
+  --train-path data/processed/cchp_main_15min_2024.csv \
+  --eval-path data/processed/cchp_main_15min_2025.csv \
+  train \
+  --policy sequence_rule \
+  --sequence-adapter transformer \
+  --history-steps 32 \
+  --episode-days 14 \
+  --train-steps 409600 \
+  --batch-size 256 \
+  --update-epochs 8 \
+  --lr 1e-4 \
+  --device cuda \
+  --seed 42 \
+  --run-root runs/seq_transformer_long
+```
+
+（将 `--sequence-adapter` 换成 `mlp` / `mamba` 可得到完整骨干对比。）
+
+### SB3（SAC + Transformer）
+
+```bash
+python -m cchp_physical_env \
+  --train-path data/processed/cchp_main_15min_2024.csv \
+  --eval-path data/processed/cchp_main_15min_2025.csv \
+  sb3-train \
+  --algo sac \
+  --backbone transformer \
+  --history-steps 32 \
+  --total-timesteps 2000000 \
+  --episode-days 14 \
+  --n-envs 4 \
+  --learning-rate 3e-4 \
+  --batch-size 512 \
+  --gamma 0.99 \
+  --device cuda \
+  --seed 42 \
+  --run-root runs/sb3_sac_transformer_long
+```
+
+### 约束消融
+
+默认是 `physics_in_loop`。复制上面的命令再加 `--constraint-mode reward_only`，即可得到“物理约束 vs 纯惩罚”对照。
+
+### 跨年评估
+
+训练后统一在 2025 数据集上评估：
+
+```bash
+python -m cchp_physical_env \
+  --train-path data/processed/cchp_main_15min_2024.csv \
+  --eval-path data/processed/cchp_main_15min_2025.csv \
+  eval \
+  --policy rule \
+  --sequence-adapter transformer \
+  --history-steps 32 \
+  --episodes 365 \
+  --episode-days 14 \
+  --seed 42 \
+  --run-root runs/seq_transformer_long
+```
+
+### 训练产物
+
+每次 `train` 都会生成：
+
+- `runs/<timestamp>_.../train/train_statistics.json`：冻结数据统计。
+- `runs/<timestamp>_.../train/episodes.csv`：逐 episode KPI（可直接做表/画图）。
+- `runs/<timestamp>_.../train/summary.json`：平均指标。
+- `runs/<timestamp>_.../checkpoints/baseline_policy.json`：checkpoint 元数据。
+- `runs/<timestamp>_.../eval/*.csv`：`eval` / `sb3-eval` 输出。
+
+配合 `scripts/debug` 下的诊断脚本，可直接支撑论文级 KPI、消融与时序可视化。
+
 ## CLI 全部命令覆盖
 
 本节按 `python -m cchp_physical_env` 实际支持的顶层子命令完整列出。

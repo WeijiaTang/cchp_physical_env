@@ -85,9 +85,12 @@ class RulePolicy:
         soc_bes = observation["soc_bes"]
         price_e = observation["price_e"]
         t_hot_k = observation["t_tes_hot_k"]
+        e_tes_mwh = observation["e_tes_mwh"]
 
         net_load = max(0.0, p_dem - p_re)
         gt_ratio = min(1.0, net_load / max(1e-6, self.p_gt_cap_mw))
+        if gt_ratio < 0.10:
+            gt_ratio = 0.0
         u_gt = gt_ratio * 2.0 - 1.0
 
         if price_e >= self.price_high and soc_bes > 0.25:
@@ -97,13 +100,30 @@ class RulePolicy:
         else:
             u_bes = 0.0
 
-        u_boiler = min(1.0, max(0.0, (qh_dem - self.heat_med * 0.6) / max(1e-6, self.heat_med)))
-        u_abs = 0.9 if (qc_dem > self.cool_med * 0.5 and t_hot_k >= 358.15) else 0.0
+        gt_off = gt_ratio == 0.0
+        tes_rebuild = e_tes_mwh < 8.0
+        tes_need_charge = e_tes_mwh < 14.0
+        if gt_off:
+            if qh_dem > 0.1:
+                base = min(1.0, qh_dem / max(1e-6, self.heat_med))
+                u_boiler = max(base, 0.5 if tes_rebuild else base)
+            else:
+                u_boiler = 0.35 if tes_rebuild else 0.0
+        else:
+            boiler_base = max(0.0, (qh_dem - self.heat_med * 0.4) / max(1e-6, self.heat_med))
+            if tes_rebuild and qh_dem < self.heat_med:
+                boiler_base = max(boiler_base, 0.3)
+            u_boiler = min(1.0, boiler_base)
+
+        ABS_DRIVE_THRESHOLD_K = 358.15
+        u_abs = 0.9 if (qc_dem > self.cool_med * 0.5 and t_hot_k >= ABS_DRIVE_THRESHOLD_K) else 0.0
+
         u_ech = min(1.0, max(0.0, qc_dem / max(1e-6, self.q_ech_cap_mw)))
 
-        if qh_dem > self.heat_med and observation["e_tes_mwh"] > 2.0:
+        heat_source_active = (not gt_off and gt_ratio > 0.0) or u_boiler >= 0.35
+        if qh_dem > self.heat_med and e_tes_mwh > 10.0:
             u_tes = 0.6
-        elif qh_dem < self.heat_med * 0.5 and observation["e_tes_mwh"] < 16.0:
+        elif heat_source_active and tes_need_charge:
             u_tes = -0.5
         else:
             u_tes = 0.0

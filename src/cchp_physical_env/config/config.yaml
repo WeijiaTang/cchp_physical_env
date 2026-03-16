@@ -15,9 +15,8 @@ env:
   physics_backend: tespy
 
   # 必标定（物理主线）
-  # 必标定（物理主线）
   ua_mw_per_k: 0.02
-  sigma_per_hour: 0.02
+  sigma_per_hour: 0.002  # TES 热损耗率（每小时）。工程实际：良好保温约 0.1~0.5%/h；原值 0.02 过高（每步损耗 0.5%，全年累计极大）
   cop_nominal: 0.75
   m_exh_per_fuel_ratio: 18.0
   t_exh_offset_k: 220.0
@@ -100,14 +99,14 @@ training:
   # 策略类型：
   # - rule / random：基线策略（不训练深度模型，主要由 episodes 控制评估/统计采样量）
   # - sequence_rule：序列策略（transformer/mamba），会走深度训练（train_steps/batch_size/update_epochs/lr 生效）
-  policy: rule
+  policy: sequence_rule
   # sequence_rule 的骨干网络：rule / mlp / transformer / mamba
   # - policy=rule 时该字段基本不影响
   # - policy=sequence_rule 时为 mlp/transformer/mamba 才会启用深度训练
-  sequence_adapter: rule
+  sequence_adapter: transformer
   # 序列策略输入窗口长度（单位：步）。15min 数据下：16 步≈4 小时上下文。
   # 常改：越大越能看长期依赖，但训练更慢/更吃显存。
-  history_steps: 16
+  history_steps: 32
   # 每个 episode 的时间切片长度（单位：天），强约束：[7, 30]。
   # - 这不是“训练总天数”，而是每次 rollout 的连续窗口长度。
   # - 不稳就先从 7/14 天开始。
@@ -118,13 +117,13 @@ training:
   episodes: 800
   # 深度训练总环境步数预算（sequence_rule 生效）：达到该步数后停止训练。
   # 15min 数据下，train_steps=4096 约等于 42.7 天的交互步数（4096/96）。
-  train_steps: 4096 # 论文级建议：409600（~4267 天步交互预算，耗时取决于硬件）
+  train_steps: 409600 # 论文级建议：409600（~4267 天步交互预算，耗时取决于硬件）
   # 深度训练 batch 大小（sequence_rule 生效）。越大训练更稳但更吃显存。
-  batch_size: 128
+  batch_size: 256
   # 每次更新重复训练轮数（sequence_rule 生效）。越大拟合更充分但更慢，过大可能过拟合。
-  update_epochs: 4
+  update_epochs: 8
   # 学习率（sequence_rule 生效）。不稳定可先降到 1e-4 量级。
-  lr: 0.0003
+  lr: 0.0001
   # 设备：auto / cpu / cuda（sequence_rule 生效）。Kaggle 常用 auto 或 cuda。
   device: auto
 
@@ -134,20 +133,20 @@ training:
   # - 若 sb3_enabled=true，则 `train` 命令会优先走 SB3 算法训练（而不是 baseline/sequence trainer）
   sb3_enabled: false
   # 选择算法：ppo / sac / td3 / ddpg
-  sb3_algo: ppo
+  sb3_algo: sac
   # SB3 policy backbone：mlp / transformer / mamba
   # - mlp：窗口 flatten 后走 MLP（最稳）
   # - transformer/mamba：用序列编码器提取特征，再交给 SB3 算法头（可用于 “SAC+Transformer” 对比）
-  sb3_backbone: mlp
+  sb3_backbone: transformer
   # SB3 输入窗口长度（步），与 sequence_rule 的 history_steps 概念一致
-  sb3_history_steps: 16
+  sb3_history_steps: 32
   # SB3 总交互步数（训练预算）
-  sb3_total_timesteps: 200000 # 论文级建议：2000000（小时级训练）
+  sb3_total_timesteps: 2000000
   # 并行环境数量（DummyVecEnv），>1 可加速但更吃资源
-  sb3_n_envs: 1
+  sb3_n_envs: 4
   # 学习率（SB3）
   sb3_learning_rate: 0.0003
   # batch size（SB3）
-  sb3_batch_size: 256
+  sb3_batch_size: 512
   # 折扣因子（SB3）
   sb3_gamma: 0.99

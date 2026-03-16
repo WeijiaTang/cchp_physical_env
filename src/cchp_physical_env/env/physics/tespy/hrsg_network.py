@@ -96,7 +96,25 @@ class HRSGNetwork:
         c_min = min(c_exh_mw_per_k, c_w_mw_per_k)
         c_max = max(c_exh_mw_per_k, c_w_mw_per_k)
 
+        # GT 关机时 m_exh=0 → c_exh=0 → c_min=0，这是正常物理行为（无排烟即无回热）。
+        # 不应标记为 violation；仅当 GT 运行但 c_min 异常为 0 时才标记。
+        gt_off = m_exh_kg_per_s <= 1e-9
+        if gt_off:
+            # GT 关机：直接返回零回热，不触发任何 violation flag
+            return HRSGResult(
+                q_rec_mw=0.0,
+                t_exh_out_k=t_exh_in_k,
+                t_water_out_k=t_w_in,
+                epsilon=0.0,
+                ua_effective_mw_per_k=ua_effective,
+                violation_flags={
+                    "hrsg_capacity_invalid": False,
+                    "hrsg_temperature_lift_invalid": False,
+                },
+            )
+
         if c_min <= 0.0 or (t_exh_in_k - t_w_in) <= 0.0:
+            # GT 运行但出现异常（水侧流量为零或温差倒置），才标记 violation
             return HRSGResult(
                 q_rec_mw=0.0,
                 t_exh_out_k=t_exh_in_k,

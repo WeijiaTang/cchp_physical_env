@@ -173,6 +173,101 @@ Practical interpretation:
 - `--n-envs` speeds up collection but increases CPU / RAM load
 - `--total-timesteps` is the first knob to increase for longer runs
 
+## Recommended Benchmark Recipes
+
+Global options such as `--train-path`, `--eval-path`, and `--env-config` must appear **before** the subcommand. The CLI accepts comma-separated seeds (e.g., `--seed 0,42,123`) and fans out runs sequentially; aggregate the outputs with `scripts/debug/_diag_run.py` if you need consolidated tables.
+
+### Rule baseline (long horizon)
+
+```bash
+python -m cchp_physical_env \
+  --train-path data/processed/cchp_main_15min_2024.csv \
+  --eval-path data/processed/cchp_main_15min_2025.csv \
+  train \
+  --policy rule \
+  --episodes 800 \
+  --episode-days 14 \
+  --seed 42 \
+  --run-root runs/baseline_rule
+```
+
+### Sequence trainer (transformer backbone)
+
+```bash
+python -m cchp_physical_env \
+  --train-path data/processed/cchp_main_15min_2024.csv \
+  --eval-path data/processed/cchp_main_15min_2025.csv \
+  train \
+  --policy sequence_rule \
+  --sequence-adapter transformer \
+  --history-steps 32 \
+  --episode-days 14 \
+  --train-steps 409600 \
+  --batch-size 256 \
+  --update-epochs 8 \
+  --lr 1e-4 \
+  --device cuda \
+  --seed 42 \
+  --run-root runs/seq_transformer_long
+```
+
+Replicate with `--sequence-adapter mlp` and `mamba` for the full benchmark.
+
+### SB3 (SAC + transformer backbone)
+
+```bash
+python -m cchp_physical_env \
+  --train-path data/processed/cchp_main_15min_2024.csv \
+  --eval-path data/processed/cchp_main_15min_2025.csv \
+  sb3-train \
+  --algo sac \
+  --backbone transformer \
+  --history-steps 32 \
+  --total-timesteps 2000000 \
+  --episode-days 14 \
+  --n-envs 4 \
+  --learning-rate 3e-4 \
+  --batch-size 512 \
+  --gamma 0.99 \
+  --device cuda \
+  --seed 42 \
+  --run-root runs/sb3_sac_transformer_long
+```
+
+### Constraint ablation
+
+Toggle constraint modeling by re-running any command with `--constraint-mode reward_only`. Compare with the default `physics_in_loop` run to quantify constraint fidelity.
+
+### Cross-year evaluation
+
+After training, evaluate on the frozen 2025 dataset:
+
+```bash
+python -m cchp_physical_env \
+  --train-path data/processed/cchp_main_15min_2024.csv \
+  --eval-path data/processed/cchp_main_15min_2025.csv \
+  eval \
+  --policy rule \
+  --episodes 365 \
+  --episode-days 14 \
+  --history-steps 32 \
+  --sequence-adapter transformer \
+  --seed 42 \
+  --run-root runs/seq_transformer_long
+```
+
+### Training artifacts
+
+Each `train` invocation creates:
+
+- `runs/<timestamp>_.../train/train_statistics.json` – frozen dataset stats.
+- `runs/<timestamp>_.../train/episodes.csv` – per-episode KPIs (sufficient for tables/figures).
+- `runs/<timestamp>_.../train/summary.json` – aggregated means.
+- `runs/<timestamp>_.../checkpoints/baseline_policy.json` – metadata + checkpoint pointer.
+- `runs/<timestamp>_.../eval/*.csv` – written by `eval` / `sb3-eval`.
+
+These artifacts, together with the diagnostics under `scripts/debug/`, cover the quantitative material typically required in a paper (KPI tables, constraint ablations, and per-step traces).
+
 ## Full CLI Command Coverage
 
 This section lists every supported top-level CLI subcommand in `python -m cchp_physical_env`.
