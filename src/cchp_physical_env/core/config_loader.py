@@ -267,18 +267,27 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
                 raise ValueError(f"{key} 必须是布尔值（true/false）。")
             continue
         if key in int_keys:
-            # 允许字符串形式的整数（如 CLI 传入的 "42"），build_training_options 会做 int() 转换
+            # seed 允许逗号分隔的多seed字符串（如 "0,42,123"），由 _normalize_seed_list 解析
+            # 其余 int_keys 允许字符串形式的单个整数（如 CLI 传入的 "42"）
             if isinstance(value, bool):
                 raise ValueError(f"{key} 必须是整数类型。")
             if not isinstance(value, (int, float)):
-                try:
-                    int(str(value).strip())
-                except (ValueError, TypeError):
-                    raise ValueError(f"{key} 必须是整数类型。")
+                raw = str(value).strip()
+                if key == "seed":
+                    # 多seed字符串：每个 token 必须是合法整数
+                    tokens = [t.strip() for t in raw.replace(";", ",").split(",") if t.strip()]
+                    if not tokens or not all(t.lstrip("-").isdigit() for t in tokens):
+                        raise ValueError(f"{key} 必须是整数或逗号分隔的整数列表。")
+                else:
+                    try:
+                        int(raw)
+                    except (ValueError, TypeError):
+                        raise ValueError(f"{key} 必须是整数类型。")
+                    if int(raw) <= 0:
+                        raise ValueError(f"{key} 必须 > 0。")
             else:
-                pass  # int/float 直接通过
-            if int(str(value).strip()) <= 0 and key != "seed":
-                raise ValueError(f"{key} 必须 > 0。")
+                if int(value) <= 0 and key != "seed":
+                    raise ValueError(f"{key} 必须 > 0。")
             continue
         if key in {"lr", "sb3_learning_rate"}:
             if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -324,7 +333,13 @@ def build_training_options(overrides: dict[str, Any] | None = None) -> dict[str,
     validate_training_overrides(merged)
 
     normalized = dict(merged)
-    normalized["seed"] = int(normalized["seed"])
+    # seed 可能是逗号分隔的多seed字符串（由 _normalize_seed_list 在 __main__.py 中解析）
+    # 此处保留原始字符串，不强制转 int；单个整数也保持兼容
+    _seed_raw = normalized["seed"]
+    if isinstance(_seed_raw, str) and "," in _seed_raw:
+        normalized["seed"] = _seed_raw  # 多seed字符串，原样保留
+    else:
+        normalized["seed"] = int(_seed_raw)
     normalized["history_steps"] = int(normalized["history_steps"])
     normalized["episode_days"] = int(normalized["episode_days"])
     normalized["episodes"] = int(normalized["episodes"])
