@@ -267,9 +267,17 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
                 raise ValueError(f"{key} 必须是布尔值（true/false）。")
             continue
         if key in int_keys:
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
+            # 允许字符串形式的整数（如 CLI 传入的 "42"），build_training_options 会做 int() 转换
+            if isinstance(value, bool):
                 raise ValueError(f"{key} 必须是整数类型。")
-            if int(value) <= 0 and key != "seed":
+            if not isinstance(value, (int, float)):
+                try:
+                    int(str(value).strip())
+                except (ValueError, TypeError):
+                    raise ValueError(f"{key} 必须是整数类型。")
+            else:
+                pass  # int/float 直接通过
+            if int(str(value).strip()) <= 0 and key != "seed":
                 raise ValueError(f"{key} 必须 > 0。")
             continue
         if key in {"lr", "sb3_learning_rate"}:
@@ -287,8 +295,9 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
             continue
 
     policy = str(overrides.get("policy", TRAINING_DEFAULTS["policy"])).strip().lower()
-    if policy not in {"rule", "random", "sequence_rule"}:
-        raise ValueError("training.policy 仅支持 rule/random/sequence_rule。")
+    sb3_enabled_flag = bool(overrides.get("sb3_enabled", TRAINING_DEFAULTS.get("sb3_enabled", False)))
+    if not sb3_enabled_flag and policy not in {"rule", "random", "sequence_rule"}:
+        raise ValueError("training.policy 仅支持 rule/random/sequence_rule（sb3_enabled=true 时该字段仅作备注，不参与路由）。")
     sequence_adapter = str(
         overrides.get("sequence_adapter", TRAINING_DEFAULTS["sequence_adapter"])
     ).strip().lower()

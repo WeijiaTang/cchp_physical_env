@@ -485,12 +485,12 @@ python -m cchp_physical_env eval \
 uv run python -m cchp_physical_env train `
   --policy sequence_rule `
   --sequence-adapter mlp `
-  --history-steps 16 `
+  --history-steps 32 `
   --episode-days 28 `
   --train-steps 409600 `
-  --batch-size 1024 `
-  --update-epochs 4 `
-  --lr 0.0003 `
+  --batch-size 256 `
+  --update-epochs 8 `
+  --lr 0.0001 `
   --device auto `
   --seed 40
 ```
@@ -501,12 +501,12 @@ uv run python -m cchp_physical_env train `
 python -m cchp_physical_env train \
   --policy sequence_rule \
   --sequence-adapter mlp \
-  --history-steps 16 \
+  --history-steps 32 \
   --episode-days 28 \
   --train-steps 409600 \
-  --batch-size 1024 \
-  --update-epochs 4 \
-  --lr 0.0003 \
+  --batch-size 256 \
+  --update-epochs 8 \
+  --lr 0.0001 \
   --device auto \
   --seed 40
 ```
@@ -527,12 +527,12 @@ python -m cchp_physical_env eval \
 uv run python -m cchp_physical_env train `
   --policy sequence_rule `
   --sequence-adapter transformer `
-  --history-steps 16 `
+  --history-steps 32 `
   --episode-days 28 `
   --train-steps 409600 `
-  --batch-size 1024 `
-  --update-epochs 4 `
-  --lr 0.0003 `
+  --batch-size 256 `
+  --update-epochs 8 `
+  --lr 0.0001 `
   --device auto `
   --seed 40
 ```
@@ -543,12 +543,12 @@ uv run python -m cchp_physical_env train `
 python -m cchp_physical_env train \
   --policy sequence_rule \
   --sequence-adapter transformer \
-  --history-steps 16 \
+  --history-steps 32 \
   --episode-days 28 \
   --train-steps 409600 \
-  --batch-size 1024 \
-  --update-epochs 4 \
-  --lr 0.0003 \
+  --batch-size 256 \
+  --update-epochs 8 \
+  --lr 0.0001 \
   --device auto \
   --seed 40
 ```
@@ -569,12 +569,12 @@ python -m cchp_physical_env eval \
 uv run python -m cchp_physical_env train `
   --policy sequence_rule `
   --sequence-adapter mamba `
-  --history-steps 16 `
+  --history-steps 32 `
   --episode-days 28 `
   --train-steps 409600 `
-  --batch-size 1024 `
-  --update-epochs 4 `
-  --lr 0.0003 `
+  --batch-size 256 `
+  --update-epochs 8 `
+  --lr 0.0001 `
   --device auto `
   --seed 40
 ```
@@ -585,12 +585,12 @@ uv run python -m cchp_physical_env train `
 python -m cchp_physical_env train \
   --policy sequence_rule \
   --sequence-adapter mamba \
-  --history-steps 16 \
+  --history-steps 32 \
   --episode-days 28 \
   --train-steps 409600 \
-  --batch-size 1024 \
-  --update-epochs 4 \
-  --lr 0.0003 \
+  --batch-size 256 \
+  --update-epochs 8 \
+  --lr 0.0001 \
   --device auto \
   --seed 40
 ```
@@ -613,12 +613,12 @@ python -m cchp_physical_env eval \
 uv run python -m cchp_physical_env sb3-train `
   --algo sac `
   --backbone transformer `
-  --history-steps 16 `
+  --history-steps 32 `
   --total-timesteps 2000000 `
   --episode-days 14 `
-  --n-envs 1 `
+  --n-envs 4 `
   --learning-rate 0.0003 `
-  --batch-size 256 `
+  --batch-size 512 `
   --gamma 0.99 `
   --device auto `
   --seed 40
@@ -630,12 +630,12 @@ uv run python -m cchp_physical_env sb3-train `
 python -m cchp_physical_env sb3-train \
   --algo sac \
   --backbone transformer \
-  --history-steps 16 \
+  --history-steps 32 \
   --total-timesteps 2000000 \
   --episode-days 14 \
-  --n-envs 1 \
+  --n-envs 4 \
   --learning-rate 0.0003 \
-  --batch-size 256 \
+  --batch-size 512 \
   --gamma 0.99 \
   --device auto \
   --seed 40
@@ -669,12 +669,12 @@ python -m cchp_physical_env eval \
 uv run python -m cchp_physical_env sb3-train `
   --algo ppo `
   --backbone mamba `
-  --history-steps 16 `
+  --history-steps 32 `
   --total-timesteps 2000000 `
   --episode-days 14 `
-  --n-envs 1 `
+  --n-envs 4 `
   --learning-rate 0.0003 `
-  --batch-size 256 `
+  --batch-size 512 `
   --gamma 0.99 `
   --device auto `
   --seed 40
@@ -686,12 +686,12 @@ uv run python -m cchp_physical_env sb3-train `
 python -m cchp_physical_env sb3-train \
   --algo ppo \
   --backbone mamba \
-  --history-steps 16 \
+  --history-steps 32 \
   --total-timesteps 2000000 \
   --episode-days 14 \
-  --n-envs 1 \
+  --n-envs 4 \
   --learning-rate 0.0003 \
-  --batch-size 256 \
+  --batch-size 512 \
   --gamma 0.99 \
   --device auto \
   --seed 40
@@ -718,11 +718,11 @@ uv run python -m cchp_physical_env train `
   --sb3-enabled `
   --sb3-algo sac `
   --sb3-backbone transformer `
-  --sb3-history-steps 16 `
+  --sb3-history-steps 32 `
   --sb3-total-timesteps 2000000 `
   --episode-days 14 `
   --sb3-learning-rate 0.0003 `
-  --sb3-batch-size 256 `
+  --sb3-batch-size 512 `
   --sb3-gamma 0.99 `
   --device auto `
   --seed 40
@@ -735,11 +735,11 @@ python -m cchp_physical_env train \
   --sb3-enabled \
   --sb3-algo sac \
   --sb3-backbone transformer \
-  --sb3-history-steps 16 \
+  --sb3-history-steps 32 \
   --sb3-total-timesteps 2000000 \
   --episode-days 14 \
   --sb3-learning-rate 0.0003 \
-  --sb3-batch-size 256 \
+  --sb3-batch-size 512 \
   --sb3-gamma 0.99 \
   --device auto \
   --seed 40
