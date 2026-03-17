@@ -185,6 +185,30 @@ def _command_train(args: argparse.Namespace) -> None:
     multi_seed = len(seed_values) > 1
 
     if bool(training_options.get("sb3_enabled", False)):
+        warnings: list[str] = []
+        if str(training_options.get("policy", "")).strip().lower() in {"rule", "random", "sequence_rule"}:
+            warnings.append("sb3_enabled=true 时 training.policy 仅作记录，不参与路由。")
+        sb3_backbone = str(training_options.get("sb3_backbone", "mlp")).strip().lower()
+        sb3_steps = int(training_options.get("sb3_total_timesteps", 0) or 0)
+        if sb3_backbone in {"transformer", "mamba"} and sb3_steps > 0 and sb3_steps < 300_000:
+            warnings.append("SB3 序列骨干建议更大训练预算：sb3_total_timesteps<300k 可能欠训练。")
+        ignored_keys = sorted(
+            set(TRAINING_OPTION_KEYS)
+            - {
+                "seed",
+                "episode_days",
+                "device",
+                "sb3_enabled",
+                "sb3_algo",
+                "sb3_backbone",
+                "sb3_history_steps",
+                "sb3_total_timesteps",
+                "sb3_n_envs",
+                "sb3_learning_rate",
+                "sb3_batch_size",
+                "sb3_gamma",
+            }
+        )
         eval_df_cache: pd.DataFrame | None = None
         outputs: list[dict[str, object]] = []
         for seed in seed_values:
@@ -214,6 +238,8 @@ def _command_train(args: argparse.Namespace) -> None:
                 "train_year": TRAIN_YEAR,
                 "policy": "sb3",
                 "seed": seed,
+                "ignored_training_keys": ignored_keys,
+                "warnings": warnings,
                 **result,
             }
             if bool(getattr(args, "eval_after_train", False)):
@@ -239,6 +265,32 @@ def _command_train(args: argparse.Namespace) -> None:
         and training_options["sequence_adapter"] in {"mlp", "transformer", "mamba"}
     )
     if sequence_enabled:
+        warnings: list[str] = []
+        episodes_config = int(training_options.get("episodes", 0) or 0)
+        if episodes_config > 0:
+            warnings.append("sequence_rule 深度训练使用 train_steps 作为预算；training.episodes 在该路径不生效。")
+        adapter_name = str(training_options.get("sequence_adapter", "rule")).strip().lower()
+        train_steps = int(training_options.get("train_steps", 0) or 0)
+        update_epochs = int(training_options.get("update_epochs", 0) or 0)
+        if adapter_name in {"transformer", "mamba"} and train_steps > 0 and train_steps < 100_000:
+            warnings.append("transformer/mamba 建议 train_steps>=100k；更小预算通常不公平/不稳定。")
+        if update_epochs >= 20 and train_steps > 0 and train_steps < 200_000:
+            warnings.append("update_epochs 很大但 train_steps 很小：可能出现过拟合/不稳定（建议降低 update_epochs 或提高 train_steps）。")
+        ignored_keys = sorted(
+            set(TRAINING_OPTION_KEYS)
+            - {
+                "seed",
+                "policy",
+                "sequence_adapter",
+                "history_steps",
+                "episode_days",
+                "train_steps",
+                "batch_size",
+                "update_epochs",
+                "lr",
+                "device",
+            }
+        )
         from .policy.trainer import SequenceTrainerConfig, train_sequence_policy
 
         train_statistics = compute_training_statistics(train_df)
@@ -271,12 +323,25 @@ def _command_train(args: argparse.Namespace) -> None:
                     "policy": current_options["policy"],
                     "sequence_adapter": current_options["sequence_adapter"],
                     "seed": seed,
+                    "ignored_training_keys": ignored_keys,
+                    "warnings": warnings,
                     **result,
                 }
             )
         print(json.dumps(outputs[0] if not multi_seed else outputs, indent=2, ensure_ascii=False))
         return
 
+    ignored_keys = sorted(
+        set(TRAINING_OPTION_KEYS)
+        - {
+            "seed",
+            "policy",
+            "sequence_adapter",
+            "history_steps",
+            "episode_days",
+            "episodes",
+        }
+    )
     outputs: list[dict[str, object]] = []
     for seed in seed_values:
         current_options = dict(training_options)
@@ -303,6 +368,7 @@ def _command_train(args: argparse.Namespace) -> None:
                 "episodes": current_options["episodes"],
                 "episode_days": current_options["episode_days"],
                 "seed": seed,
+                "ignored_training_keys": ignored_keys,
             }
         )
     print(json.dumps(outputs[0] if not multi_seed else outputs, indent=2, ensure_ascii=False))
@@ -341,7 +407,7 @@ def _command_eval(args: argparse.Namespace) -> None:
     elif args.checkpoint is not None:
         base_run_dir = Path(args.checkpoint).resolve().parent.parent
     else:
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         base_run_dir = Path("runs") / f"{stamp}_eval_only"
 
     outputs: list[dict[str, object]] = []
@@ -380,6 +446,9 @@ def _command_eval(args: argparse.Namespace) -> None:
                 "summary": summary,
             }
         )
+
+    if multi_seed:
+        _write_multi_seed_eval_summary(base_run_dir, outputs, preferred_seed=42)
     print(json.dumps(outputs[0] if not multi_seed else outputs, indent=2, ensure_ascii=False))
 
 
@@ -476,7 +545,69 @@ def _command_sb3_eval(args: argparse.Namespace) -> None:
                 "summary": summary,
             }
         )
+
+    if multi_seed:
+        _write_multi_seed_eval_summary(base_run_dir, outputs, preferred_seed=42)
     print(json.dumps(outputs[0] if not multi_seed else outputs, indent=2, ensure_ascii=False))
+
+
+def _write_multi_seed_eval_summary(
+    base_run_dir: Path,
+    outputs: list[dict[str, object]],
+    *,
+    preferred_seed: int = 42,
+) -> None:
+    """
+    多 seed 评估时，额外写一份 base_run_dir/eval/summary.json，方便外部导出工具读取。
+
+    约定：
+    - 每个 seed 的详细 summary 仍写在 seed_x/eval/summary.json（原行为）
+    - base summary 默认选择 seed=preferred_seed（若存在），否则选择第一个 seed
+    - 同时写入 eval/summary_seeds.json，记录所有 seed 的摘要
+    """
+    if not outputs:
+        return
+    base_run_dir = Path(base_run_dir)
+    (base_run_dir / "eval").mkdir(parents=True, exist_ok=True)
+
+    seed_to_summary: dict[int, dict[str, object]] = {}
+    seed_entries: list[dict[str, object]] = []
+    for item in outputs:
+        try:
+            seed = int(item.get("seed", 0))
+        except Exception:
+            continue
+        summary = item.get("summary")
+        if isinstance(summary, dict):
+            seed_to_summary[seed] = dict(summary)
+        seed_entries.append(
+            {
+                "seed": seed,
+                "run_dir": str(item.get("run_dir", "")),
+            }
+        )
+
+    # 写入 seed 列表索引。
+    (base_run_dir / "eval" / "summary_seeds.json").write_text(
+        json.dumps(seed_entries, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    # 选择 canonical seed summary。
+    canonical_seed = preferred_seed if preferred_seed in seed_to_summary else None
+    if canonical_seed is None:
+        canonical_seed = sorted(seed_to_summary.keys())[0] if seed_to_summary else None
+    if canonical_seed is None:
+        return
+    canonical = dict(seed_to_summary[canonical_seed])
+    canonical["multi_seed"] = True
+    canonical["canonical_seed"] = int(canonical_seed)
+    canonical["seed_summaries_path"] = str(Path("eval") / "summary_seeds.json")
+    (base_run_dir / "eval" / "summary.json").write_text(
+        json.dumps(canonical, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
 
 def _command_calibrate(args: argparse.Namespace) -> None:
     """
@@ -633,7 +764,7 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--episode-days", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument("--episodes", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument(
-        "--policy", type=str, default=argparse.SUPPRESS, choices=["rule", "random", "sequence_rule"]
+        "--policy", type=str, default=argparse.SUPPRESS, choices=["rule", "random", "sequence_rule", "sb3"]
     )
     train_parser.add_argument(
         "--env-config",
@@ -700,7 +831,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="覆盖 env.constraint_mode（子命令级覆盖）。",
     )
     eval_parser.add_argument(
-        "--policy", type=str, default=argparse.SUPPRESS, choices=["rule", "random", "sequence_rule"]
+        "--policy", type=str, default=argparse.SUPPRESS, choices=["rule", "random", "sequence_rule", "sb3"]
     )
     eval_parser.add_argument(
         "--env-config",

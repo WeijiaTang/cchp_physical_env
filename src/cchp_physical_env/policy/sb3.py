@@ -121,7 +121,7 @@ def _timestamped_run_dir(
     run_root: str | Path, *, mode: str, algo: str, backbone: str, history_steps: int
 ) -> Path:
     root = Path(run_root)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     run_dir = root / f"{stamp}_{mode}_sb3_{algo}_{backbone}_k{int(history_steps)}"
     (run_dir / "train").mkdir(parents=True, exist_ok=True)
     (run_dir / "eval").mkdir(parents=True, exist_ok=True)

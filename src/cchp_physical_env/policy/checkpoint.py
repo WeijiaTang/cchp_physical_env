@@ -93,4 +93,25 @@ def load_policy_predictor(
     predictor = build_torch_module_predictor(
         model=model, device=target_device, action_keys=action_keys
     )
+
+    obs_norm = metadata.get("obs_norm")
+    if isinstance(obs_norm, Mapping) and str(obs_norm.get("kind", "")).strip().lower() == "affine_v1":
+        try:
+            import numpy as np
+
+            offsets = np.asarray(list(obs_norm.get("offset", [])), dtype=np.float32)
+            scales = np.asarray(list(obs_norm.get("scale", [])), dtype=np.float32)
+            feature_keys = list(obs_norm.get("observation_feature_keys") or metadata.get("feature_keys") or [])
+            n_obs = int(len(feature_keys))
+            if n_obs > 0 and offsets.shape == (n_obs,) and scales.shape == (n_obs,):
+                scales = np.where(np.abs(scales) < 1e-6, 1.0, scales)
+                base_predictor = predictor
+
+                def predictor(window, observation):  # type: ignore[no-redef]
+                    window_np = np.asarray(window, dtype=np.float32).copy()
+                    window_np[:, :n_obs] = (window_np[:, :n_obs] - offsets) / scales
+                    return base_predictor(window_np, observation)
+        except Exception:
+            # 归一化为“增强项”，异常时退化为原 predictor，保证旧 checkpoint/轻量环境可用。
+            pass
     return predictor, metadata

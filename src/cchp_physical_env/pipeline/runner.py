@@ -144,6 +144,7 @@ def _build_policy(
     train_statistics: dict,
     history_steps: int,
     sequence_adapter: str = "rule",
+    sequence_feature_keys: tuple[str, ...] | None = None,
     sequence_predictor=None,
 ) -> Policy:
     normalized = policy_name.lower().strip()
@@ -157,12 +158,15 @@ def _build_policy(
             raise ValueError(
                 f"不支持的 sequence_adapter: {sequence_adapter}，支持 {SUPPORTED_SEQUENCE_ADAPTERS}"
             )
-        return SequenceRulePolicy(
-            train_statistics=train_statistics,
-            history_steps=history_steps,
-            sequence_adapter=adapter_name,
-            sequence_predictor=sequence_predictor,
-        )
+        kwargs: dict[str, object] = {
+            "train_statistics": train_statistics,
+            "history_steps": int(history_steps),
+            "sequence_adapter": adapter_name,
+            "sequence_predictor": sequence_predictor,
+        }
+        if sequence_feature_keys is not None:
+            kwargs["feature_keys"] = sequence_feature_keys
+        return SequenceRulePolicy(**kwargs)  # type: ignore[arg-type]
     raise ValueError(f"不支持的策略名称: {policy_name}")
 
 
@@ -209,7 +213,7 @@ def _run_single_episode(
 
 def _create_run_directory(run_root: str | Path, policy_name: str, mode: str) -> Path:
     root = Path(run_root)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     run_dir = root / f"{timestamp}_{mode}_{policy_name}"
     (run_dir / "train").mkdir(parents=True, exist_ok=True)
     (run_dir / "eval").mkdir(parents=True, exist_ok=True)
@@ -341,6 +345,7 @@ def evaluate_baseline(
     train_statistics: dict = {"stats": {}}
     selected_policy = policy_name
     sequence_predictor = None
+    sequence_feature_keys: tuple[str, ...] | None = None
     if checkpoint_path is not None:
         checkpoint_data = json.loads(Path(checkpoint_path).read_text(encoding="utf-8"))
         selected_policy = checkpoint_data.get("policy_name", policy_name)
@@ -359,6 +364,9 @@ def evaluate_baseline(
                 model_metadata.get("sequence_adapter", sequence_adapter)
             )
             history_steps = int(model_metadata.get("history_steps", history_steps))
+            feature_keys = model_metadata.get("feature_keys")
+            if isinstance(feature_keys, (list, tuple)) and feature_keys:
+                sequence_feature_keys = tuple(str(key) for key in feature_keys)
         train_stats_path = checkpoint_data.get("train_statistics_path")
         if train_stats_path:
             train_statistics = json.loads(Path(train_stats_path).read_text(encoding="utf-8"))
@@ -369,6 +377,7 @@ def evaluate_baseline(
         train_statistics=train_statistics,
         history_steps=history_steps,
         sequence_adapter=sequence_adapter,
+        sequence_feature_keys=sequence_feature_keys,
         sequence_predictor=sequence_predictor,
     )
     env = CCHPPhysicalEnv(exogenous_df=eval_df, config=config, seed=seed)

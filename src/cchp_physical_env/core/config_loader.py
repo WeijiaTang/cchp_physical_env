@@ -21,25 +21,26 @@ DEFAULT_TRAINING_BLOCK_KEY = "training"
 
 TRAINING_DEFAULTS: dict[str, Any] = {
     "seed": 42,
-    "policy": "rule",
-    "sequence_adapter": "rule",
-    "history_steps": 16,
+    # 默认对齐“论文档”配置（与 src/cchp_physical_env/config/config.yaml 保持一致）
+    "policy": "sequence_rule",
+    "sequence_adapter": "transformer",
+    "history_steps": 32,
     "episode_days": 14,
-    "episodes": 8,
-    "train_steps": 4096,
-    "batch_size": 128,
-    "update_epochs": 4,
-    "lr": 3e-4,
+    "episodes": 800,
+    "train_steps": 409_600,
+    "batch_size": 256,
+    "update_epochs": 8,
+    "lr": 1e-4,
     "device": "auto",
     # Task-011：可选 SB3 多算法（SAC/TD3/DDPG/PPO）
     "sb3_enabled": False,
-    "sb3_algo": "ppo",
-    "sb3_backbone": "mlp",
-    "sb3_history_steps": 16,
-    "sb3_total_timesteps": 200_000,
-    "sb3_n_envs": 1,
+    "sb3_algo": "sac",
+    "sb3_backbone": "transformer",
+    "sb3_history_steps": 32,
+    "sb3_total_timesteps": 2_000_000,
+    "sb3_n_envs": 4,
     "sb3_learning_rate": 3e-4,
-    "sb3_batch_size": 256,
+    "sb3_batch_size": 512,
     "sb3_gamma": 0.99,
 }
 
@@ -305,8 +306,13 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
 
     policy = str(overrides.get("policy", TRAINING_DEFAULTS["policy"])).strip().lower()
     sb3_enabled_flag = bool(overrides.get("sb3_enabled", TRAINING_DEFAULTS.get("sb3_enabled", False)))
-    if not sb3_enabled_flag and policy not in {"rule", "random", "sequence_rule"}:
-        raise ValueError("training.policy 仅支持 rule/random/sequence_rule（sb3_enabled=true 时该字段仅作备注，不参与路由）。")
+    if sb3_enabled_flag:
+        # sb3_enabled=true 时，policy 仅作记录，但仍需要校验以避免拼写错误污染实验口径。
+        if policy not in {"rule", "random", "sequence_rule", "sb3"}:
+            raise ValueError("training.policy 仅支持 rule/random/sequence_rule/sb3（sb3_enabled=true 时该字段仅作备注，不参与路由）。")
+    else:
+        if policy not in {"rule", "random", "sequence_rule"}:
+            raise ValueError("training.policy 仅支持 rule/random/sequence_rule（sb3_enabled=false）。")
     sequence_adapter = str(
         overrides.get("sequence_adapter", TRAINING_DEFAULTS["sequence_adapter"])
     ).strip().lower()
@@ -336,7 +342,7 @@ def build_training_options(overrides: dict[str, Any] | None = None) -> dict[str,
     # seed 可能是逗号分隔的多seed字符串（由 _normalize_seed_list 在 __main__.py 中解析）
     # 此处保留原始字符串，不强制转 int；单个整数也保持兼容
     _seed_raw = normalized["seed"]
-    if isinstance(_seed_raw, str) and "," in _seed_raw:
+    if isinstance(_seed_raw, str) and ("," in _seed_raw or ";" in _seed_raw):
         normalized["seed"] = _seed_raw  # 多seed字符串，原样保留
     else:
         normalized["seed"] = int(_seed_raw)

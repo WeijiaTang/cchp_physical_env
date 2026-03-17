@@ -10,15 +10,34 @@ import numpy as np
 
 # 默认序列观测特征键元组，定义了环境状态观测中包含的特征变量
 DEFAULT_SEQUENCE_OBSERVATION_FEATURE_KEYS = (
-    "p_dem_mw",    # 电力需求（兆瓦）
-    "qh_dem_mw",   # 热力需求（兆瓦）
-    "qc_dem_mw",   # 冷却需求（兆瓦）
-    "pv_mw",       # 光伏发电量（兆瓦）
-    "wt_mw",       # 风力发电量（兆瓦）
-    "price_e",     # 电价
-    "t_amb_k",     # 环境温度（开尔文）
-    "soc_bes",     # 储能系统荷电状态
-    "e_tes_mwh",   # 热储能能量（兆瓦时）
+    # 目标：尽量与 SB3 OBS_KEYS 对齐，避免序列深度策略“看不到关键状态”。
+    # 注：旧 checkpoint 会在 metadata 中保存 feature_keys；评估时应以 metadata 为准，
+    # 因此修改默认值不会破坏旧模型（见 pipeline/runner.py 的兼容处理）。
+    "p_dem_mw",  # 电力需求（兆瓦）
+    "qh_dem_mw",  # 热力需求（兆瓦）
+    "qc_dem_mw",  # 冷却需求（兆瓦）
+    "pv_mw",  # 光伏发电量（兆瓦）
+    "wt_mw",  # 风力发电量（兆瓦）
+    "price_e",  # 电价
+    "price_gas",  # 气价
+    "carbon_tax",  # 碳税
+    "t_amb_k",  # 环境温度（K）
+    "sp_pa",  # 气压（Pa）
+    "rh_pct",  # 相对湿度（%）
+    "wind_speed",  # 风速
+    "wind_direction",  # 风向
+    "ghi_wm2",  # 总辐照度
+    "dni_wm2",  # 直射辐照度
+    "dhi_wm2",  # 散射辐照度
+    "soc_bes",  # 储能系统 SOC
+    "gt_on",  # GT 是否开启（上一时刻）
+    "gt_state",  # GT 状态（0/1/2）
+    "e_tes_mwh",  # TES 能量（MWh）
+    "t_tes_hot_k",  # TES 热端温度（K）
+    "sin_t",  # 日周期 sin
+    "cos_t",  # 日周期 cos
+    "sin_week",  # 周周期 sin
+    "cos_week",  # 周周期 cos
 )
 
 # 默认序列动作键元组，定义了控制动作的变量名称

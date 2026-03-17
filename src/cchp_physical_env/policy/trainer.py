@@ -22,6 +22,9 @@ from ..pipeline.sequence import (
 from .checkpoint import resolve_torch_device, save_policy
 from .models import SUPPORTED_POLICY_BACKBONES, build_policy_network
 
+_SEQUENCE_CHECKPOINT_EVERY_STEPS = 100_000
+_NORM_EPS = 1e-6
+
 
 def _require_torch_modules():
     try:
@@ -110,6 +113,12 @@ class SequencePolicyTrainer:
         self.env_config = env_config
         self.config = config
         self.device = resolve_torch_device(config.device)
+        try:
+            self.torch.manual_seed(int(self.config.seed))
+            if str(self.device).startswith("cuda") and getattr(self.torch, "cuda", None) is not None:
+                self.torch.cuda.manual_seed_all(int(self.config.seed))
+        except Exception:
+            pass
         self.rng = np.random.default_rng(config.seed)
 
         self.feature_keys = DEFAULT_SEQUENCE_OBSERVATION_FEATURE_KEYS
@@ -118,6 +127,12 @@ class SequencePolicyTrainer:
             history_steps=self.config.history_steps,
             feature_keys=self.feature_keys,
             action_feature_keys=self.action_keys,
+        )
+
+        self.obs_norm_payload, self._obs_offset, self._obs_scale = _build_sequence_obs_norm(
+            feature_keys=self.feature_keys,
+            train_statistics=self.train_statistics,
+            env_config=self.env_config,
         )
 
         model_kwargs = dict(self.config.model_kwargs)
@@ -139,15 +154,76 @@ class SequencePolicyTrainer:
         dump_statistics_json(
             self.train_statistics, self.run_dir / "train" / "train_statistics.json"
         )
+        self.checkpoint_json = self.run_dir / "checkpoints" / "baseline_policy.json"
 
     def _create_run_directory(self, run_root: str | Path) -> Path:
         root = Path(run_root)
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         run_dir = root / f"{stamp}_train_sequence_{self.config.policy_backbone}"
         (run_dir / "train").mkdir(parents=True, exist_ok=True)
         (run_dir / "eval").mkdir(parents=True, exist_ok=True)
         (run_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
         return run_dir
+
+    def _normalize_window(self, window: np.ndarray) -> np.ndarray:
+        """对序列窗口的观测部分做 affine 归一化（动作部分不处理）。"""
+
+        normalized = np.asarray(window, dtype=np.float32).copy()
+        n_obs = len(self.feature_keys)
+        normalized[:, :n_obs] = (normalized[:, :n_obs] - self._obs_offset) / self._obs_scale
+        return normalized
+
+    def _build_checkpoint_metadata(self, *, total_env_steps: int, update_idx: int, training_complete: bool) -> dict[str, Any]:
+        model_kwargs = {
+            "history_steps": int(self.config.history_steps),
+            **dict(self.config.model_kwargs),
+        }
+        return {
+            "artifact_type": "sequence_torch_policy",
+            "policy_name": "sequence_rule",
+            "sequence_adapter": self.config.policy_backbone,
+            "policy_backbone": self.config.policy_backbone,
+            "history_steps": int(self.config.history_steps),
+            "n_features": int(self.window_buffer.n_features),
+            "n_actions": int(len(self.action_keys)),
+            "feature_keys": list(self.feature_keys),
+            "action_keys": list(self.action_keys),
+            "model_kwargs": model_kwargs,
+            "obs_norm": dict(self.obs_norm_payload),
+            "total_env_steps": int(total_env_steps),
+            "update_idx": int(update_idx),
+            "training_complete": bool(training_complete),
+        }
+
+    def _write_checkpoint_json(
+        self,
+        *,
+        model_checkpoint_path: Path,
+        total_env_steps: int,
+        update_idx: int,
+        training_complete: bool,
+    ) -> None:
+        checkpoint_payload = {
+            "artifact_type": "sequence_torch_policy",
+            "policy_name": "sequence_rule",
+            "sequence_adapter": self.config.policy_backbone,
+            "history_steps": int(self.config.history_steps),
+            "seed": int(self.config.seed),
+            "train_year": TRAIN_YEAR,
+            "train_steps": int(self.config.train_steps),
+            "batch_size": int(self.config.batch_size),
+            "lr": float(self.config.lr),
+            "train_statistics_path": str(self.run_dir / "train" / "train_statistics.json"),
+            "model_checkpoint_path": str(model_checkpoint_path),
+            "device": self.device,
+            "total_env_steps": int(total_env_steps),
+            "update_idx": int(update_idx),
+            "training_complete": bool(training_complete),
+        }
+        self.checkpoint_json.write_text(
+            json.dumps(checkpoint_payload, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
 
     def _build_scheduler(self):
         try:
@@ -195,7 +271,8 @@ class SequencePolicyTrainer:
         self.model.eval()
         with self.torch.no_grad():
             while not terminated and step_count < max_steps:
-                window_np = self.window_buffer.current_window()
+                window_raw = self.window_buffer.current_window()
+                window_np = self._normalize_window(window_raw)
                 window_tensor = (
                     self.torch.as_tensor(window_np, dtype=self.torch.float32, device=self.device)
                     .unsqueeze(0)
@@ -293,6 +370,14 @@ class SequencePolicyTrainer:
         total_env_steps = 0
         update_idx = 0
         rows: list[dict[str, Any]] = []
+        checkpoint_every = int(
+            min(
+                _SEQUENCE_CHECKPOINT_EVERY_STEPS,
+                max(2_000, int(self.config.train_steps // 5)),
+            )
+        )
+        next_checkpoint_step = checkpoint_every
+        latest_checkpoint_path = self.run_dir / "checkpoints" / "sequence_policy_latest.pt"
 
         tqdm = None
         try:
@@ -362,6 +447,26 @@ class SequencePolicyTrainer:
                     "total_env_steps": int(total_env_steps),
                 }
             )
+
+            if total_env_steps >= next_checkpoint_step:
+                metadata = self._build_checkpoint_metadata(
+                    total_env_steps=total_env_steps,
+                    update_idx=update_idx,
+                    training_complete=False,
+                )
+                save_policy(
+                    model=self.model,
+                    checkpoint_path=latest_checkpoint_path,
+                    metadata=metadata,
+                )
+                self._write_checkpoint_json(
+                    model_checkpoint_path=latest_checkpoint_path,
+                    total_env_steps=total_env_steps,
+                    update_idx=update_idx,
+                    training_complete=False,
+                )
+                next_checkpoint_step += checkpoint_every
+
             update_idx += 1
 
         if pbar is not None:
@@ -372,44 +477,22 @@ class SequencePolicyTrainer:
 
         pd.DataFrame(rows).to_csv(self.run_dir / "train" / "sequence_updates.csv", index=False)
 
+        final_checkpoint_path = self.run_dir / "checkpoints" / "sequence_policy.pt"
+        final_metadata = self._build_checkpoint_metadata(
+            total_env_steps=total_env_steps,
+            update_idx=update_idx,
+            training_complete=True,
+        )
         model_checkpoint_path = save_policy(
             model=self.model,
-            checkpoint_path=self.run_dir / "checkpoints" / "sequence_policy.pt",
-            metadata={
-                "artifact_type": "sequence_torch_policy",
-                "policy_name": "sequence_rule",
-                "sequence_adapter": self.config.policy_backbone,
-                "policy_backbone": self.config.policy_backbone,
-                "history_steps": int(self.config.history_steps),
-                "n_features": int(self.window_buffer.n_features),
-                "n_actions": int(len(self.action_keys)),
-                "feature_keys": list(self.feature_keys),
-                "action_keys": list(self.action_keys),
-                "model_kwargs": {
-                    "history_steps": int(self.config.history_steps),
-                    **dict(self.config.model_kwargs),
-                },
-            },
+            checkpoint_path=final_checkpoint_path,
+            metadata=final_metadata,
         )
-
-        checkpoint_json = self.run_dir / "checkpoints" / "baseline_policy.json"
-        checkpoint_payload = {
-            "artifact_type": "sequence_torch_policy",
-            "policy_name": "sequence_rule",
-            "sequence_adapter": self.config.policy_backbone,
-            "history_steps": int(self.config.history_steps),
-            "seed": int(self.config.seed),
-            "train_year": TRAIN_YEAR,
-            "train_steps": int(self.config.train_steps),
-            "batch_size": int(self.config.batch_size),
-            "lr": float(self.config.lr),
-            "train_statistics_path": str(self.run_dir / "train" / "train_statistics.json"),
-            "model_checkpoint_path": str(model_checkpoint_path),
-            "device": self.device,
-        }
-        checkpoint_json.write_text(
-            json.dumps(checkpoint_payload, indent=2, ensure_ascii=False),
-            encoding="utf-8",
+        self._write_checkpoint_json(
+            model_checkpoint_path=model_checkpoint_path,
+            total_env_steps=total_env_steps,
+            update_idx=update_idx,
+            training_complete=True,
         )
 
         summary = {
@@ -423,14 +506,80 @@ class SequencePolicyTrainer:
             "batch_size": int(self.config.batch_size),
             "lr": float(self.config.lr),
             "model_checkpoint_path": str(model_checkpoint_path),
-            "checkpoint_json_path": str(checkpoint_json),
+            "checkpoint_json_path": str(self.checkpoint_json),
             "run_dir": str(self.run_dir),
+            "observation_feature_keys": list(self.feature_keys),
+            "obs_norm": dict(self.obs_norm_payload),
         }
         (self.run_dir / "train" / "summary.json").write_text(
             json.dumps(summary, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
         return summary
+
+
+def _build_sequence_obs_norm(
+    *,
+    feature_keys: tuple[str, ...],
+    train_statistics: dict,
+    env_config: EnvConfig,
+) -> tuple[dict[str, Any], np.ndarray, np.ndarray]:
+    """
+    为序列深度策略构建观测归一化参数（默认启用）。
+
+    规则：
+    - 外生变量：使用 training_statistics 的 mean/std（仅训练年拟合）
+    - 内部状态：使用 EnvConfig 的物理边界做中心化/缩放
+    """
+    stats = dict(train_statistics.get("stats", {}) or {})
+
+    offsets: list[float] = []
+    scales: list[float] = []
+    for key in feature_keys:
+        offset = 0.0
+        scale = 1.0
+        if key in stats:
+            entry = stats.get(key, {}) or {}
+            offset = float(entry.get("mean", 0.0))
+            scale = float(entry.get("std", 1.0))
+        elif key == "soc_bes":
+            low = float(env_config.bes_soc_min)
+            high = float(env_config.bes_soc_max)
+            offset = 0.5 * (low + high)
+            scale = 0.5 * max(_NORM_EPS, high - low)
+        elif key == "gt_on":
+            offset = 0.5
+            scale = 0.5
+        elif key == "gt_state":
+            offset = 1.0
+            scale = 1.0
+        elif key == "e_tes_mwh":
+            cap = float(env_config.e_tes_cap_mwh)
+            offset = 0.5 * cap
+            scale = 0.5 * max(_NORM_EPS, cap)
+        elif key == "t_tes_hot_k":
+            # TES 热端温度大致在 [hrsg_water_inlet_k, hrsg_water_inlet_k + 60] 附近。
+            center = float(env_config.hrsg_water_inlet_k) + 30.0
+            offset = center
+            scale = 30.0
+        elif key in {"sin_t", "cos_t", "sin_week", "cos_week"}:
+            offset = 0.0
+            scale = 1.0
+
+        if not np.isfinite(scale) or abs(scale) < _NORM_EPS:
+            scale = 1.0
+        offsets.append(float(offset))
+        scales.append(float(scale))
+
+    offset_arr = np.asarray(offsets, dtype=np.float32)
+    scale_arr = np.asarray(scales, dtype=np.float32)
+    payload = {
+        "kind": "affine_v1",
+        "observation_feature_keys": list(feature_keys),
+        "offset": offsets,
+        "scale": scales,
+    }
+    return payload, offset_arr, scale_arr
 
 
 def train_sequence_policy(

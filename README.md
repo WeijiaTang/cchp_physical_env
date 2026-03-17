@@ -342,7 +342,10 @@ How to enable each experiment path in the notebook parameter block:
 
 Important routing note:
 - if `sb3_enabled=true`, `train` will prioritize the SB3 route even if `policy='sequence_rule'`
-- therefore the notebook default keeps `policy='rule'` when SB3 is enabled, only to avoid misleading run metadata
+- therefore when SB3 is enabled, `policy` / `sequence_adapter` should be treated as metadata only (to avoid ambiguity, you may set `policy='sb3'` as a record value).
+
+Notebook default:
+- `main.ipynb` defaults are the **paper profile**, aligned with `src/cchp_physical_env/config/config.yaml` (deep sequence: `policy=sequence_rule`, `sequence_adapter=transformer`, `sb3_enabled=false`).
 
 ### 3) `eval`
 
@@ -378,6 +381,13 @@ Scan `runs/` and aggregate evaluation outputs into benchmark CSV tables.
 ## Training + Evaluation Recipes
 
 This section is organized by actual experiment type. Every training example is followed by an evaluation command.
+
+Paper defaults (no extra flags):
+
+```bash
+python -m cchp_physical_env train \
+  --env-config src/cchp_physical_env/config/config.yaml
+```
 
 ### 1) Rule Baseline
 
@@ -486,7 +496,7 @@ uv run python -m cchp_physical_env train `
   --policy sequence_rule `
   --sequence-adapter mlp `
   --history-steps 32 `
-  --episode-days 28 `
+  --episode-days 14 `
   --train-steps 409600 `
   --batch-size 256 `
   --update-epochs 8 `
@@ -502,7 +512,7 @@ python -m cchp_physical_env train \
   --policy sequence_rule \
   --sequence-adapter mlp \
   --history-steps 32 \
-  --episode-days 28 \
+  --episode-days 14 \
   --train-steps 409600 \
   --batch-size 256 \
   --update-epochs 8 \
@@ -528,7 +538,7 @@ uv run python -m cchp_physical_env train `
   --policy sequence_rule `
   --sequence-adapter transformer `
   --history-steps 32 `
-  --episode-days 28 `
+  --episode-days 14 `
   --train-steps 409600 `
   --batch-size 256 `
   --update-epochs 8 `
@@ -544,7 +554,7 @@ python -m cchp_physical_env train \
   --policy sequence_rule \
   --sequence-adapter transformer \
   --history-steps 32 \
-  --episode-days 28 \
+  --episode-days 14 \
   --train-steps 409600 \
   --batch-size 256 \
   --update-epochs 8 \
@@ -570,7 +580,7 @@ uv run python -m cchp_physical_env train `
   --policy sequence_rule `
   --sequence-adapter mamba `
   --history-steps 32 `
-  --episode-days 28 `
+  --episode-days 14 `
   --train-steps 409600 `
   --batch-size 256 `
   --update-epochs 8 `
@@ -586,7 +596,7 @@ python -m cchp_physical_env train \
   --policy sequence_rule \
   --sequence-adapter mamba \
   --history-steps 32 \
-  --episode-days 28 \
+  --episode-days 14 \
   --train-steps 409600 \
   --batch-size 256 \
   --update-epochs 8 \

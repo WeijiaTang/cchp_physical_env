@@ -342,7 +342,10 @@ python -m cchp_physical_env summary \
 
 重要路由说明：
 - 只要 `sb3_enabled=true`，`train` 就会优先走 SB3 路径，即使 `policy='sequence_rule'`
-- 因此 Notebook 默认把 `policy='rule'` 和 `sequence_adapter='rule'` 留着，主要是为了避免运行记录文案产生歧义
+- 因此当 SB3 启用时，`policy` / `sequence_adapter` 应视为“记录用元信息”（你也可以把 `policy='sb3'` 作为记录值来避免歧义）
+
+Notebook 默认值：
+- `main.ipynb` 默认使用 **论文档**，与 `src/cchp_physical_env/config/config.yaml` 对齐（深度序列：`policy=sequence_rule`、`sequence_adapter=transformer`、`sb3_enabled=false`）。
 
 ### 3）`eval`
 
@@ -378,6 +381,13 @@ python -m cchp_physical_env summary \
 ## 训练 + 评估示例
 
 本节按实际实验类型组织。每个训练命令后面都接一个对应的评估命令。
+
+论文档默认值（不额外传参）：
+
+```bash
+python -m cchp_physical_env train \
+  --env-config src/cchp_physical_env/config/config.yaml
+```
 
 ### 1）规则基线（Rule Baseline）
 
@@ -486,7 +496,7 @@ uv run python -m cchp_physical_env train `
   --policy sequence_rule `
   --sequence-adapter mlp `
   --history-steps 32 `
-  --episode-days 28 `
+  --episode-days 14 `
   --train-steps 409600 `
   --batch-size 256 `
   --update-epochs 8 `
@@ -502,7 +512,7 @@ python -m cchp_physical_env train \
   --policy sequence_rule \
   --sequence-adapter mlp \
   --history-steps 32 \
-  --episode-days 28 \
+  --episode-days 14 \
   --train-steps 409600 \
   --batch-size 256 \
   --update-epochs 8 \
@@ -528,7 +538,7 @@ uv run python -m cchp_physical_env train `
   --policy sequence_rule `
   --sequence-adapter transformer `
   --history-steps 32 `
-  --episode-days 28 `
+  --episode-days 14 `
   --train-steps 409600 `
   --batch-size 256 `
   --update-epochs 8 `
@@ -544,7 +554,7 @@ python -m cchp_physical_env train \
   --policy sequence_rule \
   --sequence-adapter transformer \
   --history-steps 32 \
-  --episode-days 28 \
+  --episode-days 14 \
   --train-steps 409600 \
   --batch-size 256 \
   --update-epochs 8 \
@@ -570,7 +580,7 @@ uv run python -m cchp_physical_env train `
   --policy sequence_rule `
   --sequence-adapter mamba `
   --history-steps 32 `
-  --episode-days 28 `
+  --episode-days 14 `
   --train-steps 409600 `
   --batch-size 256 `
   --update-epochs 8 `
@@ -586,7 +596,7 @@ python -m cchp_physical_env train \
   --policy sequence_rule \
   --sequence-adapter mamba \
   --history-steps 32 \
-  --episode-days 28 \
+  --episode-days 14 \
   --train-steps 409600 \
   --batch-size 256 \
   --update-epochs 8 \
