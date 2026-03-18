@@ -81,6 +81,19 @@ TRAINING_OPTION_KEYS = (
     "sb3_learning_rate",
     "sb3_batch_size",
     "sb3_gamma",
+    "sb3_vec_norm_obs",
+    "sb3_vec_norm_reward",
+    "sb3_eval_freq",
+    "sb3_eval_episode_days",
+    "sb3_ppo_n_steps",
+    "sb3_ppo_gae_lambda",
+    "sb3_ppo_ent_coef",
+    "sb3_ppo_clip_range",
+    "sb3_learning_starts",
+    "sb3_train_freq",
+    "sb3_gradient_steps",
+    "sb3_tau",
+    "sb3_action_noise_std",
     "sb3_buffer_size",
     "sb3_optimize_memory_usage",
 )
@@ -188,7 +201,12 @@ def _command_train(args: argparse.Namespace) -> None:
 
     if bool(training_options.get("sb3_enabled", False)):
         warnings: list[str] = []
-        if str(training_options.get("policy", "")).strip().lower() in {"rule", "random", "sequence_rule"}:
+        if str(training_options.get("policy", "")).strip().lower() in {
+            "rule",
+            "easy_rule",
+            "random",
+            "sequence_rule",
+        }:
             warnings.append("sb3_enabled=true 时 training.policy 仅作记录，不参与路由。")
         sb3_backbone = str(training_options.get("sb3_backbone", "mlp")).strip().lower()
         sb3_steps = int(training_options.get("sb3_total_timesteps", 0) or 0)
@@ -209,6 +227,19 @@ def _command_train(args: argparse.Namespace) -> None:
                 "sb3_learning_rate",
                 "sb3_batch_size",
                 "sb3_gamma",
+                "sb3_vec_norm_obs",
+                "sb3_vec_norm_reward",
+                "sb3_eval_freq",
+                "sb3_eval_episode_days",
+                "sb3_ppo_n_steps",
+                "sb3_ppo_gae_lambda",
+                "sb3_ppo_ent_coef",
+                "sb3_ppo_clip_range",
+                "sb3_learning_starts",
+                "sb3_train_freq",
+                "sb3_gradient_steps",
+                "sb3_tau",
+                "sb3_action_noise_std",
                 "sb3_buffer_size",
                 "sb3_optimize_memory_usage",
             }
@@ -228,6 +259,19 @@ def _command_train(args: argparse.Namespace) -> None:
                 learning_rate=current_options["sb3_learning_rate"],
                 batch_size=current_options["sb3_batch_size"],
                 gamma=current_options["sb3_gamma"],
+                vec_norm_obs=bool(current_options["sb3_vec_norm_obs"]),
+                vec_norm_reward=bool(current_options["sb3_vec_norm_reward"]),
+                eval_freq=current_options["sb3_eval_freq"],
+                eval_episode_days=current_options["sb3_eval_episode_days"],
+                ppo_n_steps=current_options["sb3_ppo_n_steps"],
+                ppo_gae_lambda=current_options["sb3_ppo_gae_lambda"],
+                ppo_ent_coef=current_options["sb3_ppo_ent_coef"],
+                ppo_clip_range=current_options["sb3_ppo_clip_range"],
+                learning_starts=current_options["sb3_learning_starts"],
+                train_freq=current_options["sb3_train_freq"],
+                gradient_steps=current_options["sb3_gradient_steps"],
+                tau=current_options["sb3_tau"],
+                action_noise_std=current_options["sb3_action_noise_std"],
                 buffer_size=current_options["sb3_buffer_size"],
                 optimize_memory_usage=bool(current_options["sb3_optimize_memory_usage"]),
                 seed=seed,
@@ -260,6 +304,7 @@ def _command_train(args: argparse.Namespace) -> None:
                     run_dir=run_dir,
                     seed=seed,
                     deterministic=True,
+                    model_source="best",
                     device=current_options["device"],
                 )
             outputs.append(payload)
@@ -429,6 +474,7 @@ def _command_eval(args: argparse.Namespace) -> None:
                 run_dir=target_run_dir,
                 seed=seed,
                 deterministic=True,
+                model_source=args.model_source,
                 device=current_options["device"],
             )
         else:
@@ -488,6 +534,19 @@ def _command_sb3_train(args: argparse.Namespace) -> None:
             learning_rate=args.learning_rate,
             batch_size=args.batch_size,
             gamma=args.gamma,
+            vec_norm_obs=bool(getattr(args, "vec_norm_obs", True)),
+            vec_norm_reward=bool(getattr(args, "vec_norm_reward", True)),
+            eval_freq=args.eval_freq,
+            eval_episode_days=args.eval_episode_days,
+            ppo_n_steps=args.ppo_n_steps,
+            ppo_gae_lambda=args.ppo_gae_lambda,
+            ppo_ent_coef=args.ppo_ent_coef,
+            ppo_clip_range=args.ppo_clip_range,
+            learning_starts=args.learning_starts,
+            train_freq=args.train_freq,
+            gradient_steps=args.gradient_steps,
+            tau=args.tau,
+            action_noise_std=args.action_noise_std,
             buffer_size=args.buffer_size,
             optimize_memory_usage=bool(getattr(args, "optimize_memory_usage", True)),
             seed=seed,
@@ -512,6 +571,7 @@ def _command_sb3_train(args: argparse.Namespace) -> None:
                 run_dir=run_dir,
                 seed=seed,
                 deterministic=True,
+                model_source="best",
                 device=args.device,
             )
         outputs.append(payload)
@@ -543,6 +603,7 @@ def _command_sb3_eval(args: argparse.Namespace) -> None:
             run_dir=target_run_dir,
             seed=seed,
             deterministic=not args.stochastic,
+            model_source=args.model_source,
             device=args.device,
         )
         outputs.append(
@@ -772,7 +833,10 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--episode-days", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument("--episodes", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument(
-        "--policy", type=str, default=argparse.SUPPRESS, choices=["rule", "random", "sequence_rule", "sb3"]
+        "--policy",
+        type=str,
+        default=argparse.SUPPRESS,
+        choices=["rule", "easy_rule", "random", "sequence_rule", "sb3"],
     )
     train_parser.add_argument(
         "--env-config",
@@ -827,6 +891,45 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--sb3-learning-rate", type=float, default=argparse.SUPPRESS)
     train_parser.add_argument("--sb3-batch-size", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument("--sb3-gamma", type=float, default=argparse.SUPPRESS)
+    train_parser.add_argument(
+        "--sb3-vec-norm-obs",
+        dest="sb3_vec_norm_obs",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="启用 SB3 VecNormalize 观测归一化。",
+    )
+    train_parser.add_argument(
+        "--no-sb3-vec-norm-obs",
+        dest="sb3_vec_norm_obs",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="关闭 SB3 VecNormalize 观测归一化。",
+    )
+    train_parser.add_argument(
+        "--sb3-vec-norm-reward",
+        dest="sb3_vec_norm_reward",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="启用 SB3 VecNormalize 奖励归一化。",
+    )
+    train_parser.add_argument(
+        "--no-sb3-vec-norm-reward",
+        dest="sb3_vec_norm_reward",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="关闭 SB3 VecNormalize 奖励归一化。",
+    )
+    train_parser.add_argument("--sb3-eval-freq", type=int, default=argparse.SUPPRESS)
+    train_parser.add_argument("--sb3-eval-episode-days", type=int, default=argparse.SUPPRESS)
+    train_parser.add_argument("--sb3-ppo-n-steps", type=int, default=argparse.SUPPRESS)
+    train_parser.add_argument("--sb3-ppo-gae-lambda", type=float, default=argparse.SUPPRESS)
+    train_parser.add_argument("--sb3-ppo-ent-coef", type=float, default=argparse.SUPPRESS)
+    train_parser.add_argument("--sb3-ppo-clip-range", type=float, default=argparse.SUPPRESS)
+    train_parser.add_argument("--sb3-learning-starts", type=int, default=argparse.SUPPRESS)
+    train_parser.add_argument("--sb3-train-freq", type=int, default=argparse.SUPPRESS)
+    train_parser.add_argument("--sb3-gradient-steps", type=int, default=argparse.SUPPRESS)
+    train_parser.add_argument("--sb3-tau", type=float, default=argparse.SUPPRESS)
+    train_parser.add_argument("--sb3-action-noise-std", type=float, default=argparse.SUPPRESS)
     train_parser.add_argument("--sb3-buffer-size", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument(
         "--sb3-optimize-memory-usage",
@@ -853,7 +956,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="覆盖 env.constraint_mode（子命令级覆盖）。",
     )
     eval_parser.add_argument(
-        "--policy", type=str, default=argparse.SUPPRESS, choices=["rule", "random", "sequence_rule", "sb3"]
+        "--policy",
+        type=str,
+        default=argparse.SUPPRESS,
+        choices=["rule", "easy_rule", "random", "sequence_rule", "sb3"],
     )
     eval_parser.add_argument(
         "--env-config",
@@ -871,6 +977,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     eval_parser.add_argument("--device", type=str, default=argparse.SUPPRESS)
     eval_parser.add_argument("--seed", type=str, default=argparse.SUPPRESS)
+    eval_parser.add_argument(
+        "--model-source",
+        type=str,
+        default="best",
+        choices=["best", "last"],
+        help="SB3 checkpoint 评估时选择 best 或 last 模型（仅 SB3 生效）。",
+    )
 
     sb3_train_parser = subparsers.add_parser("sb3-train", help="用 SB3 训练 PPO/SAC/TD3/DDPG（Task-011，可选依赖）。")
     sb3_train_parser.add_argument("--run-root", type=Path, default=Path("runs"))
@@ -901,6 +1014,45 @@ def build_parser() -> argparse.ArgumentParser:
     sb3_train_parser.add_argument("--learning-rate", type=float, default=3e-4)
     sb3_train_parser.add_argument("--batch-size", type=int, default=256)
     sb3_train_parser.add_argument("--gamma", type=float, default=0.99)
+    sb3_train_parser.add_argument(
+        "--vec-norm-obs",
+        dest="vec_norm_obs",
+        action="store_true",
+        default=True,
+        help="启用 VecNormalize 观测归一化（默认开启）。",
+    )
+    sb3_train_parser.add_argument(
+        "--no-vec-norm-obs",
+        dest="vec_norm_obs",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="关闭 VecNormalize 观测归一化。",
+    )
+    sb3_train_parser.add_argument(
+        "--vec-norm-reward",
+        dest="vec_norm_reward",
+        action="store_true",
+        default=True,
+        help="启用 VecNormalize 奖励归一化（默认开启）。",
+    )
+    sb3_train_parser.add_argument(
+        "--no-vec-norm-reward",
+        dest="vec_norm_reward",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="关闭 VecNormalize 奖励归一化。",
+    )
+    sb3_train_parser.add_argument("--eval-freq", type=int, default=50_000)
+    sb3_train_parser.add_argument("--eval-episode-days", type=int, default=14)
+    sb3_train_parser.add_argument("--ppo-n-steps", type=int, default=2048)
+    sb3_train_parser.add_argument("--ppo-gae-lambda", type=float, default=0.95)
+    sb3_train_parser.add_argument("--ppo-ent-coef", type=float, default=0.0)
+    sb3_train_parser.add_argument("--ppo-clip-range", type=float, default=0.2)
+    sb3_train_parser.add_argument("--learning-starts", type=int, default=5_000)
+    sb3_train_parser.add_argument("--train-freq", type=int, default=1)
+    sb3_train_parser.add_argument("--gradient-steps", type=int, default=1)
+    sb3_train_parser.add_argument("--tau", type=float, default=0.005)
+    sb3_train_parser.add_argument("--action-noise-std", type=float, default=0.1)
     sb3_train_parser.add_argument("--buffer-size", type=int, default=50_000, help="off-policy replay buffer 大小。")
     sb3_train_parser.add_argument(
         "--optimize-memory-usage",
@@ -943,6 +1095,13 @@ def build_parser() -> argparse.ArgumentParser:
     sb3_eval_parser.add_argument("--device", type=str, default="auto")
     sb3_eval_parser.add_argument("--seed", type=str, default="42")
     sb3_eval_parser.add_argument("--stochastic", action="store_true", help="使用随机动作采样（默认 deterministic）。")
+    sb3_eval_parser.add_argument(
+        "--model-source",
+        type=str,
+        default="best",
+        choices=["best", "last"],
+        help="选择评估 best 或 last checkpoint（默认 best）。",
+    )
     sb3_eval_parser.add_argument(
         "--env-config",
         type=Path,
@@ -997,7 +1156,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="覆盖 env.constraint_mode（子命令级覆盖；通常不需要，ablation 会按 --modes 生成）。",
     )
     ablation_parser.add_argument(
-        "--policy", type=str, default=argparse.SUPPRESS, choices=["rule", "random", "sequence_rule"]
+        "--policy", type=str, default=argparse.SUPPRESS, choices=["rule", "easy_rule", "random", "sequence_rule"]
     )
     ablation_parser.add_argument(
         "--env-config",

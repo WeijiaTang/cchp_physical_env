@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 import pandas as pd
@@ -48,7 +49,15 @@ def _find_eval_summaries(runs_root: str | Path) -> list[Path]:
     root = Path(runs_root)
     if not root.exists():
         raise FileNotFoundError(f"runs_root 不存在: {root}")
-    return sorted(root.rglob("eval/summary.json"))
+    summaries: list[Path] = []
+    for summary_path in sorted(root.rglob("eval/summary.json")):
+        run_dir = summary_path.parent.parent
+        if re.fullmatch(r"seed_\d+", run_dir.name):
+            canonical_summary = run_dir.parent / "eval" / "summary.json"
+            if canonical_summary.exists():
+                continue
+        summaries.append(summary_path)
+    return summaries
 
 
 def collect_run_summaries(*, runs_root: str | Path) -> pd.DataFrame:

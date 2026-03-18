@@ -163,6 +163,10 @@ Algorithm / agent arguments:
 - `--learning-rate` or `--sb3-learning-rate`: optimizer learning rate.
 - `--batch-size` or `--sb3-batch-size`: batch size used by the algorithm.
 - `--gamma` or `--sb3-gamma`: reward discount factor.
+- `--vec-norm-obs` / `--vec-norm-reward` (or `--sb3-vec-norm-obs` / `--sb3-vec-norm-reward`): enable VecNormalize for observations / rewards.
+- `--eval-freq` / `--eval-episode-days` (or `--sb3-eval-freq` / `--sb3-eval-episode-days`): evaluation frequency and horizon during training for best-checkpoint selection.
+- PPO-only (`ppo`): `--ppo-n-steps`, `--ppo-gae-lambda`, `--ppo-ent-coef`, `--ppo-clip-range` (or `--sb3-ppo-*`).
+- Off-policy-only (`sac`/`td3`/`ddpg`): `--learning-starts`, `--train-freq`, `--gradient-steps`, `--tau`, `--action-noise-std`, `--buffer-size`, `--optimize-memory-usage` (or `--sb3-*`).
 - `--device`: `auto`, `cpu`, `cuda`, or `cuda:<index>`.
 - `--seed`: reproducibility control.
 
@@ -229,6 +233,17 @@ python -m cchp_physical_env \
   --learning-rate 3e-4 \
   --batch-size 512 \
   --gamma 0.99 \
+  --vec-norm-obs \
+  --vec-norm-reward \
+  --eval-freq 50000 \
+  --eval-episode-days 14 \
+  --learning-starts 5000 \
+  --train-freq 1 \
+  --gradient-steps 1 \
+  --tau 0.005 \
+  --action-noise-std 0.1 \
+  --buffer-size 50000 \
+  --optimize-memory-usage \
   --device cuda \
   --seed 42 \
   --run-root runs/sb3_sac_transformer_long
@@ -247,13 +262,10 @@ python -m cchp_physical_env \
   --train-path data/processed/cchp_main_15min_2024.csv \
   --eval-path data/processed/cchp_main_15min_2025.csv \
   eval \
-  --policy rule \
-  --episodes 365 \
-  --episode-days 14 \
-  --history-steps 32 \
-  --sequence-adapter transformer \
+  --checkpoint runs/seq_transformer_long/<timestamp>_train_sequence_transformer/checkpoints/baseline_policy.json \
+  --run-dir runs/seq_transformer_long_eval \
   --seed 42 \
-  --run-root runs/seq_transformer_long
+  --device auto
 ```
 
 ### Training artifacts
@@ -632,6 +644,17 @@ uv run python -m cchp_physical_env sb3-train `
   --learning-rate 0.0003 `
   --batch-size 512 `
   --gamma 0.99 `
+  --vec-norm-obs `
+  --vec-norm-reward `
+  --eval-freq 50000 `
+  --eval-episode-days 14 `
+  --learning-starts 5000 `
+  --train-freq 1 `
+  --gradient-steps 1 `
+  --tau 0.005 `
+  --action-noise-std 0.1 `
+  --buffer-size 50000 `
+  --optimize-memory-usage `
   --device auto `
   --seed 40
 ```
@@ -649,6 +672,17 @@ python -m cchp_physical_env sb3-train \
   --learning-rate 0.0003 \
   --batch-size 512 \
   --gamma 0.99 \
+  --vec-norm-obs \
+  --vec-norm-reward \
+  --eval-freq 50000 \
+  --eval-episode-days 14 \
+  --learning-starts 5000 \
+  --train-freq 1 \
+  --gradient-steps 1 \
+  --tau 0.005 \
+  --action-noise-std 0.1 \
+  --buffer-size 50000 \
+  --optimize-memory-usage \
   --device auto \
   --seed 40
 ```
@@ -688,6 +722,17 @@ uv run python -m cchp_physical_env sb3-train `
   --learning-rate 0.0003 `
   --batch-size 512 `
   --gamma 0.99 `
+  --vec-norm-obs `
+  --vec-norm-reward `
+  --eval-freq 50000 `
+  --eval-episode-days 14 `
+  --learning-starts 5000 `
+  --train-freq 1 `
+  --gradient-steps 1 `
+  --tau 0.005 `
+  --action-noise-std 0.1 `
+  --buffer-size 50000 `
+  --optimize-memory-usage `
   --device auto `
   --seed 40
 ```
@@ -705,6 +750,17 @@ python -m cchp_physical_env sb3-train \
   --learning-rate 0.0003 \
   --batch-size 512 \
   --gamma 0.99 \
+  --vec-norm-obs \
+  --vec-norm-reward \
+  --eval-freq 50000 \
+  --eval-episode-days 14 \
+  --learning-starts 5000 \
+  --train-freq 1 \
+  --gradient-steps 1 \
+  --tau 0.005 \
+  --action-noise-std 0.1 \
+  --buffer-size 50000 \
+  --optimize-memory-usage \
   --device auto \
   --seed 40
 ```
@@ -736,6 +792,17 @@ uv run python -m cchp_physical_env train `
   --sb3-learning-rate 0.0003 `
   --sb3-batch-size 512 `
   --sb3-gamma 0.99 `
+  --sb3-vec-norm-obs `
+  --sb3-vec-norm-reward `
+  --sb3-eval-freq 50000 `
+  --sb3-eval-episode-days 14 `
+  --sb3-learning-starts 5000 `
+  --sb3-train-freq 1 `
+  --sb3-gradient-steps 1 `
+  --sb3-tau 0.005 `
+  --sb3-action-noise-std 0.1 `
+  --sb3-buffer-size 50000 `
+  --sb3-optimize-memory-usage `
   --device auto `
   --seed 40
 ```
@@ -753,6 +820,17 @@ python -m cchp_physical_env train \
   --sb3-learning-rate 0.0003 \
   --sb3-batch-size 512 \
   --sb3-gamma 0.99 \
+  --sb3-vec-norm-obs \
+  --sb3-vec-norm-reward \
+  --sb3-eval-freq 50000 \
+  --sb3-eval-episode-days 14 \
+  --sb3-learning-starts 5000 \
+  --sb3-train-freq 1 \
+  --sb3-gradient-steps 1 \
+  --sb3-tau 0.005 \
+  --sb3-action-noise-std 0.1 \
+  --sb3-buffer-size 50000 \
+  --sb3-optimize-memory-usage \
   --device auto \
   --seed 40
 ```

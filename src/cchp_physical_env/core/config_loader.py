@@ -42,6 +42,19 @@ TRAINING_DEFAULTS: dict[str, Any] = {
     "sb3_learning_rate": 3e-4,
     "sb3_batch_size": 512,
     "sb3_gamma": 0.99,
+    "sb3_vec_norm_obs": True,
+    "sb3_vec_norm_reward": True,
+    "sb3_eval_freq": 50_000,
+    "sb3_eval_episode_days": 14,
+    "sb3_ppo_n_steps": 2048,
+    "sb3_ppo_gae_lambda": 0.95,
+    "sb3_ppo_ent_coef": 0.0,
+    "sb3_ppo_clip_range": 0.2,
+    "sb3_learning_starts": 5_000,
+    "sb3_train_freq": 1,
+    "sb3_gradient_steps": 1,
+    "sb3_tau": 0.005,
+    "sb3_action_noise_std": 0.1,
     # Off-policy algorithms (SAC/TD3/DDPG) use a replay buffer.
     # With window observations (K,D) and n_envs>1, the default SB3 buffer_size=1e6 can easily OOM.
     "sb3_buffer_size": 50_000,
@@ -240,7 +253,12 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
     if unknown:
         raise ValueError(f"`training` 包含未知参数: {unknown}")
 
-    bool_keys = {"sb3_enabled", "sb3_optimize_memory_usage"}
+    bool_keys = {
+        "sb3_enabled",
+        "sb3_optimize_memory_usage",
+        "sb3_vec_norm_obs",
+        "sb3_vec_norm_reward",
+    }
     int_keys = {
         "seed",
         "history_steps",
@@ -254,6 +272,11 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
         "sb3_n_envs",
         "sb3_batch_size",
         "sb3_buffer_size",
+        "sb3_eval_freq",
+        "sb3_eval_episode_days",
+        "sb3_ppo_n_steps",
+        "sb3_train_freq",
+        "sb3_gradient_steps",
     }
     for key, value in overrides.items():
         if key in {"policy", "sequence_adapter", "device"}:
@@ -301,6 +324,12 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
             if float(value) <= 0.0:
                 raise ValueError(f"{key} 必须 > 0。")
             continue
+        if key in {"sb3_learning_starts"}:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{key} 必须是整数类型。")
+            if int(value) < 0:
+                raise ValueError(f"{key} 必须 >= 0。")
+            continue
         if key == "sb3_gamma":
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ValueError("sb3_gamma 必须是数值类型。")
@@ -308,16 +337,35 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
             if not (0.0 < numeric <= 1.0):
                 raise ValueError("sb3_gamma 必须在 (0,1]。")
             continue
+        if key == "sb3_ppo_gae_lambda":
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError("sb3_ppo_gae_lambda 必须是数值类型。")
+            numeric = float(value)
+            if not (0.0 < numeric <= 1.0):
+                raise ValueError("sb3_ppo_gae_lambda 必须在 (0,1]。")
+            continue
+        if key in {"sb3_ppo_ent_coef", "sb3_action_noise_std"}:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{key} 必须是数值类型。")
+            if float(value) < 0.0:
+                raise ValueError(f"{key} 必须 >= 0。")
+            continue
+        if key in {"sb3_ppo_clip_range", "sb3_tau"}:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{key} 必须是数值类型。")
+            if float(value) <= 0.0:
+                raise ValueError(f"{key} 必须 > 0。")
+            continue
 
     policy = str(overrides.get("policy", TRAINING_DEFAULTS["policy"])).strip().lower()
     sb3_enabled_flag = bool(overrides.get("sb3_enabled", TRAINING_DEFAULTS.get("sb3_enabled", False)))
     if sb3_enabled_flag:
         # sb3_enabled=true 时，policy 仅作记录，但仍需要校验以避免拼写错误污染实验口径。
-        if policy not in {"rule", "random", "sequence_rule", "sb3"}:
-            raise ValueError("training.policy 仅支持 rule/random/sequence_rule/sb3（sb3_enabled=true 时该字段仅作备注，不参与路由）。")
+        if policy not in {"rule", "easy_rule", "random", "sequence_rule", "sb3"}:
+            raise ValueError("training.policy 仅支持 rule/easy_rule/random/sequence_rule/sb3（sb3_enabled=true 时该字段仅作备注，不参与路由）。")
     else:
-        if policy not in {"rule", "random", "sequence_rule"}:
-            raise ValueError("training.policy 仅支持 rule/random/sequence_rule（sb3_enabled=false）。")
+        if policy not in {"rule", "easy_rule", "random", "sequence_rule"}:
+            raise ValueError("training.policy 仅支持 rule/easy_rule/random/sequence_rule（sb3_enabled=false）。")
     sequence_adapter = str(
         overrides.get("sequence_adapter", TRAINING_DEFAULTS["sequence_adapter"])
     ).strip().lower()
@@ -370,6 +418,19 @@ def build_training_options(overrides: dict[str, Any] | None = None) -> dict[str,
     normalized["sb3_learning_rate"] = float(normalized["sb3_learning_rate"])
     normalized["sb3_batch_size"] = int(normalized["sb3_batch_size"])
     normalized["sb3_gamma"] = float(normalized["sb3_gamma"])
+    normalized["sb3_vec_norm_obs"] = bool(normalized["sb3_vec_norm_obs"])
+    normalized["sb3_vec_norm_reward"] = bool(normalized["sb3_vec_norm_reward"])
+    normalized["sb3_eval_freq"] = int(normalized["sb3_eval_freq"])
+    normalized["sb3_eval_episode_days"] = int(normalized["sb3_eval_episode_days"])
+    normalized["sb3_ppo_n_steps"] = int(normalized["sb3_ppo_n_steps"])
+    normalized["sb3_ppo_gae_lambda"] = float(normalized["sb3_ppo_gae_lambda"])
+    normalized["sb3_ppo_ent_coef"] = float(normalized["sb3_ppo_ent_coef"])
+    normalized["sb3_ppo_clip_range"] = float(normalized["sb3_ppo_clip_range"])
+    normalized["sb3_learning_starts"] = int(normalized["sb3_learning_starts"])
+    normalized["sb3_train_freq"] = int(normalized["sb3_train_freq"])
+    normalized["sb3_gradient_steps"] = int(normalized["sb3_gradient_steps"])
+    normalized["sb3_tau"] = float(normalized["sb3_tau"])
+    normalized["sb3_action_noise_std"] = float(normalized["sb3_action_noise_std"])
     normalized["sb3_buffer_size"] = int(normalized["sb3_buffer_size"])
     normalized["sb3_optimize_memory_usage"] = bool(normalized["sb3_optimize_memory_usage"])
     return normalized

@@ -163,6 +163,10 @@ python -m cchp_physical_env train \
 - `--learning-rate` 或 `--sb3-learning-rate`：优化器学习率。
 - `--batch-size` 或 `--sb3-batch-size`：算法使用的 batch size。
 - `--gamma` 或 `--sb3-gamma`：奖励折扣因子。
+- `--vec-norm-obs` / `--vec-norm-reward`（或 `--sb3-vec-norm-obs` / `--sb3-vec-norm-reward`）：启用 VecNormalize 的观测/奖励归一化。
+- `--eval-freq` / `--eval-episode-days`（或 `--sb3-eval-freq` / `--sb3-eval-episode-days`）：训练过程评估频率与评估 episode 天数，用于选择 best checkpoint。
+- PPO 专属（`ppo`）：`--ppo-n-steps`、`--ppo-gae-lambda`、`--ppo-ent-coef`、`--ppo-clip-range`（或 `--sb3-ppo-*`）。
+- Off-policy 专属（`sac`/`td3`/`ddpg`）：`--learning-starts`、`--train-freq`、`--gradient-steps`、`--tau`、`--action-noise-std`、`--buffer-size`、`--optimize-memory-usage`（或 `--sb3-*`）。
 - `--device`：`auto`、`cpu`、`cuda` 或 `cuda:<index>`。
 - `--seed`：复现控制。
 
@@ -177,220 +181,6 @@ python -m cchp_physical_env train \
 
 全局参数（`--train-path` / `--eval-path` / `--env-config` 等）必须写在子命令前。CLI 现在支持逗号分隔的 `--seed`（例如 `--seed 0,42,123`），会依次跑完多个种子；如需整体表格，可继续用 `scripts/debug/_diag_run.py` 汇总。
 
-### Rule 基线（长跑）
-
-```bash
-python -m cchp_physical_env \
-  --train-path data/processed/cchp_main_15min_2024.csv \
-  --eval-path data/processed/cchp_main_15min_2025.csv \
-  train \
-  --policy rule \
-  --episodes 800 \
-  --episode-days 14 \
-  --seed 42 \
-  --run-root runs/baseline_rule
-```
-
-### 序列策略（Transformer）
-
-```bash
-python -m cchp_physical_env \
-  --train-path data/processed/cchp_main_15min_2024.csv \
-  --eval-path data/processed/cchp_main_15min_2025.csv \
-  train \
-  --policy sequence_rule \
-  --sequence-adapter transformer \
-  --history-steps 32 \
-  --episode-days 14 \
-  --train-steps 409600 \
-  --batch-size 256 \
-  --update-epochs 8 \
-  --lr 1e-4 \
-  --device cuda \
-  --seed 42 \
-  --run-root runs/seq_transformer_long
-```
-
-（将 `--sequence-adapter` 换成 `mlp` / `mamba` 可得到完整骨干对比。）
-
-### SB3（SAC + Transformer）
-
-```bash
-python -m cchp_physical_env \
-  --train-path data/processed/cchp_main_15min_2024.csv \
-  --eval-path data/processed/cchp_main_15min_2025.csv \
-  sb3-train \
-  --algo sac \
-  --backbone transformer \
-  --history-steps 32 \
-  --total-timesteps 2000000 \
-  --episode-days 14 \
-  --n-envs 4 \
-  --learning-rate 3e-4 \
-  --batch-size 512 \
-  --gamma 0.99 \
-  --device cuda \
-  --seed 42 \
-  --run-root runs/sb3_sac_transformer_long
-```
-
-### 约束消融
-
-默认是 `physics_in_loop`。复制上面的命令再加 `--constraint-mode reward_only`，即可得到“物理约束 vs 纯惩罚”对照。
-
-### 跨年评估
-
-训练后统一在 2025 数据集上评估：
-
-```bash
-python -m cchp_physical_env \
-  --train-path data/processed/cchp_main_15min_2024.csv \
-  --eval-path data/processed/cchp_main_15min_2025.csv \
-  eval \
-  --policy rule \
-  --sequence-adapter transformer \
-  --history-steps 32 \
-  --episodes 365 \
-  --episode-days 14 \
-  --seed 42 \
-  --run-root runs/seq_transformer_long
-```
-
-### 训练产物
-
-每次 `train` 都会生成：
-
-- `runs/<timestamp>_.../train/train_statistics.json`：冻结数据统计。
-- `runs/<timestamp>_.../train/episodes.csv`：逐 episode KPI（可直接做表/画图）。
-- `runs/<timestamp>_.../train/summary.json`：平均指标。
-- `runs/<timestamp>_.../checkpoints/baseline_policy.json`：checkpoint 元数据。
-- `runs/<timestamp>_.../eval/*.csv`：`eval` / `sb3-eval` 输出。
-
-配合 `scripts/debug` 下的诊断脚本，可直接支撑论文级 KPI、消融与时序可视化。
-
-## CLI 全部命令覆盖
-
-本节按 `python -m cchp_physical_env` 实际支持的顶层子命令完整列出。
-
-### 1）`summary`
-
-校验训练 / 评估数据并打印冻结 schema 摘要。
-
-Windows / `pwsh`：
-
-```powershell
-uv run python -m cchp_physical_env summary
-```
-
-Linux / Debian / bash：
-
-```bash
-python -m cchp_physical_env summary
-```
-
-如需覆盖环境配置或约束模式：
-
-```bash
-python -m cchp_physical_env summary \
-  --env-config src/cchp_physical_env/config/config.yaml \
-  --constraint-mode physics_in_loop
-```
-
-### 2）`train`
-
-统一训练入口有三种路由：
-- 基线路由：`rule`、`random`、`sequence_rule + rule`
-- 内置深度序列路由：`sequence_rule + mlp|transformer|mamba`
-- SB3 路由：`--sb3-enabled`
-
-### `main.ipynb` 的 Notebook 参数映射
-
-[`main.ipynb`](main.ipynb) 里的参数配置区目前没有过时；这些键仍然会映射到当前 `train` / `eval` 流程。
-
-环境覆盖：
-- `env_overrides.constraint_mode` -> `--constraint-mode`
-- `env_overrides.physics_backend` -> 配置加载时的环境后端覆盖
-
-训练覆盖：
-- `policy` -> `--policy`
-- `sequence_adapter` -> `--sequence-adapter`
-- `history_steps` -> `--history-steps`
-- `episode_days` -> `--episode-days`
-- `episodes` -> `--episodes`
-- `train_steps` -> `--train-steps`
-- `batch_size` -> `--batch-size`
-- `update_epochs` -> `--update-epochs`
-- `lr` -> `--lr`
-- `device` -> `--device`
-- `seed` -> `--seed`
-- `sb3_enabled` -> `--sb3-enabled`
-- `sb3_algo` -> `--sb3-algo`
-- `sb3_backbone` -> `--sb3-backbone`
-- `sb3_history_steps` -> `--sb3-history-steps`
-- `sb3_total_timesteps` -> `--sb3-total-timesteps`
-- `sb3_n_envs` -> `--sb3-n-envs`
-- `sb3_learning_rate` -> `--sb3-learning-rate`
-- `sb3_batch_size` -> `--sb3-batch-size`
-- `sb3_gamma` -> `--sb3-gamma`
-- `sb3_buffer_size` -> `--sb3-buffer-size`
-- `sb3_optimize_memory_usage` -> `--sb3-optimize-memory-usage` / `--no-sb3-optimize-memory-usage`
-
-在 Notebook 参数块里开启不同实验的方式：
-- 随机基线：设置 `policy='random'`，并保持 `sb3_enabled=false`
-- 规则基线：设置 `policy='rule'`，并保持 `sb3_enabled=false`
-- `sequence_rule` 规则路由：设置 `policy='sequence_rule'`、`sequence_adapter='rule'`，并保持 `sb3_enabled=false`
-- 深度序列训练：设置 `policy='sequence_rule'`、`sequence_adapter='mlp'|'transformer'|'mamba'`，并保持 `sb3_enabled=false`
-- SB3 训练：设置 `sb3_enabled=true`，然后再选择 `sb3_algo` 与 `sb3_backbone`
-
-重要路由说明：
-- 只要 `sb3_enabled=true`，`train` 就会优先走 SB3 路径，即使 `policy='sequence_rule'`
-- 因此当 SB3 启用时，`policy` / `sequence_adapter` 应视为“记录用元信息”（你也可以把 `policy='sb3'` 作为记录值来避免歧义）
-
-Notebook 默认值：
-- `main.ipynb` 默认使用 **论文档**，与 `src/cchp_physical_env/config/config.yaml` 对齐（深度序列：`policy=sequence_rule`、`sequence_adapter=transformer`、`sb3_enabled=false`）。
-
-### 3）`eval`
-
-统一评估入口：
-- 可评估 baseline checkpoint
-- 遇到 `artifact_type=sb3_policy` 时会自动识别为 SB3 checkpoint
-- 未显式给出 `run_dir` 时可自动推断（baseline + SB3）；必要时也可自动创建
-
-### 4）`sb3-train`
-
-显式 Stable-Baselines3 训练入口。
-
-### 5）`sb3-eval`
-
-显式 SB3 评估入口，要求同时提供 `--run-dir` 与 `--checkpoint`。
-
-说明：
-- `--run-dir` 应该指向 *run 根目录*（包含 `train/`、`eval/`、`checkpoints/` 的目录），不要填 `.../eval`。
-- 如需随机动作采样，可加 `--stochastic`（默认 deterministic）。
-
-### 6）`calibrate`
-
-在训练 / 评估数据上运行物理参数标定搜索。
-
-### 7）`ablation`
-
-在 `physics_in_loop` 与 / 或 `reward_only` 上运行约束模式消融。
-
-### 8）`collect`
-
-扫描 `runs/`，将评估结果汇总为 benchmark CSV 表。
-
-## 训练 + 评估示例
-
-本节按实际实验类型组织。每个训练命令后面都接一个对应的评估命令。
-
-论文档默认值（不额外传参）：
-
-```bash
-python -m cchp_physical_env train \
-  --env-config src/cchp_physical_env/config/config.yaml
-```
-
 ### 1）规则基线（Rule Baseline）
 
 训练（`pwsh`）：
@@ -400,7 +190,8 @@ uv run python -m cchp_physical_env train `
   --policy rule `
   --episodes 800 `
   --episode-days 14 `
-  --seed 40
+  --seed 42 `
+  --run-root runs/baseline_rule
 ```
 
 训练（Linux / Debian / bash）：
@@ -410,7 +201,8 @@ python -m cchp_physical_env train \
   --policy rule \
   --episodes 800 \
   --episode-days 14 \
-  --seed 40
+  --seed 42 \
+  --run-root runs/baseline_rule
 ```
 
 评估：
@@ -418,7 +210,9 @@ python -m cchp_physical_env train \
 ```bash
 python -m cchp_physical_env eval \
   --checkpoint runs/<train_run>/checkpoints/baseline_policy.json \
-  --seed 40
+  --seed 42 \
+  --run-dir runs/seq_transformer_long_eval \
+  --device auto
 ```
 
 ### 2）随机基线（Random Baseline）
@@ -430,7 +224,8 @@ uv run python -m cchp_physical_env train `
   --policy random `
   --episodes 800 `
   --episode-days 14 `
-  --seed 40
+  --seed 42 `
+  --run-root runs/baseline_random
 ```
 
 训练（Linux / Debian / bash）：
@@ -440,7 +235,8 @@ python -m cchp_physical_env train \
   --policy random \
   --episodes 800 \
   --episode-days 14 \
-  --seed 40
+  --seed 42 \
+  --run-root runs/baseline_random
 ```
 
 评估：
@@ -448,7 +244,9 @@ python -m cchp_physical_env train \
 ```bash
 python -m cchp_physical_env eval \
   --checkpoint runs/<train_run>/checkpoints/baseline_policy.json \
-  --seed 40
+  --seed 42 \
+  --run-dir runs/seq_transformer_long_eval \
+  --device auto
 ```
 
 ### 3）启发式序列基线（Heuristic Sequence Baseline）
@@ -464,7 +262,8 @@ uv run python -m cchp_physical_env train `
   --history-steps 16 `
   --episodes 800 `
   --episode-days 14 `
-  --seed 40
+  --seed 42 `
+  --run-root runs/baseline_sequence_rule
 ```
 
 训练（Linux / Debian / bash）：
@@ -476,7 +275,8 @@ python -m cchp_physical_env train \
   --history-steps 16 \
   --episodes 800 \
   --episode-days 14 \
-  --seed 40
+  --seed 42 \
+  --run-root runs/baseline_sequence_rule
 ```
 
 评估：
@@ -484,7 +284,9 @@ python -m cchp_physical_env train \
 ```bash
 python -m cchp_physical_env eval \
   --checkpoint runs/<train_run>/checkpoints/baseline_policy.json \
-  --seed 40
+  --seed 42 \
+  --run-dir runs/seq_transformer_long_eval \
+  --device auto
 ```
 
 ### 4）深度序列策略：MLP
@@ -504,7 +306,8 @@ uv run python -m cchp_physical_env train `
   --update-epochs 8 `
   --lr 0.0001 `
   --device auto `
-  --seed 40
+  --seed 42 `
+  --run-root runs/seq_mlp_long
 ```
 
 训练（Linux / Debian / bash）：
@@ -520,7 +323,8 @@ python -m cchp_physical_env train \
   --update-epochs 8 \
   --lr 0.0001 \
   --device auto \
-  --seed 40
+  --seed 42 \
+  --run-root runs/seq_mlp_long
 ```
 
 评估：
@@ -528,7 +332,9 @@ python -m cchp_physical_env train \
 ```bash
 python -m cchp_physical_env eval \
   --checkpoint runs/<train_run>/checkpoints/baseline_policy.json \
-  --seed 40
+  --seed 42 \
+  --run-dir runs/seq_transformer_long_eval \
+  --device auto
 ```
 
 ### 5）深度序列策略：Transformer
@@ -546,7 +352,8 @@ uv run python -m cchp_physical_env train `
   --update-epochs 8 `
   --lr 0.0001 `
   --device auto `
-  --seed 40
+  --seed 42 `
+  --run-root runs/seq_transformer_long
 ```
 
 训练（Linux / Debian / bash）：
@@ -562,7 +369,8 @@ python -m cchp_physical_env train \
   --update-epochs 8 \
   --lr 0.0001 \
   --device auto \
-  --seed 40
+  --seed 42 \
+  --run-root runs/seq_transformer_long
 ```
 
 评估：
@@ -570,7 +378,9 @@ python -m cchp_physical_env train \
 ```bash
 python -m cchp_physical_env eval \
   --checkpoint runs/<train_run>/checkpoints/baseline_policy.json \
-  --seed 40
+  --seed 42 \
+  --run-dir runs/seq_transformer_long_eval \
+  --device auto
 ```
 
 ### 6）深度序列策略：Mamba
@@ -588,7 +398,8 @@ uv run python -m cchp_physical_env train `
   --update-epochs 8 `
   --lr 0.0001 `
   --device auto `
-  --seed 40
+  --seed 42 `
+  --run-root runs/seq_mamba_long
 ```
 
 训练（Linux / Debian / bash）：
@@ -604,7 +415,8 @@ python -m cchp_physical_env train \
   --update-epochs 8 \
   --lr 0.0001 \
   --device auto \
-  --seed 40
+  --seed 42 \
+  --run-root runs/seq_mamba_long
 ```
 
 评估：
@@ -612,7 +424,9 @@ python -m cchp_physical_env train \
 ```bash
 python -m cchp_physical_env eval \
   --checkpoint runs/<train_run>/checkpoints/baseline_policy.json \
-  --seed 40
+  --seed 42 \
+  --run-dir runs/seq_transformer_long_eval \
+  --device auto
 ```
 
 ### 7）SB3：SAC + Transformer
@@ -632,8 +446,20 @@ uv run python -m cchp_physical_env sb3-train `
   --learning-rate 0.0003 `
   --batch-size 512 `
   --gamma 0.99 `
+  --vec-norm-obs `
+  --vec-norm-reward `
+  --eval-freq 50000 `
+  --eval-episode-days 14 `
+  --learning-starts 5000 `
+  --train-freq 1 `
+  --gradient-steps 1 `
+  --tau 0.005 `
+  --action-noise-std 0.1 `
+  --buffer-size 50000 `
+  --optimize-memory-usage `
   --device auto `
-  --seed 40
+  --seed 42 `
+  --run-root runs/sb3_sac_transformer_long
 ```
 
 训练（Linux / Debian / bash）：
@@ -649,11 +475,21 @@ python -m cchp_physical_env sb3-train \
   --learning-rate 0.0003 \
   --batch-size 512 \
   --gamma 0.99 \
+  --vec-norm-obs \
+  --vec-norm-reward \
+  --eval-freq 50000 \
+  --eval-episode-days 14 \
+  --learning-starts 5000 \
+  --train-freq 1 \
+  --gradient-steps 1 \
+  --tau 0.005 \
+  --action-noise-std 0.1 \
+  --buffer-size 50000 \
+  --optimize-memory-usage \
   --device auto \
-  --seed 40
+  --seed 42 \
+  --run-root runs/sb3_sac_transformer_long
 ```
-
-可选：在 `sb3-train`（或 `train --sb3-enabled`）后追加 `--eval-after-train`，训练结束会立即跑一次完整 2025 评估，并把结果写入同一 `run_dir/eval/`（较耗时）。
 
 评估（`sb3-eval`）：
 
@@ -662,7 +498,7 @@ python -m cchp_physical_env sb3-eval \
   --run-dir runs/<sb3_train_run> \
   --checkpoint runs/<sb3_train_run>/checkpoints/baseline_policy.json \
   --device auto \
-  --seed 40
+  --seed 42
 ```
 
 同一个 checkpoint 也可以直接用统一入口 `eval`：
@@ -670,7 +506,9 @@ python -m cchp_physical_env sb3-eval \
 ```bash
 python -m cchp_physical_env eval \
   --checkpoint runs/<sb3_train_run>/checkpoints/baseline_policy.json \
-  --seed 40
+  --seed 42 \
+  --run-dir runs/seq_transformer_long_eval \
+  --device auto
 ```
 
 ### 8）SB3：PPO + Mamba
@@ -688,8 +526,17 @@ uv run python -m cchp_physical_env sb3-train `
   --learning-rate 0.0003 `
   --batch-size 512 `
   --gamma 0.99 `
+  --vec-norm-obs `
+  --vec-norm-reward `
+  --eval-freq 50000 `
+  --eval-episode-days 14 `
+  --ppo-n-steps 128 `
+  --ppo-gae-lambda 0.95 `
+  --ppo-ent-coef 0.01 `
+  --ppo-clip-range 0.2 `
   --device auto `
-  --seed 40
+  --seed 42 `
+  --run-root runs/sb3_ppo_mamba_long
 ```
 
 训练（Linux / Debian / bash）：
@@ -705,21 +552,40 @@ python -m cchp_physical_env sb3-train \
   --learning-rate 0.0003 \
   --batch-size 512 \
   --gamma 0.99 \
+  --vec-norm-obs \
+  --vec-norm-reward \
+  --eval-freq 50000 \
+  --eval-episode-days 14 \
+  --ppo-n-steps 128 \
+  --ppo-gae-lambda 0.95 \
+  --ppo-ent-coef 0.01 \
+  --ppo-clip-range 0.2 \
   --device auto \
-  --seed 40
+  --seed 42 \
+  --run-root runs/sb3_ppo_mamba_long
 ```
 
-评估：
+评估（`sb3-eval`）：
 
 ```bash
 python -m cchp_physical_env sb3-eval \
   --run-dir runs/<sb3_train_run> \
   --checkpoint runs/<sb3_train_run>/checkpoints/baseline_policy.json \
   --device auto \
-  --seed 40
+  --seed 42
 ```
 
-## 使用统一 `train` 入口触发 SB3
+同一个 checkpoint 也可以直接用统一入口 `eval`：
+
+```bash
+python -m cchp_physical_env eval \
+  --checkpoint runs/<sb3_train_run>/checkpoints/baseline_policy.json \
+  --seed 42 \
+  --run-dir runs/seq_transformer_long_eval \
+  --device auto
+```
+
+### 9）使用统一 `train` 入口触发 SB3
 
 如果你希望所有训练都走同一个入口，那么 `train` 也可以路由到 SB3。
 
@@ -736,8 +602,20 @@ uv run python -m cchp_physical_env train `
   --sb3-learning-rate 0.0003 `
   --sb3-batch-size 512 `
   --sb3-gamma 0.99 `
+  --sb3-vec-norm-obs `
+  --sb3-vec-norm-reward `
+  --sb3-eval-freq 50000 `
+  --sb3-eval-episode-days 14 `
+  --sb3-learning-starts 5000 `
+  --sb3-train-freq 1 `
+  --sb3-gradient-steps 1 `
+  --sb3-tau 0.005 `
+  --sb3-action-noise-std 0.1 `
+  --sb3-buffer-size 50000 `
+  --sb3-optimize-memory-usage `
   --device auto `
-  --seed 40
+  --seed 42 `
+  --run-root runs/sb3_sac_transformer_long
 ```
 
 Linux / Debian / bash：
@@ -753,8 +631,20 @@ python -m cchp_physical_env train \
   --sb3-learning-rate 0.0003 \
   --sb3-batch-size 512 \
   --sb3-gamma 0.99 \
+  --sb3-vec-norm-obs \
+  --sb3-vec-norm-reward \
+  --sb3-eval-freq 50000 \
+  --sb3-eval-episode-days 14 \
+  --sb3-learning-starts 5000 \
+  --sb3-train-freq 1 \
+  --sb3-gradient-steps 1 \
+  --sb3-tau 0.005 \
+  --sb3-action-noise-std 0.1 \
+  --sb3-buffer-size 50000 \
+  --sb3-optimize-memory-usage \
   --device auto \
-  --seed 40
+  --seed 42 \
+  --run-root runs/sb3_sac_transformer_long
 ```
 
 评估：
@@ -762,7 +652,9 @@ python -m cchp_physical_env train \
 ```bash
 python -m cchp_physical_env eval \
   --checkpoint runs/<sb3_train_run>/checkpoints/baseline_policy.json \
-  --seed 40
+  --seed 42 \
+  --run-dir runs/seq_transformer_long_eval \
+  --device auto
 ```
 
 ## 实验辅助命令

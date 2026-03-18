@@ -138,6 +138,59 @@ class RulePolicy:
         }
 
 
+@dataclass(slots=True)
+class EasyRulePolicy:
+    """
+    更接近论文弱规则基线的 easy rule。
+
+    设计目标：
+    - 仅保留最少的 GT+BES 启发式；
+    - 热/冷侧采用能供能但不做优化的朴素控制；
+    - 不做 TES 重建、不启用吸收式制冷机、不依赖训练统计分位数。
+    """
+
+    p_gt_cap_mw: float = 12.0
+    q_boiler_cap_mw: float = 10.0
+    q_ech_cap_mw: float = 6.0
+    price_low_threshold: float = 600.0
+    price_high_threshold: float = 1200.0
+
+    def act(self, observation: dict[str, float]) -> dict[str, float]:
+        p_dem = float(observation["p_dem_mw"])
+        p_re = float(observation["pv_mw"]) + float(observation["wt_mw"])
+        qh_dem = float(observation["qh_dem_mw"])
+        qc_dem = float(observation["qc_dem_mw"])
+        soc_bes = float(observation["soc_bes"])
+        price_e = float(observation["price_e"])
+
+        net_load = max(0.0, p_dem - p_re)
+        coarse_gt_deadband = 0.50 * self.p_gt_cap_mw
+        if net_load <= coarse_gt_deadband:
+            u_gt = -1.0
+        else:
+            gt_ratio = min(0.60, net_load / max(1e-6, self.p_gt_cap_mw))
+            u_gt = gt_ratio * 2.0 - 1.0
+
+        if price_e >= self.price_high_threshold and soc_bes > 0.35:
+            u_bes = 0.3
+        elif price_e <= self.price_low_threshold and soc_bes < 0.75:
+            u_bes = -0.3
+        else:
+            u_bes = 0.0
+
+        u_boiler = min(1.0, max(0.0, qh_dem / max(1e-6, self.q_boiler_cap_mw)))
+        u_ech = min(1.0, max(0.0, qc_dem / max(1e-6, self.q_ech_cap_mw)))
+
+        return {
+            "u_gt": float(np.clip(u_gt, -1.0, 1.0)),
+            "u_bes": float(np.clip(u_bes, -1.0, 1.0)),
+            "u_boiler": float(u_boiler),
+            "u_abs": 0.0,
+            "u_ech": float(u_ech),
+            "u_tes": 0.0,
+        }
+
+
 def _build_policy(
     policy_name: str,
     seed: int,
@@ -150,6 +203,8 @@ def _build_policy(
     normalized = policy_name.lower().strip()
     if normalized == "random":
         return RandomPolicy(seed=seed)
+    if normalized == "easy_rule":
+        return EasyRulePolicy()
     if normalized == "rule":
         return RulePolicy(train_statistics=train_statistics)
     if normalized == "sequence_rule":

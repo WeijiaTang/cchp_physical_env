@@ -134,7 +134,9 @@ class ConstraintSolver:
         p_gt_target = p_gt_target_raw
         gt_min_output_enforced = False
         if is_physics_mode and 0.0 < p_gt_target < self.config.gt_min_output_mw:
-            p_gt_target = 0.0
+            # 对连续控制更友好的最小侵入修正：
+            # 一旦判定“开机”，就直接抬升到最小稳定出力，避免在 0 与 min_output 之间出现硬断点。
+            p_gt_target = self.config.gt_min_output_mw
             gt_min_output_enforced = True
 
         return {

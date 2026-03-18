@@ -150,6 +150,53 @@ training:
   sb3_batch_size: 512
   # 折扣因子（SB3）
   sb3_gamma: 0.99
+
+  # ------------------------------
+  # SB3 训练稳定性增强（强烈建议显式写出）
+  # ------------------------------
+
+  # VecNormalize：观测归一化
+  # - true：训练与评估都使用同一份 obs 归一化统计（由训练过程保存并在评估时加载）
+  # - false：不做 obs 归一化（一般更不稳，除非你已经手动标准化过观测）
+  sb3_vec_norm_obs: true
+  # VecNormalize：奖励归一化（训练时启用；评估时会自动关闭 reward norm 以保持 KPI 口径）
+  sb3_vec_norm_reward: true
+
+  # 训练过程中的评估频率（以环境步计）
+  # - 对 n_envs>1 的情况：实际 callback 触发频率会按 n_envs 做折算（见 policy/sb3.py）
+  sb3_eval_freq: 50000
+  # 训练过程评估时，每个 eval episode 的采样天数（固定在 [7,30]）
+  # - 建议与训练 episode_days 保持一致，确保 best checkpoint 选择口径一致
+  sb3_eval_episode_days: 14
+
+  # ------------------------------
+  # PPO 专属超参数（仅 algo=ppo 时真正生效）
+  # ------------------------------
+
+  # 每次 rollout 收集的步数（等价于 SB3 的 n_steps）
+  sb3_ppo_n_steps: 2048
+  # GAE lambda（优势估计平滑参数）
+  sb3_ppo_gae_lambda: 0.95
+  # 熵系数（鼓励探索）；若出现“策略过于随机”可降低
+  sb3_ppo_ent_coef: 0.0
+  # PPO clip range（策略更新的裁剪幅度）
+  sb3_ppo_clip_range: 0.2
+
+  # ------------------------------
+  # Off-policy 专属超参数（SAC/TD3/DDPG）
+  # ------------------------------
+
+  # replay buffer 在开始学习前的随机探索步数（learning_starts）
+  # - 环境较复杂时适当增大有利于稳定
+  sb3_learning_starts: 5000
+  # 训练频率（每隔多少环境步做一次训练）；与 SB3 的 train_freq 对齐
+  sb3_train_freq: 1
+  # 每次训练更新做多少次梯度步（gradient_steps）
+  sb3_gradient_steps: 1
+  # target 网络软更新系数 tau（TD3/DDPG/SAC 常用）
+  sb3_tau: 0.005
+  # 动作噪声标准差（主要用于 TD3/DDPG 的探索；SAC 也可作为额外噪声项）
+  sb3_action_noise_std: 0.1
   # Off-policy replay buffer（SAC/TD3/DDPG）。窗口观测 + n_envs>1 时默认 1e6 非常容易 OOM。
   sb3_buffer_size: 50000
   # 开启 replay buffer 内存优化（减少 next_obs 存储）。推荐保持开启。

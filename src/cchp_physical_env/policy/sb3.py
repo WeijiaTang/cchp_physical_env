@@ -105,7 +105,7 @@ def _require_sb3_modules():
         import gymnasium as gym
         from gymnasium import spaces
         from stable_baselines3 import DDPG, PPO, SAC, TD3
-        from stable_baselines3.common.vec_env import DummyVecEnv
+        from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
     except ModuleNotFoundError as error:  # pragma: no cover
         raise ModuleNotFoundError(
             "未检测到 sb3 相关依赖。请先安装（并确保 torch 可用）：\n"
@@ -114,7 +114,7 @@ def _require_sb3_modules():
             "  uv pip install stable-baselines3 gymnasium\n"
             "然后再运行 sb3-train/sb3-eval。"
         ) from error
-    return gym, spaces, PPO, SAC, TD3, DDPG, DummyVecEnv
+    return gym, spaces, PPO, SAC, TD3, DDPG, DummyVecEnv, VecNormalize
 
 
 def _timestamped_run_dir(
@@ -243,6 +243,19 @@ class SB3TrainConfig:
     learning_rate: float = 3e-4
     batch_size: int = 256
     gamma: float = 0.99
+    vec_norm_obs: bool = True
+    vec_norm_reward: bool = True
+    eval_freq: int = 50_000
+    eval_episode_days: int = 14
+    ppo_n_steps: int = 2048
+    ppo_gae_lambda: float = 0.95
+    ppo_ent_coef: float = 0.0
+    ppo_clip_range: float = 0.2
+    learning_starts: int = 5_000
+    train_freq: int = 1
+    gradient_steps: int = 1
+    tau: float = 0.005
+    action_noise_std: float = 0.1
     buffer_size: int = 50_000
     optimize_memory_usage: bool = True
     seed: int = 42
@@ -276,6 +289,41 @@ class SB3TrainConfig:
         self.gamma = float(self.gamma)
         if not (0.0 < self.gamma <= 1.0):
             raise ValueError("gamma 必须在 (0,1]。")
+        self.vec_norm_obs = bool(self.vec_norm_obs)
+        self.vec_norm_reward = bool(self.vec_norm_reward)
+        self.eval_freq = int(self.eval_freq)
+        if self.eval_freq <= 0:
+            raise ValueError("eval_freq 必须 > 0。")
+        self.eval_episode_days = int(self.eval_episode_days)
+        if self.eval_episode_days < 7 or self.eval_episode_days > 30:
+            raise ValueError("eval_episode_days 必须在 [7,30]。")
+        self.ppo_n_steps = int(self.ppo_n_steps)
+        if self.ppo_n_steps <= 0:
+            raise ValueError("ppo_n_steps 必须 > 0。")
+        self.ppo_gae_lambda = float(self.ppo_gae_lambda)
+        if not (0.0 < self.ppo_gae_lambda <= 1.0):
+            raise ValueError("ppo_gae_lambda 必须在 (0,1]。")
+        self.ppo_ent_coef = float(self.ppo_ent_coef)
+        if self.ppo_ent_coef < 0.0:
+            raise ValueError("ppo_ent_coef 必须 >= 0。")
+        self.ppo_clip_range = float(self.ppo_clip_range)
+        if self.ppo_clip_range <= 0.0:
+            raise ValueError("ppo_clip_range 必须 > 0。")
+        self.learning_starts = int(self.learning_starts)
+        if self.learning_starts < 0:
+            raise ValueError("learning_starts 必须 >= 0。")
+        self.train_freq = int(self.train_freq)
+        if self.train_freq <= 0:
+            raise ValueError("train_freq 必须 > 0。")
+        self.gradient_steps = int(self.gradient_steps)
+        if self.gradient_steps <= 0:
+            raise ValueError("gradient_steps 必须 > 0。")
+        self.tau = float(self.tau)
+        if not (0.0 < self.tau <= 1.0):
+            raise ValueError("tau 必须在 (0,1]。")
+        self.action_noise_std = float(self.action_noise_std)
+        if self.action_noise_std < 0.0:
+            raise ValueError("action_noise_std 必须 >= 0。")
         self.buffer_size = int(self.buffer_size)
         if self.buffer_size <= 0:
             raise ValueError("buffer_size 必须 > 0。")
@@ -323,6 +371,7 @@ def make_train_env_factory(
     history_steps: int,
     observation_keys: tuple[str, ...],
     normalizer: ObservationAffineNormalizer | None,
+    fixed_episode_df: pd.DataFrame | None = None,
 ) -> Callable[[], Any]:
     gym, *_ = _require_sb3_modules()
     observation_space, action_space = _build_spaces(
@@ -337,9 +386,14 @@ def make_train_env_factory(
             self.observation_space = observation_space
             self.action_space = action_space
             self.rng = np.random.default_rng(seed)
-            self.sampler = make_episode_sampler(
-                train_df, episode_days=episode_days, seed=int(seed)
+            self.fixed_episode_df = (
+                None if fixed_episode_df is None else fixed_episode_df.reset_index(drop=True)
             )
+            self.sampler = None
+            if self.fixed_episode_df is None:
+                self.sampler = make_episode_sampler(
+                    train_df, episode_days=episode_days, seed=int(seed)
+                )
             self.env = CCHPPhysicalEnv(exogenous_df=train_df, config=env_config, seed=int(seed))
             self.observation: dict[str, float] | None = None
             self.buffer = WindowBuffer(history_steps=int(history_steps), obs_dim=len(observation_keys))
@@ -348,7 +402,12 @@ def make_train_env_factory(
             del options
             if seed is not None:
                 self.rng = np.random.default_rng(int(seed))
-            _, episode_df = next(self.sampler)
+            if self.fixed_episode_df is not None:
+                episode_df = self.fixed_episode_df
+            else:
+                if self.sampler is None:
+                    raise RuntimeError("训练采样器未初始化。")
+                _, episode_df = next(self.sampler)
             observation, _ = self.env.reset(seed=int(seed or 0), episode_df=episode_df)
             self.observation = observation
             vector = _observation_dict_to_vector(observation, keys=observation_keys)
@@ -370,6 +429,45 @@ def make_train_env_factory(
             return window.copy(), float(reward), bool(terminated), bool(truncated), dict(info)
 
     return _CCHPSB3TrainEnv
+
+
+def make_eval_env_factory(
+    *,
+    eval_df: pd.DataFrame,
+    env_config: EnvConfig,
+    seed: int,
+    history_steps: int,
+    observation_keys: tuple[str, ...],
+    normalizer: ObservationAffineNormalizer | None,
+) -> Callable[[], Any]:
+    episode_days = max(7, int(np.ceil(len(eval_df) * max(1e-6, float(env_config.dt_hours)) / 24.0)))
+    return make_train_env_factory(
+        train_df=eval_df,
+        env_config=env_config,
+        seed=seed,
+        episode_days=episode_days,
+        history_steps=history_steps,
+        observation_keys=observation_keys,
+        normalizer=normalizer,
+        fixed_episode_df=eval_df.reset_index(drop=True),
+    )
+
+
+def _steps_per_day(*, env_config: EnvConfig) -> int:
+    return max(1, int(round(24.0 / max(1e-6, float(env_config.dt_hours)))))
+
+
+def _build_fixed_eval_episode_df(
+    *, train_df: pd.DataFrame, env_config: EnvConfig, eval_episode_days: int
+) -> pd.DataFrame:
+    steps = int(eval_episode_days) * _steps_per_day(env_config=env_config)
+    if steps <= 0:
+        raise ValueError("eval_episode_days 对应的评估步数必须 > 0。")
+    if len(train_df) < steps:
+        raise ValueError(
+            f"训练集长度不足以截取固定评估片段：需要 {steps} 步，当前仅 {len(train_df)} 步。"
+        )
+    return train_df.tail(steps).reset_index(drop=True)
 
 
 if torch is not None and BaseFeaturesExtractor is not object:
@@ -504,15 +602,17 @@ def train_sb3_policy(
     config: SB3TrainConfig,
     run_root: str | Path = "runs",
 ) -> dict[str, Any]:
-    gym, _, PPO, SAC, TD3, DDPG, DummyVecEnv = _require_sb3_modules()
+    gym, _, PPO, SAC, TD3, DDPG, DummyVecEnv, VecNormalize = _require_sb3_modules()
     del gym
 
     try:
+        from stable_baselines3.common.callbacks import BaseCallback, CallbackList, EvalCallback
         from stable_baselines3.common.logger import configure as sb3_configure_logger
         from stable_baselines3.common.monitor import Monitor
+        from stable_baselines3.common.noise import NormalActionNoise
     except ModuleNotFoundError as error:  # pragma: no cover
         raise ModuleNotFoundError(
-            "未检测到 stable-baselines3 训练日志模块。请确认已安装：uv pip install -e '.[sb3]'"
+            "未检测到 stable-baselines3 训练依赖。请确认已安装：uv pip install -e '.[sb3]'"
         ) from error
 
     year = _extract_year(train_df)
@@ -530,6 +630,9 @@ def train_sb3_policy(
     train_statistics_path = run_dir / "train" / "train_statistics.json"
     checkpoint_path = run_dir / "checkpoints" / "baseline_policy.json"
     model_path = run_dir / "checkpoints" / "sb3_model.zip"
+    best_model_path = run_dir / "checkpoints" / "best_model.zip"
+    vecnormalize_path = run_dir / "checkpoints" / "vecnormalize.pkl"
+    best_vecnormalize_path = run_dir / "checkpoints" / "best_vecnormalize.pkl"
 
     train_statistics = compute_training_statistics(train_df)
     train_statistics_path.write_text(
@@ -537,10 +640,10 @@ def train_sb3_policy(
         encoding="utf-8",
     )
     observation_keys = tuple(OBS_KEYS)
-    normalizer = _build_observation_normalizer(
-        train_statistics=train_statistics,
+    eval_episode_df = _build_fixed_eval_episode_df(
+        train_df=train_df,
         env_config=env_config,
-        keys=observation_keys,
+        eval_episode_days=config.eval_episode_days,
     )
 
     env_fns = [
@@ -551,7 +654,7 @@ def train_sb3_policy(
             episode_days=config.episode_days,
             history_steps=config.history_steps,
             observation_keys=observation_keys,
-            normalizer=normalizer,
+            normalizer=None,
         )
         for idx in range(config.n_envs)
     ]
@@ -566,7 +669,43 @@ def train_sb3_policy(
 
         wrapped_env_fns.append(_make)
 
-    vec_env = DummyVecEnv(wrapped_env_fns)
+    train_env = DummyVecEnv(wrapped_env_fns)
+    use_vecnormalize = bool(config.vec_norm_obs or config.vec_norm_reward)
+    if use_vecnormalize:
+        train_env = VecNormalize(
+            train_env,
+            training=True,
+            norm_obs=bool(config.vec_norm_obs),
+            norm_reward=bool(config.vec_norm_reward),
+            clip_obs=10.0,
+            clip_reward=10.0,
+            gamma=float(config.gamma),
+        )
+
+    eval_factory = make_eval_env_factory(
+        eval_df=eval_episode_df,
+        env_config=env_config,
+        seed=config.seed,
+        history_steps=config.history_steps,
+        observation_keys=observation_keys,
+        normalizer=None,
+    )
+
+    def _make_eval() -> Any:
+        env = eval_factory()
+        return Monitor(env, filename=str(run_dir / "train" / "eval_monitor.csv"))
+
+    eval_env = DummyVecEnv([_make_eval])
+    if use_vecnormalize:
+        eval_env = VecNormalize(
+            eval_env,
+            training=False,
+            norm_obs=bool(config.vec_norm_obs),
+            norm_reward=False,
+            clip_obs=10.0,
+            clip_reward=10.0,
+            gamma=float(config.gamma),
+        )
 
     algo_cls = {"ppo": PPO, "sac": SAC, "td3": TD3, "ddpg": DDPG}[config.algo]
     policy_kwargs = _sb3_policy_kwargs_for_backbone(backbone=config.backbone)
@@ -581,8 +720,21 @@ def train_sb3_policy(
             "features_extractor_kwargs": dict(policy_kwargs.get("features_extractor_kwargs", {})),
         }
     algo_kwargs: dict[str, Any] = {}
+    if config.algo == "ppo":
+        algo_kwargs.update(
+            {
+                "n_steps": int(config.ppo_n_steps),
+                "gae_lambda": float(config.ppo_gae_lambda),
+                "ent_coef": float(config.ppo_ent_coef),
+                "clip_range": float(config.ppo_clip_range),
+            }
+        )
     if config.algo in {"sac", "td3", "ddpg"}:
         algo_kwargs["buffer_size"] = int(config.buffer_size)
+        algo_kwargs["learning_starts"] = int(config.learning_starts)
+        algo_kwargs["train_freq"] = (int(config.train_freq), "step")
+        algo_kwargs["gradient_steps"] = int(config.gradient_steps)
+        algo_kwargs["tau"] = float(config.tau)
         # SB3 off-policy algorithms accept optimize_memory_usage (ReplayBuffer) in recent versions.
         # If an older SB3 is installed, we silently skip it for compatibility.
         try:
@@ -592,10 +744,15 @@ def train_sb3_policy(
                 algo_kwargs["optimize_memory_usage"] = bool(config.optimize_memory_usage)
         except Exception:
             pass
+        if config.algo in {"td3", "ddpg"} and float(config.action_noise_std) > 0.0:
+            algo_kwargs["action_noise"] = NormalActionNoise(
+                mean=np.zeros(6, dtype=np.float32),
+                sigma=np.full(6, float(config.action_noise_std), dtype=np.float32),
+            )
 
     model = algo_cls(
         policy="MlpPolicy",
-        env=vec_env,
+        env=train_env,
         learning_rate=config.learning_rate,
         batch_size=config.batch_size,
         gamma=config.gamma,
@@ -606,8 +763,6 @@ def train_sb3_policy(
         **algo_kwargs,
     )
     model.set_logger(sb3_configure_logger(folder=str(run_dir / "train"), format_strings=["stdout", "csv"]))
-    # 先保存一次初始模型与 checkpoint_json，便于 Kaggle 等环境中断时仍可评估/继续分析。
-    model.save(str(model_path))
 
     payload = {
         "artifact_type": "sb3_policy",
@@ -624,54 +779,138 @@ def train_sb3_policy(
         "learning_rate": float(config.learning_rate),
         "batch_size": int(config.batch_size),
         "gamma": float(config.gamma),
+        "vec_normalize": {
+            "enabled": bool(use_vecnormalize),
+            "norm_obs": bool(config.vec_norm_obs),
+            "norm_reward": bool(config.vec_norm_reward),
+            "clip_obs": 10.0,
+            "clip_reward": 10.0,
+        },
+        "eval_protocol": {
+            "eval_freq": int(config.eval_freq),
+            "eval_episode_days": int(config.eval_episode_days),
+            "eval_window_start": str(pd.to_datetime(eval_episode_df["timestamp"].iloc[0]).isoformat()),
+            "eval_window_end": str(pd.to_datetime(eval_episode_df["timestamp"].iloc[-1]).isoformat()),
+            "model_source_default": "best",
+        },
+        "ppo_hyperparameters": {
+            "n_steps": int(config.ppo_n_steps),
+            "gae_lambda": float(config.ppo_gae_lambda),
+            "ent_coef": float(config.ppo_ent_coef),
+            "clip_range": float(config.ppo_clip_range),
+        },
+        "offpolicy_hyperparameters": {
+            "learning_starts": int(config.learning_starts),
+            "train_freq": int(config.train_freq),
+            "gradient_steps": int(config.gradient_steps),
+            "tau": float(config.tau),
+            "action_noise_std": float(config.action_noise_std),
+            "buffer_size": int(config.buffer_size),
+            "optimize_memory_usage": bool(config.optimize_memory_usage),
+        },
         "buffer_size": int(config.buffer_size),
         "optimize_memory_usage": bool(config.optimize_memory_usage),
         "device": str(config.device),
         "observation_keys": list(observation_keys),
-        "obs_norm": {"mode": "zscore_affine_v1", "clip_value": 10.0},
+        "obs_norm": {
+            "mode": "vecnormalize_v1" if use_vecnormalize else "raw_v1",
+            "clip_value": 10.0,
+        },
         "policy_kwargs": policy_kwargs_serializable,
         "model_path": str(model_path).replace("\\", "/"),
+        "best_model_path": str(best_model_path).replace("\\", "/"),
+        "vecnormalize_path": (
+            str(vecnormalize_path).replace("\\", "/") if use_vecnormalize else None
+        ),
+        "best_vecnormalize_path": (
+            str(best_vecnormalize_path).replace("\\", "/") if use_vecnormalize else None
+        ),
         "train_statistics_path": str(train_statistics_path).replace("\\", "/"),
         "run_dir": str(run_dir).replace("\\", "/"),
     }
-    checkpoint_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    train_summary_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    write_one_row_csv(run_dir / "train" / "summary_flat.csv", flatten_mapping(payload))
 
-    try:
-        from stable_baselines3.common.callbacks import BaseCallback
-    except ModuleNotFoundError:
-        BaseCallback = None  # type: ignore[assignment]
+    def _write_payload() -> None:
+        checkpoint_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        train_summary_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        write_one_row_csv(run_dir / "train" / "summary_flat.csv", flatten_mapping(payload))
 
-    callback = None
-    if BaseCallback is not None:
+    def _save_vecnormalize_bundle(path: Path | None) -> None:
+        if path is None or not isinstance(train_env, VecNormalize):
+            return
+        train_env.save(str(path))
 
-        class _OverwriteCheckpointCallback(BaseCallback):
-            def __init__(self, *, path: Path, save_every_steps: int = 100_000):
-                super().__init__()
-                self.path = Path(path)
-                self.save_every_steps = int(save_every_steps)
-                self._last_saved = 0
+    # 先保存一次初始模型与 checkpoint_json，便于 Kaggle 等环境中断时仍可评估/继续分析。
+    model.save(str(model_path))
+    _save_vecnormalize_bundle(vecnormalize_path if use_vecnormalize else None)
+    _write_payload()
 
-            def _on_step(self) -> bool:
-                if self.num_timesteps - self._last_saved < self.save_every_steps:
-                    return True
-                self.model.save(str(self.path))
-                self._last_saved = int(self.num_timesteps)
+    class _LatestModelCallback(BaseCallback):
+        def __init__(self, *, save_every_steps: int) -> None:
+            super().__init__()
+            self.save_every_steps = int(save_every_steps)
+            self._last_saved = 0
+
+        def _save_bundle(self) -> None:
+            self.model.save(str(model_path))
+            _save_vecnormalize_bundle(vecnormalize_path if use_vecnormalize else None)
+
+        def _on_step(self) -> bool:
+            if self.num_timesteps - self._last_saved < self.save_every_steps:
                 return True
+            self._save_bundle()
+            self._last_saved = int(self.num_timesteps)
+            return True
 
-        callback = _OverwriteCheckpointCallback(path=model_path, save_every_steps=100_000)
+        def _on_training_end(self) -> None:
+            self._save_bundle()
+
+    class _BestModelEvalCallback(EvalCallback):
+        def _on_step(self) -> bool:
+            previous_best = float(self.best_mean_reward)
+            continue_training = super()._on_step()
+            if self.best_mean_reward > previous_best:
+                _save_vecnormalize_bundle(best_vecnormalize_path if use_vecnormalize else None)
+            return continue_training
+
+    eval_callback = _BestModelEvalCallback(
+        eval_env=eval_env,
+        n_eval_episodes=1,
+        eval_freq=max(1, int(config.eval_freq) // max(1, int(config.n_envs))),
+        log_path=str(run_dir / "train" / "eval_callback"),
+        best_model_save_path=str(run_dir / "checkpoints"),
+        deterministic=True,
+        render=False,
+        verbose=1,
+    )
+    latest_callback = _LatestModelCallback(
+        save_every_steps=max(10_000, int(config.eval_freq)),
+    )
+    callback = CallbackList([latest_callback, eval_callback])
 
     model.learn(total_timesteps=int(config.total_timesteps), callback=callback)
     model.save(str(model_path))
+    _save_vecnormalize_bundle(vecnormalize_path if use_vecnormalize else None)
+    if not best_model_path.exists():
+        model.save(str(best_model_path))
+    if use_vecnormalize and not best_vecnormalize_path.exists():
+        _save_vecnormalize_bundle(best_vecnormalize_path)
     payload["training_complete"] = True
-    checkpoint_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    train_summary_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    write_one_row_csv(run_dir / "train" / "summary_flat.csv", flatten_mapping(payload))
+    payload["training_timesteps_completed"] = int(getattr(model, "num_timesteps", config.total_timesteps))
+    best_reward = float(getattr(eval_callback, "best_mean_reward", float("-inf")))
+    payload["best_mean_reward"] = None if not np.isfinite(best_reward) else best_reward
+    _write_payload()
+    eval_env.close()
+    train_env.close()
     return payload
 
 
-def _resolve_sb3_model_path(*, checkpoint_json: Path, model_path_value: str, run_dir_value: str | None) -> Path:
+def _resolve_sb3_model_path(
+    *,
+    checkpoint_json: Path,
+    model_path_value: str,
+    run_dir_value: str | None,
+    default_filename: str = "sb3_model.zip",
+) -> Path:
     candidates: list[Path] = []
     raw = Path(str(model_path_value))
     candidates.append(raw)
@@ -682,11 +921,11 @@ def _resolve_sb3_model_path(*, checkpoint_json: Path, model_path_value: str, run
 
     if run_dir_value:
         run_dir_path = Path(str(run_dir_value))
-        candidates.append(run_dir_path / "checkpoints" / "sb3_model.zip")
+        candidates.append(run_dir_path / "checkpoints" / default_filename)
         # 常见场景：checkpoint_json 位于 <run_dir>/checkpoints/baseline_policy.json，直接回退到该 run_dir。
-        candidates.append(checkpoint_dir.parent / "checkpoints" / "sb3_model.zip")
+        candidates.append(checkpoint_dir.parent / "checkpoints" / default_filename)
 
-    candidates.append(checkpoint_dir / "sb3_model.zip")
+    candidates.append(checkpoint_dir / default_filename)
 
     for item in candidates:
         try:
@@ -697,12 +936,146 @@ def _resolve_sb3_model_path(*, checkpoint_json: Path, model_path_value: str, run
 
     searched = "\n".join(f"- {item.as_posix()}" for item in candidates)
     raise FileNotFoundError(
-        "无法定位 SB3 模型文件（sb3_model.zip）。\n"
+        f"无法定位 SB3 模型文件（{default_filename}）。\n"
         f"checkpoint_json={checkpoint_json.as_posix()}\n"
         f"model_path={model_path_value}\n"
         "已尝试路径：\n"
         f"{searched}"
     )
+
+
+def _resolve_checkpoint_sidecar_path(
+    *,
+    checkpoint_json: Path,
+    path_value: str,
+    artifact_label: str,
+) -> Path:
+    """
+    解析 checkpoint sidecar 文件路径（例如 train_statistics.json）。
+
+    背景：
+    - baseline_policy.json 中记录的路径通常是相对项目根目录的相对路径；
+    - 导出到 Kaggle / 归档目录后，checkpoint 可能位于更深层级；
+    - 直接 `Path(path_value)` 读取会依赖当前工作目录，迁移后容易失效。
+
+    策略：
+    1. 先尝试原始路径（兼容原始 run 目录）；
+    2. 若是相对路径，则依次尝试以 checkpoint 所在目录及其上级目录为锚点重建路径。
+    """
+    raw = Path(str(path_value))
+    checkpoint_resolved = checkpoint_json.resolve()
+    candidates: list[Path] = [raw]
+
+    if not raw.is_absolute():
+        for parent in checkpoint_resolved.parents[:5]:
+            candidates.append(parent / raw)
+
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for item in candidates:
+        normalized = item.as_posix()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(item)
+
+    for item in deduped:
+        try:
+            if item.exists():
+                return item
+        except OSError:
+            continue
+
+    searched = "\n".join(f"- {item.as_posix()}" for item in deduped)
+    raise FileNotFoundError(
+        f"无法定位 {artifact_label}。\n"
+        f"checkpoint_json={checkpoint_json.as_posix()}\n"
+        f"path_value={path_value}\n"
+        "已尝试路径：\n"
+        f"{searched}"
+    )
+
+
+def _resolve_optional_checkpoint_sidecar_path(
+    *,
+    checkpoint_json: Path,
+    path_value: str | None,
+    artifact_label: str,
+) -> Path | None:
+    if not path_value:
+        return None
+    try:
+        return _resolve_checkpoint_sidecar_path(
+            checkpoint_json=checkpoint_json,
+            path_value=str(path_value),
+            artifact_label=artifact_label,
+        )
+    except FileNotFoundError:
+        return None
+
+
+def _resolve_sb3_eval_artifacts(
+    *,
+    checkpoint_json: Path,
+    checkpoint_payload: dict[str, Any],
+    model_source: str,
+) -> tuple[Path, Path | None, str]:
+    normalized_source = str(model_source).strip().lower()
+    if normalized_source not in {"best", "last"}:
+        raise ValueError("model_source 仅支持 best/last。")
+
+    run_dir_value = checkpoint_payload.get("run_dir")
+    if normalized_source == "best":
+        model_candidates = [
+            ("best", checkpoint_payload.get("best_model_path"), "best_model.zip"),
+            ("last", checkpoint_payload.get("model_path"), "sb3_model.zip"),
+        ]
+        vecnorm_candidates = [
+            checkpoint_payload.get("best_vecnormalize_path"),
+            checkpoint_payload.get("vecnormalize_path"),
+        ]
+    else:
+        model_candidates = [
+            ("last", checkpoint_payload.get("model_path"), "sb3_model.zip"),
+            ("best", checkpoint_payload.get("best_model_path"), "best_model.zip"),
+        ]
+        vecnorm_candidates = [
+            checkpoint_payload.get("vecnormalize_path"),
+            checkpoint_payload.get("best_vecnormalize_path"),
+        ]
+
+    resolved_model_path: Path | None = None
+    resolved_source = normalized_source
+    for candidate_source, candidate_path, default_filename in model_candidates:
+        if not candidate_path:
+            continue
+        try:
+            resolved_model_path = _resolve_sb3_model_path(
+                checkpoint_json=checkpoint_json,
+                model_path_value=str(candidate_path),
+                run_dir_value=run_dir_value,
+                default_filename=default_filename,
+            )
+            resolved_source = str(candidate_source)
+            break
+        except FileNotFoundError:
+            continue
+
+    if resolved_model_path is None:
+        raise FileNotFoundError(
+            "无法从 checkpoint_json 解析可用的 SB3 模型文件。"
+        )
+
+    resolved_vecnormalize_path = None
+    for candidate_path in vecnorm_candidates:
+        resolved_vecnormalize_path = _resolve_optional_checkpoint_sidecar_path(
+            checkpoint_json=checkpoint_json,
+            path_value=None if candidate_path is None else str(candidate_path),
+            artifact_label="SB3 VecNormalize 统计文件",
+        )
+        if resolved_vecnormalize_path is not None:
+            break
+    return resolved_model_path, resolved_vecnormalize_path, resolved_source
 
 
 def evaluate_sb3_policy(
@@ -713,46 +1086,50 @@ def evaluate_sb3_policy(
     run_dir: str | Path,
     seed: int = 42,
     deterministic: bool = True,
+    model_source: str = "best",
     device: str = "auto",
 ) -> dict[str, Any]:
-    _, _, PPO, SAC, TD3, DDPG, _ = _require_sb3_modules()
+    _, _, PPO, SAC, TD3, DDPG, DummyVecEnv, VecNormalize = _require_sb3_modules()
 
     year = _extract_year(eval_df)
     if year != EVAL_YEAR:
         raise ValueError(f"评估必须使用 {EVAL_YEAR}，当前年份 {year}")
 
-    ckpt = json.loads(Path(checkpoint_json).read_text(encoding="utf-8"))
+    checkpoint_json_path = Path(checkpoint_json)
+    ckpt = json.loads(checkpoint_json_path.read_text(encoding="utf-8"))
     if ckpt.get("artifact_type") != "sb3_policy":
         raise ValueError("checkpoint_json 不是 sb3_policy。")
 
     algo = str(ckpt.get("algo", "")).strip().lower()
     if algo not in {"ppo", "sac", "td3", "ddpg"}:
         raise ValueError(f"未知 algo: {algo}")
-    model_path = ckpt.get("model_path")
-    if not model_path:
-        raise ValueError("checkpoint_json 缺少 model_path。")
 
     algo_cls = {"ppo": PPO, "sac": SAC, "td3": TD3, "ddpg": DDPG}[algo]
-    resolved_model_path = _resolve_sb3_model_path(
-        checkpoint_json=Path(checkpoint_json),
-        model_path_value=str(model_path),
-        run_dir_value=ckpt.get("run_dir"),
+    resolved_model_path, resolved_vecnormalize_path, resolved_model_source = _resolve_sb3_eval_artifacts(
+        checkpoint_json=checkpoint_json_path,
+        checkpoint_payload=ckpt,
+        model_source=model_source,
     )
-    model = algo_cls.load(str(resolved_model_path), device=device)
 
     history_steps = int(ckpt.get("history_steps", 1))
     if history_steps <= 0:
         raise ValueError("checkpoint_json.history_steps 必须 > 0。")
-    observation_keys = tuple(ckpt.get("observation_keys") or OBS_KEYS)
-    obs_dim = len(observation_keys)
-    buffer = WindowBuffer(history_steps=history_steps, obs_dim=obs_dim)
+    observation_keys = tuple(str(item) for item in (ckpt.get("observation_keys") or OBS_KEYS))
     normalizer = None
     obs_norm = ckpt.get("obs_norm") or {}
-    if isinstance(obs_norm, dict) and obs_norm.get("mode"):
+    obs_norm_mode = ""
+    if isinstance(obs_norm, dict):
+        obs_norm_mode = str(obs_norm.get("mode", "")).strip().lower()
+    if resolved_vecnormalize_path is None and obs_norm_mode in {"zscore_affine_v1", "affine_v1"}:
         train_statistics_path = ckpt.get("train_statistics_path")
         if not train_statistics_path:
             raise ValueError("checkpoint_json 启用了 obs_norm 但缺少 train_statistics_path。")
-        train_statistics = json.loads(Path(train_statistics_path).read_text(encoding="utf-8"))
+        resolved_train_statistics_path = _resolve_checkpoint_sidecar_path(
+            checkpoint_json=checkpoint_json_path,
+            path_value=str(train_statistics_path),
+            artifact_label="SB3 训练统计文件（train_statistics.json）",
+        )
+        train_statistics = json.loads(resolved_train_statistics_path.read_text(encoding="utf-8"))
         normalizer = _build_observation_normalizer(
             train_statistics=train_statistics,
             env_config=env_config,
@@ -762,33 +1139,50 @@ def evaluate_sb3_policy(
     output_run_dir = Path(run_dir)
     (output_run_dir / "eval").mkdir(parents=True, exist_ok=True)
 
-    env = CCHPPhysicalEnv(exogenous_df=eval_df, config=env_config, seed=seed)
-    observation, _ = env.reset(seed=seed, episode_df=eval_df)
-    first_vec = _observation_dict_to_vector(observation, keys=observation_keys)
-    if normalizer is not None:
-        first_vec = normalizer.apply(first_vec)
-    window = buffer.reset(first_vec).copy()
+    base_eval_env = DummyVecEnv(
+        [
+            make_eval_env_factory(
+                eval_df=eval_df.reset_index(drop=True),
+                env_config=env_config,
+                seed=seed,
+                history_steps=history_steps,
+                observation_keys=observation_keys,
+                normalizer=normalizer,
+            )
+        ]
+    )
+    vec_env = base_eval_env
+    if resolved_vecnormalize_path is not None:
+        vec_env = VecNormalize.load(str(resolved_vecnormalize_path), base_eval_env)
+        vec_env.training = False
+        vec_env.norm_reward = False
+
+    model = algo_cls.load(str(resolved_model_path), env=vec_env, device=device)
+    observation = vec_env.reset()
     terminated = False
     total_reward = 0.0
     step_rows: list[dict[str, Any]] = []
     final_info: dict[str, Any] = {}
 
     while not terminated:
-        action_vec, _ = model.predict(window, deterministic=bool(deterministic))
-        action_dict = _action_vector_to_env_action(action_vec)
-        observation, reward, terminated, _, info = env.step(action_dict)
-        vec = _observation_dict_to_vector(observation, keys=observation_keys)
-        if normalizer is not None:
-            vec = normalizer.apply(vec)
-        window = buffer.push(vec).copy()
+        action_vec, _ = model.predict(observation, deterministic=bool(deterministic))
+        observation, rewards, dones, infos = vec_env.step(action_vec)
+        reward = float(np.asarray(rewards).reshape(-1)[0])
+        terminated = bool(np.asarray(dones).reshape(-1)[0])
+        info = dict(infos[0] if infos else {})
         total_reward += float(reward)
-        final_info = dict(info)
-        log_row = {key: value for key, value in info.items() if key not in {"violation_flags", "diagnostic_flags"}}
+        final_info = info
+        log_row = {
+            key: value
+            for key, value in info.items()
+            if key not in {"violation_flags", "diagnostic_flags", "terminal_observation"}
+        }
         log_row["violation_flags_json"] = json.dumps(info.get("violation_flags", {}), ensure_ascii=False)
         log_row["diagnostic_flags_json"] = json.dumps(info.get("diagnostic_flags", {}), ensure_ascii=False)
         step_rows.append(log_row)
 
-    summary = final_info.get("episode_summary", env.kpi.summary())
+    fallback_env = getattr(base_eval_env.envs[0], "env", base_eval_env.envs[0])
+    summary = final_info.get("episode_summary", fallback_env.kpi.summary())
     summary = dict(summary)
     summary["total_reward_from_loop"] = float(total_reward)
     summary["mode"] = "eval"
@@ -798,7 +1192,11 @@ def evaluate_sb3_policy(
     summary["backbone"] = str(ckpt.get("backbone", ""))
     summary["history_steps"] = int(history_steps)
     summary["seed"] = int(seed)
-    summary["checkpoint_json"] = str(Path(checkpoint_json)).replace("\\", "/")
+    summary["checkpoint_json"] = str(checkpoint_json_path).replace("\\", "/")
+    summary["model_source"] = str(resolved_model_source)
+    summary["resolved_model_path"] = str(resolved_model_path).replace("\\", "/")
+    if resolved_vecnormalize_path is not None:
+        summary["resolved_vecnormalize_path"] = str(resolved_vecnormalize_path).replace("\\", "/")
 
     (output_run_dir / "eval" / "summary.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False),
@@ -812,6 +1210,7 @@ def evaluate_sb3_policy(
         step_log=step_df,
         dt_h=float(env_config.dt_hours),
     )
+    vec_env.close()
     return summary
 
 
