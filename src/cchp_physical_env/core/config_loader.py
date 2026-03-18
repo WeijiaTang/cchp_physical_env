@@ -42,6 +42,10 @@ TRAINING_DEFAULTS: dict[str, Any] = {
     "sb3_learning_rate": 3e-4,
     "sb3_batch_size": 512,
     "sb3_gamma": 0.99,
+    # Off-policy algorithms (SAC/TD3/DDPG) use a replay buffer.
+    # With window observations (K,D) and n_envs>1, the default SB3 buffer_size=1e6 can easily OOM.
+    "sb3_buffer_size": 50_000,
+    "sb3_optimize_memory_usage": True,
 }
 
 # env 参数校验规则表：
@@ -236,7 +240,7 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
     if unknown:
         raise ValueError(f"`training` 包含未知参数: {unknown}")
 
-    bool_keys = {"sb3_enabled"}
+    bool_keys = {"sb3_enabled", "sb3_optimize_memory_usage"}
     int_keys = {
         "seed",
         "history_steps",
@@ -249,6 +253,7 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
         "sb3_total_timesteps",
         "sb3_n_envs",
         "sb3_batch_size",
+        "sb3_buffer_size",
     }
     for key, value in overrides.items():
         if key in {"policy", "sequence_adapter", "device"}:
@@ -365,4 +370,6 @@ def build_training_options(overrides: dict[str, Any] | None = None) -> dict[str,
     normalized["sb3_learning_rate"] = float(normalized["sb3_learning_rate"])
     normalized["sb3_batch_size"] = int(normalized["sb3_batch_size"])
     normalized["sb3_gamma"] = float(normalized["sb3_gamma"])
+    normalized["sb3_buffer_size"] = int(normalized["sb3_buffer_size"])
+    normalized["sb3_optimize_memory_usage"] = bool(normalized["sb3_optimize_memory_usage"])
     return normalized

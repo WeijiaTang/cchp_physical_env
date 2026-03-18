@@ -243,6 +243,8 @@ class SB3TrainConfig:
     learning_rate: float = 3e-4
     batch_size: int = 256
     gamma: float = 0.99
+    buffer_size: int = 50_000
+    optimize_memory_usage: bool = True
     seed: int = 42
     device: str = "auto"
 
@@ -274,6 +276,12 @@ class SB3TrainConfig:
         self.gamma = float(self.gamma)
         if not (0.0 < self.gamma <= 1.0):
             raise ValueError("gamma 必须在 (0,1]。")
+        self.buffer_size = int(self.buffer_size)
+        if self.buffer_size <= 0:
+            raise ValueError("buffer_size 必须 > 0。")
+        if self.buffer_size < self.batch_size:
+            raise ValueError("buffer_size 必须 >= batch_size（否则 replay buffer 采样无意义）。")
+        self.optimize_memory_usage = bool(self.optimize_memory_usage)
         self.seed = int(self.seed)
         self.device = str(self.device).strip().lower()
 
@@ -572,6 +580,19 @@ def train_sb3_policy(
             "features_extractor_class": extractor_name,
             "features_extractor_kwargs": dict(policy_kwargs.get("features_extractor_kwargs", {})),
         }
+    algo_kwargs: dict[str, Any] = {}
+    if config.algo in {"sac", "td3", "ddpg"}:
+        algo_kwargs["buffer_size"] = int(config.buffer_size)
+        # SB3 off-policy algorithms accept optimize_memory_usage (ReplayBuffer) in recent versions.
+        # If an older SB3 is installed, we silently skip it for compatibility.
+        try:
+            import inspect
+
+            if "optimize_memory_usage" in inspect.signature(algo_cls).parameters:
+                algo_kwargs["optimize_memory_usage"] = bool(config.optimize_memory_usage)
+        except Exception:
+            pass
+
     model = algo_cls(
         policy="MlpPolicy",
         env=vec_env,
@@ -582,6 +603,7 @@ def train_sb3_policy(
         device=config.device,
         policy_kwargs=policy_kwargs if policy_kwargs else None,
         verbose=1,
+        **algo_kwargs,
     )
     model.set_logger(sb3_configure_logger(folder=str(run_dir / "train"), format_strings=["stdout", "csv"]))
     # 先保存一次初始模型与 checkpoint_json，便于 Kaggle 等环境中断时仍可评估/继续分析。
@@ -602,6 +624,8 @@ def train_sb3_policy(
         "learning_rate": float(config.learning_rate),
         "batch_size": int(config.batch_size),
         "gamma": float(config.gamma),
+        "buffer_size": int(config.buffer_size),
+        "optimize_memory_usage": bool(config.optimize_memory_usage),
         "device": str(config.device),
         "observation_keys": list(observation_keys),
         "obs_norm": {"mode": "zscore_affine_v1", "clip_value": 10.0},

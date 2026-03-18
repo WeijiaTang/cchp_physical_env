@@ -150,3 +150,7 @@ training:
   sb3_batch_size: 512
   # 折扣因子（SB3）
   sb3_gamma: 0.99
+  # Off-policy replay buffer（SAC/TD3/DDPG）。窗口观测 + n_envs>1 时默认 1e6 非常容易 OOM。
+  sb3_buffer_size: 50000
+  # 开启 replay buffer 内存优化（减少 next_obs 存储）。推荐保持开启。
+  sb3_optimize_memory_usage: true

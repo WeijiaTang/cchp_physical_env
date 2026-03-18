@@ -81,6 +81,8 @@ TRAINING_OPTION_KEYS = (
     "sb3_learning_rate",
     "sb3_batch_size",
     "sb3_gamma",
+    "sb3_buffer_size",
+    "sb3_optimize_memory_usage",
 )
 
 
@@ -207,6 +209,8 @@ def _command_train(args: argparse.Namespace) -> None:
                 "sb3_learning_rate",
                 "sb3_batch_size",
                 "sb3_gamma",
+                "sb3_buffer_size",
+                "sb3_optimize_memory_usage",
             }
         )
         eval_df_cache: pd.DataFrame | None = None
@@ -224,6 +228,8 @@ def _command_train(args: argparse.Namespace) -> None:
                 learning_rate=current_options["sb3_learning_rate"],
                 batch_size=current_options["sb3_batch_size"],
                 gamma=current_options["sb3_gamma"],
+                buffer_size=current_options["sb3_buffer_size"],
+                optimize_memory_usage=bool(current_options["sb3_optimize_memory_usage"]),
                 seed=seed,
                 device=current_options["device"],
             )
@@ -482,6 +488,8 @@ def _command_sb3_train(args: argparse.Namespace) -> None:
             learning_rate=args.learning_rate,
             batch_size=args.batch_size,
             gamma=args.gamma,
+            buffer_size=args.buffer_size,
+            optimize_memory_usage=bool(getattr(args, "optimize_memory_usage", True)),
             seed=seed,
             device=args.device,
         )
@@ -819,6 +827,20 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--sb3-learning-rate", type=float, default=argparse.SUPPRESS)
     train_parser.add_argument("--sb3-batch-size", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument("--sb3-gamma", type=float, default=argparse.SUPPRESS)
+    train_parser.add_argument("--sb3-buffer-size", type=int, default=argparse.SUPPRESS)
+    train_parser.add_argument(
+        "--sb3-optimize-memory-usage",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="对 off-policy replay buffer 启用内存优化（减少 next_obs 存储；推荐）。",
+    )
+    train_parser.add_argument(
+        "--no-sb3-optimize-memory-usage",
+        dest="sb3_optimize_memory_usage",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="禁用 replay buffer 的内存优化（不推荐，可能 OOM）。",
+    )
 
     eval_parser = subparsers.add_parser("eval", help="运行 baseline 评估（固定 2025）。")
     eval_parser.add_argument("--run-dir", type=Path, default=None)
@@ -879,6 +901,20 @@ def build_parser() -> argparse.ArgumentParser:
     sb3_train_parser.add_argument("--learning-rate", type=float, default=3e-4)
     sb3_train_parser.add_argument("--batch-size", type=int, default=256)
     sb3_train_parser.add_argument("--gamma", type=float, default=0.99)
+    sb3_train_parser.add_argument("--buffer-size", type=int, default=50_000, help="off-policy replay buffer 大小。")
+    sb3_train_parser.add_argument(
+        "--optimize-memory-usage",
+        action="store_true",
+        default=True,
+        help="启用 replay buffer 内存优化（默认开启；可显著降低内存占用）。",
+    )
+    sb3_train_parser.add_argument(
+        "--no-optimize-memory-usage",
+        dest="optimize_memory_usage",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="禁用 replay buffer 内存优化（不推荐）。",
+    )
     sb3_train_parser.add_argument("--device", type=str, default="auto")
     sb3_train_parser.add_argument("--seed", type=str, default="42")
     sb3_train_parser.add_argument(

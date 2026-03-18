@@ -332,6 +332,8 @@ Training overrides:
 - `sb3_learning_rate` -> `--sb3-learning-rate`
 - `sb3_batch_size` -> `--sb3-batch-size`
 - `sb3_gamma` -> `--sb3-gamma`
+- `sb3_buffer_size` -> `--sb3-buffer-size`
+- `sb3_optimize_memory_usage` -> `--sb3-optimize-memory-usage` / `--no-sb3-optimize-memory-usage`
 
 How to enable each experiment path in the notebook parameter block:
 - random baseline: set `policy='random'`, keep `sb3_enabled=false`
