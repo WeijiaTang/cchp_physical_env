@@ -43,6 +43,16 @@ class AbsChillerNetwork:
 
     def solve(self, *, q_drive_request_mw: float, t_hot_k: float) -> AbsChillerResult:
         requested = max(0.0, q_drive_request_mw)
+        if requested <= 1e-9:
+            return AbsChillerResult(
+                q_drive_used_mw=0.0,
+                q_cool_mw=0.0,
+                cop_abs=max(0.0, self.estimate_cop(t_hot_k=t_hot_k)),
+                violation_flags={
+                    "abs_drive_temp_low": False,
+                    "abs_drive_clipped": False,
+                },
+            )
         if t_hot_k < self.design.t_drive_min_k:
             return AbsChillerResult(
                 q_drive_used_mw=0.0,

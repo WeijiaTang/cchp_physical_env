@@ -88,6 +88,14 @@ TRAINING_OPTION_KEYS = (
     "sb3_eval_window_pool_size",
     "sb3_eval_window_count",
     "sb3_eval_window_seed",
+    "sb3_ppo_warm_start_enabled",
+    "sb3_residual_enabled",
+    "sb3_ppo_warm_start_samples",
+    "sb3_ppo_warm_start_epochs",
+    "sb3_ppo_warm_start_batch_size",
+    "sb3_ppo_warm_start_lr",
+    "sb3_offpolicy_prefill_enabled",
+    "sb3_offpolicy_prefill_steps",
     "sb3_ppo_n_steps",
     "sb3_ppo_gae_lambda",
     "sb3_ppo_ent_coef",
@@ -237,6 +245,14 @@ def _command_train(args: argparse.Namespace) -> None:
                 "sb3_eval_window_pool_size",
                 "sb3_eval_window_count",
                 "sb3_eval_window_seed",
+                "sb3_ppo_warm_start_enabled",
+                "sb3_residual_enabled",
+                "sb3_ppo_warm_start_samples",
+                "sb3_ppo_warm_start_epochs",
+                "sb3_ppo_warm_start_batch_size",
+                "sb3_ppo_warm_start_lr",
+                "sb3_offpolicy_prefill_enabled",
+                "sb3_offpolicy_prefill_steps",
                 "sb3_ppo_n_steps",
                 "sb3_ppo_gae_lambda",
                 "sb3_ppo_ent_coef",
@@ -272,6 +288,14 @@ def _command_train(args: argparse.Namespace) -> None:
                 eval_window_pool_size=current_options["sb3_eval_window_pool_size"],
                 eval_window_count=current_options["sb3_eval_window_count"],
                 eval_window_seed=current_options["sb3_eval_window_seed"],
+                ppo_warm_start_enabled=bool(current_options["sb3_ppo_warm_start_enabled"]),
+                residual_enabled=bool(current_options["sb3_residual_enabled"]),
+                ppo_warm_start_samples=current_options["sb3_ppo_warm_start_samples"],
+                ppo_warm_start_epochs=current_options["sb3_ppo_warm_start_epochs"],
+                ppo_warm_start_batch_size=current_options["sb3_ppo_warm_start_batch_size"],
+                ppo_warm_start_lr=current_options["sb3_ppo_warm_start_lr"],
+                offpolicy_prefill_enabled=bool(current_options["sb3_offpolicy_prefill_enabled"]),
+                offpolicy_prefill_steps=current_options["sb3_offpolicy_prefill_steps"],
                 ppo_n_steps=current_options["sb3_ppo_n_steps"],
                 ppo_gae_lambda=current_options["sb3_ppo_gae_lambda"],
                 ppo_ent_coef=current_options["sb3_ppo_ent_coef"],
@@ -550,6 +574,14 @@ def _command_sb3_train(args: argparse.Namespace) -> None:
             eval_window_pool_size=args.eval_window_pool_size,
             eval_window_count=args.eval_window_count,
             eval_window_seed=args.eval_window_seed,
+            ppo_warm_start_enabled=bool(getattr(args, "ppo_warm_start_enabled", False)),
+            residual_enabled=bool(getattr(args, "residual_enabled", False)),
+            ppo_warm_start_samples=args.ppo_warm_start_samples,
+            ppo_warm_start_epochs=args.ppo_warm_start_epochs,
+            ppo_warm_start_batch_size=args.ppo_warm_start_batch_size,
+            ppo_warm_start_lr=args.ppo_warm_start_lr,
+            offpolicy_prefill_enabled=bool(getattr(args, "offpolicy_prefill_enabled", False)),
+            offpolicy_prefill_steps=args.offpolicy_prefill_steps,
             ppo_n_steps=args.ppo_n_steps,
             ppo_gae_lambda=args.ppo_gae_lambda,
             ppo_ent_coef=args.ppo_ent_coef,
@@ -936,6 +968,46 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--sb3-eval-window-pool-size", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument("--sb3-eval-window-count", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument("--sb3-eval-window-seed", type=int, default=argparse.SUPPRESS)
+    train_parser.add_argument(
+        "--sb3-ppo-warm-start-enabled",
+        dest="sb3_ppo_warm_start_enabled",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="启用 easy_rule 行为克隆预热（当前仅 PPO 支持）。",
+    )
+    train_parser.add_argument(
+        "--no-sb3-ppo-warm-start",
+        dest="sb3_ppo_warm_start_enabled",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="关闭 PPO easy_rule 预热。",
+    )
+    train_parser.add_argument(
+        "--sb3-residual-enabled",
+        dest="sb3_residual_enabled",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="预留参数：当前 residual 模式尚未实现，会在配置校验阶段报错。",
+    )
+    train_parser.add_argument("--sb3-ppo-warm-start-samples", type=int, default=argparse.SUPPRESS)
+    train_parser.add_argument("--sb3-ppo-warm-start-epochs", type=int, default=argparse.SUPPRESS)
+    train_parser.add_argument("--sb3-ppo-warm-start-batch-size", type=int, default=argparse.SUPPRESS)
+    train_parser.add_argument("--sb3-ppo-warm-start-lr", type=float, default=argparse.SUPPRESS)
+    train_parser.add_argument(
+        "--sb3-offpolicy-prefill-enabled",
+        dest="sb3_offpolicy_prefill_enabled",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="为 SAC/TD3/DDPG 启用 easy_rule replay buffer 预填充。",
+    )
+    train_parser.add_argument(
+        "--no-sb3-offpolicy-prefill",
+        dest="sb3_offpolicy_prefill_enabled",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="关闭 off-policy replay buffer 预填充。",
+    )
+    train_parser.add_argument("--sb3-offpolicy-prefill-steps", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument("--sb3-ppo-n-steps", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument("--sb3-ppo-gae-lambda", type=float, default=argparse.SUPPRESS)
     train_parser.add_argument("--sb3-ppo-ent-coef", type=float, default=argparse.SUPPRESS)
@@ -1062,6 +1134,51 @@ def build_parser() -> argparse.ArgumentParser:
     sb3_train_parser.add_argument("--eval-window-pool-size", type=int, default=12)
     sb3_train_parser.add_argument("--eval-window-count", type=int, default=4)
     sb3_train_parser.add_argument("--eval-window-seed", type=int, default=42)
+    sb3_train_parser.add_argument(
+        "--ppo-warm-start-enabled",
+        dest="ppo_warm_start_enabled",
+        action="store_true",
+        default=False,
+        help="启用 easy_rule 行为克隆预热（当前仅 PPO 支持）。",
+    )
+    sb3_train_parser.add_argument(
+        "--no-ppo-warm-start",
+        dest="ppo_warm_start_enabled",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="关闭 PPO easy_rule 预热。",
+    )
+    sb3_train_parser.add_argument(
+        "--residual-enabled",
+        dest="residual_enabled",
+        action="store_true",
+        default=False,
+        help="预留参数：当前 residual 模式尚未实现，会在配置校验阶段报错。",
+    )
+    sb3_train_parser.add_argument("--ppo-warm-start-samples", type=int, default=16384)
+    sb3_train_parser.add_argument("--ppo-warm-start-epochs", type=int, default=4)
+    sb3_train_parser.add_argument("--ppo-warm-start-batch-size", type=int, default=256)
+    sb3_train_parser.add_argument("--ppo-warm-start-lr", type=float, default=1e-4)
+    sb3_train_parser.add_argument(
+        "--offpolicy-prefill-enabled",
+        dest="offpolicy_prefill_enabled",
+        action="store_true",
+        default=False,
+        help="为 SAC/TD3/DDPG 启用 easy_rule replay buffer 预填充。",
+    )
+    sb3_train_parser.add_argument(
+        "--no-offpolicy-prefill",
+        dest="offpolicy_prefill_enabled",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="关闭 off-policy replay buffer 预填充。",
+    )
+    sb3_train_parser.add_argument(
+        "--offpolicy-prefill-steps",
+        type=int,
+        default=0,
+        help="预填充步数；0 表示自动使用 learning_starts。",
+    )
     sb3_train_parser.add_argument("--ppo-n-steps", type=int, default=2048)
     sb3_train_parser.add_argument("--ppo-gae-lambda", type=float, default=0.95)
     sb3_train_parser.add_argument("--ppo-ent-coef", type=float, default=0.0)

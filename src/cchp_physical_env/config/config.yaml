@@ -74,10 +74,22 @@ env:
   penalty_violation_per_flag: 50.0
   abs_gate_enabled: true
   abs_gate_scale_k: 2.0
+  abs_deadzone_gate_th: 0.10
+  abs_deadzone_u_th: 0.05
+  abs_invalid_req_u_th: 0.20
+  abs_invalid_req_gate_th: 0.10
   penalty_invalid_abs_request: 1.0
   gt_action_smoothing_enabled: true
-  gt_min_on_steps: 2.0
-  gt_min_off_steps: 2.0
+  gt_min_on_steps: 6.0
+  gt_min_off_steps: 6.0
+  penalty_gt_toggle: 25.0
+  penalty_gt_delta_mw: 1.0
+  heat_unmet_th_mw: 0.05
+  cool_unmet_th_mw: 0.05
+  heat_backup_idle_th_mw: 0.20
+  cool_backup_idle_th_mw: 0.20
+  penalty_idle_heat_backup: 10.0
+  penalty_idle_cool_backup: 10.0
 
   # HRSG 边界（建议不改：物理口径）
   hrsg_water_mass_flow_kg_per_s: 45.0
@@ -179,6 +191,14 @@ training:
   sb3_eval_window_pool_size: 12
   sb3_eval_window_count: 4
   sb3_eval_window_seed: 42
+  sb3_ppo_warm_start_enabled: false
+  sb3_residual_enabled: false
+  sb3_ppo_warm_start_samples: 16384
+  sb3_ppo_warm_start_epochs: 4
+  sb3_ppo_warm_start_batch_size: 256
+  sb3_ppo_warm_start_lr: 0.0001
+  sb3_offpolicy_prefill_enabled: false
+  sb3_offpolicy_prefill_steps: 0
 
   # ------------------------------
   # PPO 专属超参数（仅 algo=ppo 时真正生效）

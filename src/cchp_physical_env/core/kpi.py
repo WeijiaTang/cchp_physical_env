@@ -40,6 +40,10 @@ class KPITracker:
             "unmet_c": 0.0,
             "viol": 0.0,
             "invalid_abs_request": 0.0,
+            "gt_toggle": 0.0,
+            "gt_delta": 0.0,
+            "idle_heat_backup": 0.0,
+            "idle_cool_backup": 0.0,
         }
         self.energies_mwh = {
             "demand_e": 0.0,

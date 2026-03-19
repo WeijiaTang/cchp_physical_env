@@ -147,10 +147,22 @@ class EnvConfig:
     penalty_violation_per_flag: float
     abs_gate_enabled: bool
     abs_gate_scale_k: float
+    abs_deadzone_gate_th: float
+    abs_deadzone_u_th: float
+    abs_invalid_req_u_th: float
+    abs_invalid_req_gate_th: float
     penalty_invalid_abs_request: float
     gt_action_smoothing_enabled: bool
     gt_min_on_steps: float
     gt_min_off_steps: float
+    penalty_gt_toggle: float
+    penalty_gt_delta_mw: float
+    heat_unmet_th_mw: float
+    cool_unmet_th_mw: float
+    heat_backup_idle_th_mw: float
+    cool_backup_idle_th_mw: float
+    penalty_idle_heat_backup: float
+    penalty_idle_cool_backup: float
 
     hrsg_water_mass_flow_kg_per_s: float
     hrsg_water_inlet_k: float
@@ -353,12 +365,18 @@ class CCHPPhysicalEnv:
             abs_gate = _sigmoid(drive_margin_k / gate_scale_k)
         u_abs_raw = float(_clip(processed_action.get("u_abs", 0.0), 0.0, 1.0))
         u_abs_effective = float(_clip(u_abs_raw * abs_gate, 0.0, 1.0))
-        processed_action["u_abs"] = u_abs_effective
+        abs_deadzone_gate_th = float(max(0.0, self.config.abs_deadzone_gate_th))
+        abs_deadzone_u_th = float(max(0.0, self.config.abs_deadzone_u_th))
+        abs_deadzone_active = (abs_gate < abs_deadzone_gate_th) or (
+            u_abs_effective < abs_deadzone_u_th
+        )
+        u_abs_phys = 0.0 if abs_deadzone_active else u_abs_effective
+        processed_action["u_abs"] = float(_clip(u_abs_phys, 0.0, 1.0))
 
         invalid_abs_request_cost = 0.0
         invalid_abs_request_flag = False
-        invalid_request_threshold = 0.2
-        low_gate_threshold = 0.1
+        invalid_request_threshold = float(max(0.0, self.config.abs_invalid_req_u_th))
+        low_gate_threshold = float(max(0.0, self.config.abs_invalid_req_gate_th))
         if u_abs_raw > invalid_request_threshold and abs_gate < low_gate_threshold:
             invalid_abs_request_flag = True
             request_excess = (u_abs_raw - invalid_request_threshold) / max(
@@ -375,6 +393,7 @@ class CCHPPhysicalEnv:
         gt_action_smoothing_applied = False
         gt_min_on_enforced = False
         gt_min_off_enforced = False
+        p_gt_target_below_min = 0.0 < p_gt_requested_mw_raw < float(self.config.gt_min_output_mw)
 
         if bool(self.config.gt_action_smoothing_enabled):
             ramp_limit = float(max(0.0, self.config.gt_ramp_mw_per_step))
@@ -406,19 +425,26 @@ class CCHPPhysicalEnv:
             gt_action_smoothing_applied = True
 
         processed_action["u_gt"] = self._gt_target_mw_to_action(p_gt_requested_mw)
+        gt_requested_delta_mw = float(abs(p_gt_requested_mw - float(self.gt_prev_p_mw)))
+        gt_delta_cost = float(gt_requested_delta_mw * max(0.0, float(self.config.penalty_gt_delta_mw)))
         return processed_action, {
             "u_abs_raw": float(u_abs_raw),
             "u_abs_gate": float(abs_gate),
             "u_abs_effective": float(u_abs_effective),
+            "u_abs_phys": float(u_abs_phys),
+            "abs_deadzone_active": bool(abs_deadzone_active),
             "abs_drive_margin_k": float(drive_margin_k),
             "invalid_abs_request_cost": float(invalid_abs_request_cost),
             "invalid_abs_request_flag": bool(invalid_abs_request_flag),
             "u_gt_raw": float(u_gt_raw),
             "p_gt_requested_mw_raw": float(p_gt_requested_mw_raw),
             "p_gt_requested_mw_effective": float(p_gt_requested_mw),
+            "gt_requested_delta_mw": float(gt_requested_delta_mw),
+            "gt_delta_cost": float(gt_delta_cost),
             "gt_action_smoothing_applied": bool(gt_action_smoothing_applied),
             "gt_min_on_enforced": bool(gt_min_on_enforced),
             "gt_min_off_enforced": bool(gt_min_off_enforced),
+            "p_gt_target_below_min": bool(p_gt_target_below_min),
         }
 
     def reset(
@@ -663,6 +689,8 @@ class CCHPPhysicalEnv:
         )
 
         gt_started = int((not self.gt_prev_on) and (p_gt_mw > 1e-9))
+        gt_toggled = bool(self.gt_prev_on != (p_gt_mw > 1e-9))
+        gt_toggle_cost = float(max(0.0, float(self.config.penalty_gt_toggle)) if gt_toggled else 0.0)
         fuel_input_gt_effective_mw, startup_extra_fuel_mw = apply_gt_startup_fuel_correction(
             fuel_input_gt_mw=gt_result.fuel_input_mw,
             gt_started=bool(gt_started),
@@ -683,11 +711,39 @@ class CCHPPhysicalEnv:
 
         diagnostic_flags: dict[str, bool] = {
             "abs_drive_temp_low_state": t_hot_k < float(self.abs_chiller.design.t_drive_min_k),
+            "abs_deadzone_active": bool(action_debug["abs_deadzone_active"]),
             "invalid_abs_request": bool(action_debug["invalid_abs_request_flag"]),
             "gt_action_smoothing_applied": bool(action_debug["gt_action_smoothing_applied"]),
             "gt_min_on_enforced": bool(action_debug["gt_min_on_enforced"]),
             "gt_min_off_enforced": bool(action_debug["gt_min_off_enforced"]),
+            "gt_toggled": bool(gt_toggled),
+            "p_gt_target_below_min": bool(action_debug["p_gt_target_below_min"]),
         }
+
+        heat_unmet_step = qh_unmet_mw > float(max(0.0, self.config.heat_unmet_th_mw))
+        cool_unmet_step = qc_unmet_mw > float(max(0.0, self.config.cool_unmet_th_mw))
+        idle_heat_backup = heat_unmet_step and (
+            float(boiler_result.q_heat_mw) < float(max(0.0, self.config.heat_backup_idle_th_mw))
+        )
+        idle_cool_backup = (
+            cool_unmet_step
+            and (
+                bool(action_debug["abs_deadzone_active"])
+                or float(action_debug["u_abs_gate"]) < float(max(0.0, self.config.abs_deadzone_gate_th))
+            )
+            and float(ech_result.q_cool_mw) < float(max(0.0, self.config.cool_backup_idle_th_mw))
+        )
+        diagnostic_flags["heat_unmet_step"] = bool(heat_unmet_step)
+        diagnostic_flags["cool_unmet_step"] = bool(cool_unmet_step)
+        diagnostic_flags["idle_heat_backup"] = bool(idle_heat_backup)
+        diagnostic_flags["idle_cool_backup"] = bool(idle_cool_backup)
+
+        idle_heat_backup_cost = (
+            float(max(0.0, self.config.penalty_idle_heat_backup)) if idle_heat_backup else 0.0
+        )
+        idle_cool_backup_cost = (
+            float(max(0.0, self.config.penalty_idle_cool_backup)) if idle_cool_backup else 0.0
+        )
 
         violation_count = sum(1 for flag in violation_flags.values() if flag)
         cost_breakdown = compute_cost_breakdown(
@@ -708,6 +764,10 @@ class CCHPPhysicalEnv:
             qc_unmet_mw=qc_unmet_mw,
             violation_count=violation_count,
             invalid_abs_request_penalty=float(action_debug["invalid_abs_request_cost"]),
+            gt_toggle_penalty=gt_toggle_cost,
+            gt_delta_penalty=float(action_debug["gt_delta_cost"]),
+            idle_heat_backup_penalty=idle_heat_backup_cost,
+            idle_cool_backup_penalty=idle_cool_backup_cost,
             config=self.config,
         )
 
@@ -746,6 +806,10 @@ class CCHPPhysicalEnv:
             "cost_unmet_c": float(cost_breakdown.cost_unmet_c),
             "cost_viol": float(cost_breakdown.cost_viol),
             "cost_invalid_abs_request": float(cost_breakdown.cost_invalid_abs_request),
+            "cost_gt_toggle": float(cost_breakdown.cost_gt_toggle),
+            "cost_gt_delta": float(cost_breakdown.cost_gt_delta),
+            "cost_idle_heat_backup": float(cost_breakdown.cost_idle_heat_backup),
+            "cost_idle_cool_backup": float(cost_breakdown.cost_idle_cool_backup),
             "fuel_input_gt_mw_raw": float(gt_result.fuel_input_mw),
             "fuel_input_gt_effective_mw": float(fuel_input_gt_effective_mw),
             "fuel_input_gt_startup_extra_mw": float(startup_extra_fuel_mw),
@@ -760,11 +824,14 @@ class CCHPPhysicalEnv:
             "energy_unmet_e_mwh": float(grid_balance["p_unmet_e_mw"] * dt_h),
             "energy_unmet_h_mwh": float(qh_unmet_mw * dt_h),
             "energy_unmet_c_mwh": float(qc_unmet_mw * dt_h),
+            "qh_unmet_mw": float(qh_unmet_mw),
+            "qc_unmet_mw": float(qc_unmet_mw),
             "price_e_buy": float(row["price_e"]),
             "price_e_sell": float(sell_price),
             "u_gt_raw": float(action_debug["u_gt_raw"]),
             "p_gt_request_mw_raw": float(action_debug["p_gt_requested_mw_raw"]),
             "p_gt_request_mw_effective": float(action_debug["p_gt_requested_mw_effective"]),
+            "gt_requested_delta_mw": float(action_debug["gt_requested_delta_mw"]),
             "p_gt_mw": float(p_gt_mw),
             "p_gt_target_mw": float(solver_result["p_gt_target_mw"]),
             "p_gt_applied_mw": float(solver_result["p_gt_applied_mw"]),
@@ -781,6 +848,8 @@ class CCHPPhysicalEnv:
             "u_abs_raw": float(action_debug["u_abs_raw"]),
             "u_abs_gate": float(action_debug["u_abs_gate"]),
             "u_abs_effective": float(action_debug["u_abs_effective"]),
+            "u_abs_phys": float(action_debug["u_abs_phys"]),
+            "u_abs_deadzone_applied": bool(action_debug["abs_deadzone_active"]),
             "abs_drive_margin_k": float(action_debug["abs_drive_margin_k"]),
             "q_abs_cool_mw": float(abs_result.q_cool_mw),
             "q_ech_cool_mw": float(ech_result.q_cool_mw),

@@ -49,6 +49,14 @@ TRAINING_DEFAULTS: dict[str, Any] = {
     "sb3_eval_window_pool_size": 12,
     "sb3_eval_window_count": 4,
     "sb3_eval_window_seed": 42,
+    "sb3_ppo_warm_start_enabled": False,
+    "sb3_residual_enabled": False,
+    "sb3_ppo_warm_start_samples": 16384,
+    "sb3_ppo_warm_start_epochs": 4,
+    "sb3_ppo_warm_start_batch_size": 256,
+    "sb3_ppo_warm_start_lr": 1e-4,
+    "sb3_offpolicy_prefill_enabled": False,
+    "sb3_offpolicy_prefill_steps": 0,
     "sb3_ppo_n_steps": 2048,
     "sb3_ppo_gae_lambda": 0.95,
     "sb3_ppo_ent_coef": 0.0,
@@ -133,6 +141,22 @@ ENV_NUMERIC_RULES: dict[str, tuple[Callable[[float], bool], str]] = {
         lambda value: value > 0.0,
         "abs_gate_scale_k 必须 > 0。",
     ),
+    "abs_deadzone_gate_th": (
+        lambda value: 0.0 <= value <= 1.0,
+        "abs_deadzone_gate_th 必须在 [0,1]。",
+    ),
+    "abs_deadzone_u_th": (
+        lambda value: 0.0 <= value <= 1.0,
+        "abs_deadzone_u_th 必须在 [0,1]。",
+    ),
+    "abs_invalid_req_u_th": (
+        lambda value: 0.0 <= value <= 1.0,
+        "abs_invalid_req_u_th 必须在 [0,1]。",
+    ),
+    "abs_invalid_req_gate_th": (
+        lambda value: 0.0 <= value <= 1.0,
+        "abs_invalid_req_gate_th 必须在 [0,1]。",
+    ),
     "penalty_invalid_abs_request": (
         lambda value: value >= 0.0,
         "penalty_invalid_abs_request 必须 >= 0。",
@@ -144,6 +168,38 @@ ENV_NUMERIC_RULES: dict[str, tuple[Callable[[float], bool], str]] = {
     "gt_min_off_steps": (
         lambda value: value >= 0.0,
         "gt_min_off_steps 必须 >= 0。",
+    ),
+    "penalty_gt_toggle": (
+        lambda value: value >= 0.0,
+        "penalty_gt_toggle 必须 >= 0。",
+    ),
+    "penalty_gt_delta_mw": (
+        lambda value: value >= 0.0,
+        "penalty_gt_delta_mw 必须 >= 0。",
+    ),
+    "heat_unmet_th_mw": (
+        lambda value: value >= 0.0,
+        "heat_unmet_th_mw 必须 >= 0。",
+    ),
+    "cool_unmet_th_mw": (
+        lambda value: value >= 0.0,
+        "cool_unmet_th_mw 必须 >= 0。",
+    ),
+    "heat_backup_idle_th_mw": (
+        lambda value: value >= 0.0,
+        "heat_backup_idle_th_mw 必须 >= 0。",
+    ),
+    "cool_backup_idle_th_mw": (
+        lambda value: value >= 0.0,
+        "cool_backup_idle_th_mw 必须 >= 0。",
+    ),
+    "penalty_idle_heat_backup": (
+        lambda value: value >= 0.0,
+        "penalty_idle_heat_backup 必须 >= 0。",
+    ),
+    "penalty_idle_cool_backup": (
+        lambda value: value >= 0.0,
+        "penalty_idle_cool_backup 必须 >= 0。",
     ),
 }
 ENV_LOWERCASE_STRING_KEYS = set(ENV_ENUM_OPTIONS.keys())
@@ -281,6 +337,9 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
         "sb3_optimize_memory_usage",
         "sb3_vec_norm_obs",
         "sb3_vec_norm_reward",
+        "sb3_ppo_warm_start_enabled",
+        "sb3_residual_enabled",
+        "sb3_offpolicy_prefill_enabled",
     }
     int_keys = {
         "seed",
@@ -297,6 +356,9 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
         "sb3_buffer_size",
         "sb3_eval_freq",
         "sb3_eval_episode_days",
+        "sb3_ppo_warm_start_samples",
+        "sb3_ppo_warm_start_epochs",
+        "sb3_ppo_warm_start_batch_size",
         "sb3_ppo_n_steps",
         "sb3_train_freq",
         "sb3_gradient_steps",
@@ -347,7 +409,19 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
             if float(value) <= 0.0:
                 raise ValueError(f"{key} 必须 > 0。")
             continue
+        if key in {"sb3_ppo_warm_start_lr"}:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{key} 必须是数值类型。")
+            if float(value) <= 0.0:
+                raise ValueError(f"{key} 必须 > 0。")
+            continue
         if key in {"sb3_learning_starts"}:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{key} 必须是整数类型。")
+            if int(value) < 0:
+                raise ValueError(f"{key} 必须 >= 0。")
+            continue
+        if key in {"sb3_offpolicy_prefill_steps"}:
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ValueError(f"{key} 必须是整数类型。")
             if int(value) < 0:
@@ -426,6 +500,8 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
         raise ValueError("sb3_eval_window_pool_size=0 时，sb3_eval_window_count 也必须为 0。")
     if eval_window_pool_size > 0 and eval_window_count > eval_window_pool_size:
         raise ValueError("sb3_eval_window_count 不能大于 sb3_eval_window_pool_size。")
+    if bool(overrides.get("sb3_residual_enabled", TRAINING_DEFAULTS["sb3_residual_enabled"])):
+        raise ValueError("training.sb3_residual_enabled 当前尚未实现，请保持 false。")
 
 
 def build_training_options(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -468,6 +544,14 @@ def build_training_options(overrides: dict[str, Any] | None = None) -> dict[str,
     normalized["sb3_eval_window_pool_size"] = int(normalized["sb3_eval_window_pool_size"])
     normalized["sb3_eval_window_count"] = int(normalized["sb3_eval_window_count"])
     normalized["sb3_eval_window_seed"] = int(normalized["sb3_eval_window_seed"])
+    normalized["sb3_ppo_warm_start_enabled"] = bool(normalized["sb3_ppo_warm_start_enabled"])
+    normalized["sb3_residual_enabled"] = bool(normalized["sb3_residual_enabled"])
+    normalized["sb3_offpolicy_prefill_enabled"] = bool(normalized["sb3_offpolicy_prefill_enabled"])
+    normalized["sb3_ppo_warm_start_samples"] = int(normalized["sb3_ppo_warm_start_samples"])
+    normalized["sb3_ppo_warm_start_epochs"] = int(normalized["sb3_ppo_warm_start_epochs"])
+    normalized["sb3_ppo_warm_start_batch_size"] = int(normalized["sb3_ppo_warm_start_batch_size"])
+    normalized["sb3_ppo_warm_start_lr"] = float(normalized["sb3_ppo_warm_start_lr"])
+    normalized["sb3_offpolicy_prefill_steps"] = int(normalized["sb3_offpolicy_prefill_steps"])
     normalized["sb3_ppo_n_steps"] = int(normalized["sb3_ppo_n_steps"])
     normalized["sb3_ppo_gae_lambda"] = float(normalized["sb3_ppo_gae_lambda"])
     normalized["sb3_ppo_ent_coef"] = float(normalized["sb3_ppo_ent_coef"])

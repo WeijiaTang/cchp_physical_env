@@ -28,3 +28,4 @@ runs/
 kaggle/
 context_portal/*
 ${workspaceFolder}/
+tmp*

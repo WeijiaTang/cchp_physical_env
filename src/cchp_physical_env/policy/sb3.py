@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 import numpy as np
 import pandas as pd
@@ -23,9 +23,11 @@ from ..env.cchp_env import CCHPPhysicalEnv, EnvConfig
 
 try:
     import torch
+    import torch.nn.functional as F
     from torch import Tensor, nn
 except ModuleNotFoundError:  # pragma: no cover
     torch = None
+    F = Any
     Tensor = Any
     nn = Any
 
@@ -247,6 +249,20 @@ def _action_vector_to_env_action(action_vector: np.ndarray) -> dict[str, float]:
     }
 
 
+def _action_dict_to_vector(action_dict: Mapping[str, float]) -> np.ndarray:
+    return np.asarray(
+        [
+            float(np.clip(action_dict.get("u_gt", 0.0), -1.0, 1.0)),
+            float(np.clip(action_dict.get("u_bes", 0.0), -1.0, 1.0)),
+            float(np.clip(action_dict.get("u_boiler", 0.0), 0.0, 1.0)),
+            float(np.clip(action_dict.get("u_abs", 0.0), 0.0, 1.0)),
+            float(np.clip(action_dict.get("u_ech", 0.0), 0.0, 1.0)),
+            float(np.clip(action_dict.get("u_tes", 0.0), -1.0, 1.0)),
+        ],
+        dtype=np.float32,
+    )
+
+
 @dataclass(slots=True)
 class SB3TrainConfig:
     algo: str
@@ -265,6 +281,14 @@ class SB3TrainConfig:
     eval_window_pool_size: int = 0
     eval_window_count: int = 0
     eval_window_seed: int | None = None
+    ppo_warm_start_enabled: bool = False
+    residual_enabled: bool = False
+    ppo_warm_start_samples: int = 16_384
+    ppo_warm_start_epochs: int = 4
+    ppo_warm_start_batch_size: int = 256
+    ppo_warm_start_lr: float = 1e-4
+    offpolicy_prefill_enabled: bool = False
+    offpolicy_prefill_steps: int = 0
     ppo_n_steps: int = 2048
     ppo_gae_lambda: float = 0.95
     ppo_ent_coef: float = 0.0
@@ -329,6 +353,26 @@ class SB3TrainConfig:
             self.eval_window_seed = int(self.seed)
         else:
             self.eval_window_seed = int(self.eval_window_seed)
+        self.ppo_warm_start_enabled = bool(self.ppo_warm_start_enabled)
+        self.residual_enabled = bool(self.residual_enabled)
+        if self.residual_enabled:
+            raise ValueError("residual_enabled 当前尚未实现，请保持 false。")
+        self.ppo_warm_start_samples = int(self.ppo_warm_start_samples)
+        if self.ppo_warm_start_samples <= 0:
+            raise ValueError("ppo_warm_start_samples 必须 > 0。")
+        self.ppo_warm_start_epochs = int(self.ppo_warm_start_epochs)
+        if self.ppo_warm_start_epochs <= 0:
+            raise ValueError("ppo_warm_start_epochs 必须 > 0。")
+        self.ppo_warm_start_batch_size = int(self.ppo_warm_start_batch_size)
+        if self.ppo_warm_start_batch_size <= 0:
+            raise ValueError("ppo_warm_start_batch_size 必须 > 0。")
+        self.ppo_warm_start_lr = float(self.ppo_warm_start_lr)
+        if self.ppo_warm_start_lr <= 0.0:
+            raise ValueError("ppo_warm_start_lr 必须 > 0。")
+        self.offpolicy_prefill_enabled = bool(self.offpolicy_prefill_enabled)
+        self.offpolicy_prefill_steps = int(self.offpolicy_prefill_steps)
+        if self.offpolicy_prefill_steps < 0:
+            raise ValueError("offpolicy_prefill_steps 必须 >= 0。")
         self.ppo_n_steps = int(self.ppo_n_steps)
         if self.ppo_n_steps <= 0:
             raise ValueError("ppo_n_steps 必须 > 0。")
@@ -752,6 +796,458 @@ def _sb3_policy_kwargs_for_backbone(*, backbone: str) -> dict[str, Any]:
     raise ValueError("sb3 backbone 仅支持 mlp/transformer/mamba。")
 
 
+def _get_single_unwrapped_env(vec_env: Any) -> Any:
+    envs = _iter_unwrapped_envs(vec_env)
+    if not envs:
+        raise RuntimeError("无法从 VecEnv 中提取底层环境。")
+    current = envs[0]
+    visited: set[int] = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        if hasattr(current, "observation"):
+            return current
+        next_env = getattr(current, "env", None)
+        if next_env is None or next_env is current:
+            break
+        current = next_env
+    return envs[0]
+
+
+def _copy_running_mean_std(source_rms: Any, target_rms: Any) -> None:
+    if source_rms is None or target_rms is None:
+        return
+    for field in ("mean", "var", "count"):
+        if not hasattr(source_rms, field) or not hasattr(target_rms, field):
+            continue
+        source_value = getattr(source_rms, field)
+        if field == "count":
+            setattr(target_rms, field, float(source_value))
+        else:
+            setattr(target_rms, field, np.asarray(source_value, dtype=np.float64).copy())
+
+
+def _copy_vecnormalize_stats(source_env: Any, target_env: Any) -> None:
+    if source_env is None or target_env is None:
+        return
+    source_obs_rms = getattr(source_env, "obs_rms", None)
+    target_obs_rms = getattr(target_env, "obs_rms", None)
+    if isinstance(source_obs_rms, dict) and isinstance(target_obs_rms, dict):
+        for key, source_item in source_obs_rms.items():
+            _copy_running_mean_std(source_item, target_obs_rms.get(key))
+    else:
+        _copy_running_mean_std(source_obs_rms, target_obs_rms)
+    _copy_running_mean_std(getattr(source_env, "ret_rms", None), getattr(target_env, "ret_rms", None))
+
+
+def _extract_actor_mean_actions(model: Any, obs_tensor: Tensor) -> Tensor:
+    distribution = model.policy.get_distribution(obs_tensor)
+    inner_distribution = getattr(distribution, "distribution", None)
+    mean_actions = getattr(inner_distribution, "mean", None)
+    if mean_actions is not None:
+        return mean_actions
+    return distribution.get_actions(deterministic=True)
+
+
+def _collect_easy_rule_warm_start_dataset(
+    *,
+    train_df: pd.DataFrame,
+    env_config: EnvConfig,
+    config: SB3TrainConfig,
+    observation_keys: tuple[str, ...],
+    DummyVecEnv: Any,
+    VecNormalize: Any,
+    use_vecnormalize: bool,
+) -> tuple[np.ndarray, np.ndarray, Any | None]:
+    from ..pipeline.runner import EasyRulePolicy
+
+    warm_factory = make_train_env_factory(
+        train_df=train_df,
+        env_config=env_config,
+        seed=int(config.seed) + 10_000,
+        episode_days=config.episode_days,
+        history_steps=config.history_steps,
+        observation_keys=observation_keys,
+        normalizer=None,
+    )
+    warm_vec_env = DummyVecEnv([warm_factory])
+    if use_vecnormalize:
+        warm_vec_env = VecNormalize(
+            warm_vec_env,
+            training=True,
+            norm_obs=bool(config.vec_norm_obs),
+            norm_reward=bool(config.vec_norm_reward),
+            clip_obs=10.0,
+            clip_reward=10.0,
+            gamma=float(config.gamma),
+        )
+
+    easy_rule = EasyRulePolicy(
+        p_gt_cap_mw=float(env_config.p_gt_cap_mw),
+        q_boiler_cap_mw=float(env_config.q_boiler_cap_mw),
+        q_ech_cap_mw=float(env_config.q_ech_cap_mw),
+    )
+    base_env = _get_single_unwrapped_env(warm_vec_env)
+    observation = warm_vec_env.reset()
+    obs_batches: list[np.ndarray] = []
+    target_batches: list[np.ndarray] = []
+    sample_target = int(config.ppo_warm_start_samples)
+
+    try:
+        while len(obs_batches) < sample_target:
+            raw_observation = getattr(base_env, "observation", None)
+            if raw_observation is None:
+                raise RuntimeError("warm-start 数据采样失败：底层环境缺少 observation。")
+            action_dict = easy_rule.act(raw_observation)
+            obs_batches.append(np.asarray(observation[0], dtype=np.float32).copy())
+            target_batches.append(
+                np.asarray(
+                    [
+                        float(np.clip(action_dict["u_boiler"], 0.0, 1.0)),
+                        float(np.clip(action_dict["u_ech"], 0.0, 1.0)),
+                    ],
+                    dtype=np.float32,
+                )
+            )
+            action_vec = _action_dict_to_vector(action_dict).reshape(1, -1)
+            observation, _, dones, _ = warm_vec_env.step(action_vec)
+            if bool(np.asarray(dones).reshape(-1)[0]):
+                observation = warm_vec_env.reset()
+    except Exception:
+        warm_vec_env.close()
+        raise
+
+    return (
+        np.asarray(obs_batches, dtype=np.float32),
+        np.asarray(target_batches, dtype=np.float32),
+        warm_vec_env,
+    )
+
+
+def _warm_start_ppo_from_easy_rule(
+    *,
+    model: Any,
+    observations: np.ndarray,
+    targets: np.ndarray,
+    config: SB3TrainConfig,
+) -> dict[str, Any]:
+    _require_torch()
+    if torch is None or F is Any:  # pragma: no cover
+        raise ModuleNotFoundError("PPO warm-start 需要 PyTorch。")
+
+    device = next(model.policy.parameters()).device
+    batch_size = min(int(config.ppo_warm_start_batch_size), int(len(observations)))
+    optimizer = torch.optim.Adam(model.policy.parameters(), lr=float(config.ppo_warm_start_lr))
+    dataset_size = int(len(observations))
+    last_loss = float("nan")
+    loss_history: list[float] = []
+
+    model.policy.train()
+    for _ in range(int(config.ppo_warm_start_epochs)):
+        permutation = np.random.permutation(dataset_size)
+        for start in range(0, dataset_size, batch_size):
+            batch_indices = permutation[start : start + batch_size]
+            batch_obs = torch.as_tensor(observations[batch_indices], dtype=torch.float32, device=device)
+            batch_targets = torch.as_tensor(targets[batch_indices], dtype=torch.float32, device=device)
+            predicted_actions = _extract_actor_mean_actions(model, batch_obs)
+            loss = F.mse_loss(predicted_actions[:, [2, 4]], batch_targets)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.policy.parameters(), max_norm=1.0)
+            optimizer.step()
+            last_loss = float(loss.detach().cpu().item())
+            loss_history.append(last_loss)
+
+    return {
+        "enabled": True,
+        "mode": "easy_rule_bc_v1",
+        "target_action_keys": ["u_boiler", "u_ech"],
+        "samples": int(dataset_size),
+        "epochs": int(config.ppo_warm_start_epochs),
+        "batch_size": int(batch_size),
+        "lr": float(config.ppo_warm_start_lr),
+        "mean_bc_loss": float(np.mean(loss_history)) if loss_history else None,
+        "final_bc_loss": None if not np.isfinite(last_loss) else float(last_loss),
+    }
+
+
+def _resolve_observation_carrier_envs(vec_env: Any) -> list[Any]:
+    carriers: list[Any] = []
+    for env in _iter_unwrapped_envs(vec_env):
+        current = env
+        visited: set[int] = set()
+        while current is not None and id(current) not in visited:
+            visited.add(id(current))
+            if hasattr(current, "observation"):
+                carriers.append(current)
+                break
+            next_env = getattr(current, "env", None)
+            if next_env is None or next_env is current:
+                break
+            current = next_env
+    return carriers
+
+
+def _with_terminal_observations(
+    *,
+    next_obs: np.ndarray,
+    dones: np.ndarray,
+    infos: list[dict[str, Any]],
+) -> np.ndarray:
+    stored_next_obs = np.asarray(next_obs, dtype=np.float32).copy()
+    done_flags = np.asarray(dones).reshape(-1)
+    for index, done in enumerate(done_flags.tolist()):
+        if not bool(done):
+            continue
+        terminal_observation = infos[index].get("terminal_observation")
+        if terminal_observation is None:
+            continue
+        stored_next_obs[index] = np.asarray(terminal_observation, dtype=np.float32)
+    return stored_next_obs
+
+
+def _prefill_offpolicy_replay_buffer(
+    *,
+    model: Any,
+    train_df: pd.DataFrame,
+    env_config: EnvConfig,
+    config: SB3TrainConfig,
+    observation_keys: tuple[str, ...],
+    DummyVecEnv: Any,
+) -> dict[str, Any]:
+    from ..pipeline.runner import EasyRulePolicy
+
+    target_steps = int(config.offpolicy_prefill_steps)
+    if target_steps <= 0:
+        target_steps = int(config.learning_starts)
+    target_steps = max(0, target_steps)
+    if target_steps == 0:
+        return {
+            "enabled": bool(config.offpolicy_prefill_enabled),
+            "applied": False,
+            "status": "skipped_zero_steps",
+            "steps": 0,
+        }
+
+    env_fns = [
+        make_train_env_factory(
+            train_df=train_df,
+            env_config=env_config,
+            seed=int(config.seed) + 20_000 + idx,
+            episode_days=config.episode_days,
+            history_steps=config.history_steps,
+            observation_keys=observation_keys,
+            normalizer=None,
+        )
+        for idx in range(int(config.n_envs))
+    ]
+    prefill_env = DummyVecEnv(env_fns)
+    observation = np.asarray(prefill_env.reset(), dtype=np.float32)
+    carrier_envs = _resolve_observation_carrier_envs(prefill_env)
+    if not carrier_envs:
+        prefill_env.close()
+        raise RuntimeError("off-policy prefill 失败：未找到底层 observation carrier。")
+
+    easy_rule = EasyRulePolicy(
+        p_gt_cap_mw=float(env_config.p_gt_cap_mw),
+        q_boiler_cap_mw=float(env_config.q_boiler_cap_mw),
+        q_ech_cap_mw=float(env_config.q_ech_cap_mw),
+    )
+
+    collected_steps = 0
+    episode_resets = 0
+    try:
+        while collected_steps < target_steps:
+            action_batch = np.asarray(
+                [
+                    _action_dict_to_vector(
+                        easy_rule.act(getattr(carrier_env, "observation"))
+                    )
+                    for carrier_env in carrier_envs
+                ],
+                dtype=np.float32,
+            )
+            next_observation, rewards, dones, infos = prefill_env.step(action_batch)
+            next_observation = np.asarray(next_observation, dtype=np.float32)
+            rewards_array = np.asarray(rewards, dtype=np.float32).reshape(-1)
+            dones_array = np.asarray(dones, dtype=bool).reshape(-1)
+            stored_next_obs = _with_terminal_observations(
+                next_obs=next_observation,
+                dones=dones_array,
+                infos=list(infos),
+            )
+            model.replay_buffer.add(
+                observation,
+                stored_next_obs,
+                action_batch,
+                rewards_array,
+                dones_array,
+                list(infos),
+            )
+            observation = next_observation
+            collected_steps += int(len(action_batch))
+            episode_resets += int(dones_array.sum())
+    finally:
+        prefill_env.close()
+
+    original_learning_starts = int(getattr(model, "learning_starts", config.learning_starts))
+    effective_learning_starts = max(0, original_learning_starts - int(collected_steps))
+    model.learning_starts = int(effective_learning_starts)
+    return {
+        "enabled": True,
+        "applied": True,
+        "mode": "easy_rule_replay_prefill_v1",
+        "steps": int(collected_steps),
+        "target_steps": int(target_steps),
+        "effective_learning_starts": int(effective_learning_starts),
+        "original_learning_starts": int(original_learning_starts),
+        "episode_resets": int(episode_resets),
+    }
+
+
+def _safe_numeric_series(
+    dataframe: pd.DataFrame,
+    column: str,
+    *,
+    default: float,
+) -> pd.Series:
+    if column not in dataframe.columns:
+        return pd.Series(float(default), index=dataframe.index, dtype=np.float64)
+    numeric = pd.to_numeric(dataframe[column], errors="coerce").astype(np.float64)
+    return numeric.fillna(float(default))
+
+
+def _safe_bool_series(
+    dataframe: pd.DataFrame,
+    column: str,
+    *,
+    default: bool = False,
+) -> pd.Series:
+    if column not in dataframe.columns:
+        return pd.Series(bool(default), index=dataframe.index, dtype=bool)
+    series = dataframe[column]
+    if pd.api.types.is_bool_dtype(series):
+        return series.fillna(bool(default)).astype(bool)
+    normalized = series.astype(str).str.strip().str.lower()
+    truthy = {"1", "true", "t", "yes", "y"}
+    falsy = {"0", "false", "f", "no", "n", "nan", "none", ""}
+    mapped = normalized.map(lambda value: True if value in truthy else False if value in falsy else bool(default))
+    return mapped.astype(bool)
+
+
+def _write_eval_diagnostics(
+    *,
+    eval_dir: Path,
+    step_df: pd.DataFrame,
+    env_config: EnvConfig,
+) -> dict[str, str]:
+    if step_df.empty or "timestamp" not in step_df.columns:
+        return {}
+
+    timestamps = pd.to_datetime(step_df["timestamp"], errors="coerce")
+    valid_mask = timestamps.notna()
+    if not bool(valid_mask.any()):
+        return {}
+
+    diagnostics_df = step_df.loc[valid_mask].copy()
+    timestamps = timestamps.loc[valid_mask]
+    diagnostics_df["month"] = timestamps.dt.month.astype(int)
+    diagnostics_df["hour"] = timestamps.dt.hour.astype(int)
+
+    abs_gate_th = float(max(0.0, getattr(env_config, "abs_deadzone_gate_th", 0.1)))
+    diagnostics_df["total_cost"] = _safe_numeric_series(diagnostics_df, "cost_total", default=0.0)
+    diagnostics_df["export_penalty"] = _safe_numeric_series(
+        diagnostics_df, "cost_grid_export_penalty", default=0.0
+    )
+    diagnostics_df["unmet_h_mwh"] = _safe_numeric_series(
+        diagnostics_df, "energy_unmet_h_mwh", default=0.0
+    )
+    diagnostics_df["unmet_c_mwh"] = _safe_numeric_series(
+        diagnostics_df, "energy_unmet_c_mwh", default=0.0
+    )
+    diagnostics_df["starts_gt"] = _safe_numeric_series(diagnostics_df, "gt_started", default=0.0)
+    diagnostics_df["heat_unmet_step"] = _safe_numeric_series(
+        diagnostics_df, "qh_unmet_mw", default=0.0
+    ) > float(max(0.0, getattr(env_config, "heat_unmet_th_mw", 0.0)))
+    diagnostics_df["cool_unmet_step"] = _safe_numeric_series(
+        diagnostics_df, "qc_unmet_mw", default=0.0
+    ) > float(max(0.0, getattr(env_config, "cool_unmet_th_mw", 0.0)))
+    diagnostics_df["idle_heat_backup_step"] = (
+        _safe_numeric_series(diagnostics_df, "cost_idle_heat_backup", default=0.0) > 0.0
+    )
+    diagnostics_df["idle_cool_backup_step"] = (
+        _safe_numeric_series(diagnostics_df, "cost_idle_cool_backup", default=0.0) > 0.0
+    )
+    diagnostics_df["gt_toggle_step"] = (
+        _safe_numeric_series(diagnostics_df, "cost_gt_toggle", default=0.0) > 0.0
+    )
+    diagnostics_df["export_over_soft_cap_step"] = (
+        _safe_numeric_series(diagnostics_df, "p_grid_export_over_soft_cap_mw", default=0.0) > 1e-9
+    )
+    diagnostics_df["abs_blocked_step"] = _safe_bool_series(
+        diagnostics_df, "u_abs_deadzone_applied", default=False
+    ) | (
+        _safe_numeric_series(diagnostics_df, "u_abs_gate", default=1.0) < abs_gate_th
+    )
+
+    group_columns = {
+        "steps": ("timestamp", "count"),
+        "total_cost": ("total_cost", "sum"),
+        "unmet_h_mwh": ("unmet_h_mwh", "sum"),
+        "unmet_c_mwh": ("unmet_c_mwh", "sum"),
+        "export_penalty": ("export_penalty", "sum"),
+        "starts_gt": ("starts_gt", "sum"),
+        "abs_blocked_rate": ("abs_blocked_step", "mean"),
+        "heat_unmet_steps": ("heat_unmet_step", "sum"),
+        "cool_unmet_steps": ("cool_unmet_step", "sum"),
+        "idle_heat_backup_steps": ("idle_heat_backup_step", "sum"),
+        "idle_cool_backup_steps": ("idle_cool_backup_step", "sum"),
+        "gt_toggle_steps": ("gt_toggle_step", "sum"),
+        "export_over_soft_cap_steps": ("export_over_soft_cap_step", "sum"),
+    }
+
+    month_df = diagnostics_df.groupby("month", sort=True).agg(**group_columns).reset_index()
+    hour_df = diagnostics_df.groupby("hour", sort=True).agg(**group_columns).reset_index()
+
+    month_json_path = eval_dir / "kpi_by_month.json"
+    hour_json_path = eval_dir / "kpi_by_hour.json"
+    behavior_json_path = eval_dir / "behavior_metrics.json"
+
+    month_df.to_csv(eval_dir / "kpi_by_month.csv", index=False)
+    hour_df.to_csv(eval_dir / "kpi_by_hour.csv", index=False)
+    month_json_path.write_text(
+        json.dumps(month_df.to_dict("records"), indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    hour_json_path.write_text(
+        json.dumps(hour_df.to_dict("records"), indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    behavior_metrics = {
+        "abs_deadzone_gate_threshold": abs_gate_th,
+        "steps": int(len(diagnostics_df)),
+        "abs_blocked_rate": float(diagnostics_df["abs_blocked_step"].mean()),
+        "heat_unmet_steps": int(diagnostics_df["heat_unmet_step"].sum()),
+        "cool_unmet_steps": int(diagnostics_df["cool_unmet_step"].sum()),
+        "idle_heat_backup_steps": int(diagnostics_df["idle_heat_backup_step"].sum()),
+        "idle_cool_backup_steps": int(diagnostics_df["idle_cool_backup_step"].sum()),
+        "gt_toggle_steps": int(diagnostics_df["gt_toggle_step"].sum()),
+        "export_over_soft_cap_steps": int(diagnostics_df["export_over_soft_cap_step"].sum()),
+        "worst_heat_months": month_df.sort_values("unmet_h_mwh", ascending=False).head(3).to_dict("records"),
+        "worst_cool_hours": hour_df.sort_values("unmet_c_mwh", ascending=False).head(3).to_dict("records"),
+        "worst_export_months": month_df.sort_values("export_penalty", ascending=False).head(3).to_dict("records"),
+    }
+    behavior_json_path.write_text(
+        json.dumps(behavior_metrics, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return {
+        "kpi_by_month": str(month_json_path).replace("\\", "/"),
+        "kpi_by_hour": str(hour_json_path).replace("\\", "/"),
+        "behavior_metrics": str(behavior_json_path).replace("\\", "/"),
+    }
+
+
 def train_sb3_policy(
     *,
     train_df: pd.DataFrame,
@@ -884,32 +1380,6 @@ def train_sb3_policy(
             gamma=float(config.gamma),
         )
 
-    eval_factory = make_eval_env_factory(
-        eval_df=eval_episode_df,
-        env_config=env_config,
-        seed=config.seed,
-        history_steps=config.history_steps,
-        observation_keys=observation_keys,
-        normalizer=None,
-        eval_episode_dfs=eval_episode_dfs,
-    )
-
-    def _make_eval() -> Any:
-        env = eval_factory()
-        return Monitor(env, filename=str(run_dir / "train" / "eval_monitor.csv"))
-
-    eval_env = DummyVecEnv([_make_eval])
-    if use_vecnormalize:
-        eval_env = VecNormalize(
-            eval_env,
-            training=False,
-            norm_obs=bool(config.vec_norm_obs),
-            norm_reward=False,
-            clip_obs=10.0,
-            clip_reward=10.0,
-            gamma=float(config.gamma),
-        )
-
     algo_cls = {"ppo": PPO, "sac": SAC, "td3": TD3, "ddpg": DDPG}[config.algo]
     policy_kwargs = _sb3_policy_kwargs_for_backbone(backbone=config.backbone)
     policy_kwargs_serializable: dict[str, Any] = {}
@@ -973,6 +1443,80 @@ def train_sb3_policy(
     )
     model.set_logger(sb3_configure_logger(folder=str(run_dir / "train"), format_strings=["stdout", "csv"]))
 
+    warm_start_summary: dict[str, Any] = {
+        "enabled": bool(config.ppo_warm_start_enabled),
+        "applied": False,
+    }
+    offpolicy_prefill_summary: dict[str, Any] = {
+        "enabled": bool(config.offpolicy_prefill_enabled),
+        "applied": False,
+    }
+    if bool(config.ppo_warm_start_enabled):
+        if config.algo != "ppo":
+            warm_start_summary["status"] = "skipped_non_ppo"
+        else:
+            warm_obs, warm_targets, warm_vec_env = _collect_easy_rule_warm_start_dataset(
+                train_df=train_df,
+                env_config=env_config,
+                config=config,
+                observation_keys=observation_keys,
+                DummyVecEnv=DummyVecEnv,
+                VecNormalize=VecNormalize,
+                use_vecnormalize=use_vecnormalize,
+            )
+            try:
+                if use_vecnormalize and warm_vec_env is not None:
+                    _copy_vecnormalize_stats(warm_vec_env, train_env)
+                warm_start_summary = _warm_start_ppo_from_easy_rule(
+                    model=model,
+                    observations=warm_obs,
+                    targets=warm_targets,
+                    config=config,
+                )
+                warm_start_summary["applied"] = True
+            finally:
+                if warm_vec_env is not None:
+                    warm_vec_env.close()
+    if bool(config.offpolicy_prefill_enabled):
+        if config.algo not in {"sac", "td3", "ddpg"}:
+            offpolicy_prefill_summary["status"] = "skipped_non_offpolicy"
+        else:
+            offpolicy_prefill_summary = _prefill_offpolicy_replay_buffer(
+                model=model,
+                train_df=train_df,
+                env_config=env_config,
+                config=config,
+                observation_keys=observation_keys,
+                DummyVecEnv=DummyVecEnv,
+            )
+
+    eval_factory = make_eval_env_factory(
+        eval_df=eval_episode_df,
+        env_config=env_config,
+        seed=config.seed,
+        history_steps=config.history_steps,
+        observation_keys=observation_keys,
+        normalizer=None,
+        eval_episode_dfs=eval_episode_dfs,
+    )
+
+    def _make_eval() -> Any:
+        env = eval_factory()
+        return Monitor(env, filename=str(run_dir / "train" / "eval_monitor.csv"))
+
+    eval_env = DummyVecEnv([_make_eval])
+    if use_vecnormalize:
+        eval_env = VecNormalize(
+            eval_env,
+            training=False,
+            norm_obs=bool(config.vec_norm_obs),
+            norm_reward=False,
+            clip_obs=10.0,
+            clip_reward=10.0,
+            gamma=float(config.gamma),
+        )
+        _copy_vecnormalize_stats(train_env, eval_env)
+
     payload = {
         "artifact_type": "sb3_policy",
         "algo": config.algo,
@@ -996,13 +1540,22 @@ def train_sb3_policy(
             "clip_reward": 10.0,
         },
         "eval_protocol": eval_protocol,
+        "warm_start": warm_start_summary,
+        "offpolicy_prefill": offpolicy_prefill_summary,
         "ppo_hyperparameters": {
+            "warm_start_enabled": bool(config.ppo_warm_start_enabled),
+            "warm_start_samples": int(config.ppo_warm_start_samples),
+            "warm_start_epochs": int(config.ppo_warm_start_epochs),
+            "warm_start_batch_size": int(config.ppo_warm_start_batch_size),
+            "warm_start_lr": float(config.ppo_warm_start_lr),
             "n_steps": int(config.ppo_n_steps),
             "gae_lambda": float(config.ppo_gae_lambda),
             "ent_coef": float(config.ppo_ent_coef),
             "clip_range": float(config.ppo_clip_range),
         },
         "offpolicy_hyperparameters": {
+            "prefill_enabled": bool(config.offpolicy_prefill_enabled),
+            "prefill_steps": int(config.offpolicy_prefill_steps),
             "learning_starts": int(config.learning_starts),
             "train_freq": int(config.train_freq),
             "gradient_steps": int(config.gradient_steps),
@@ -1408,12 +1961,19 @@ def evaluate_sb3_policy(
     if resolved_vecnormalize_path is not None:
         summary["resolved_vecnormalize_path"] = str(resolved_vecnormalize_path).replace("\\", "/")
 
+    step_df = pd.DataFrame(step_rows)
+    step_df.to_csv(output_run_dir / "eval" / "step_log.csv", index=False)
+    diagnostic_artifacts = _write_eval_diagnostics(
+        eval_dir=output_run_dir / "eval",
+        step_df=step_df,
+        env_config=env_config,
+    )
+    if diagnostic_artifacts:
+        summary["diagnostic_artifacts"] = diagnostic_artifacts
     (output_run_dir / "eval" / "summary.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-    step_df = pd.DataFrame(step_rows)
-    step_df.to_csv(output_run_dir / "eval" / "step_log.csv", index=False)
     write_paper_eval_artifacts(
         output_run_dir / "eval",
         summary=summary,

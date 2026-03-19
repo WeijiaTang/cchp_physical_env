@@ -60,6 +60,10 @@ class CostBreakdown:
     cost_unmet_c: float
     cost_viol: float
     cost_invalid_abs_request: float
+    cost_gt_toggle: float
+    cost_gt_delta: float
+    cost_idle_heat_backup: float
+    cost_idle_cool_backup: float
     cost_total: float
     reward: float
 
@@ -83,6 +87,10 @@ def compute_cost_breakdown(
     qc_unmet_mw: float,
     violation_count: int,
     invalid_abs_request_penalty: float,
+    gt_toggle_penalty: float,
+    gt_delta_penalty: float,
+    idle_heat_backup_penalty: float,
+    idle_cool_backup_penalty: float,
     config: "EnvConfig",
 ) -> CostBreakdown:
     """
@@ -143,6 +151,10 @@ def compute_cost_breakdown(
     cost_unmet_c = qc_unmet_mw * dt_h * config.penalty_unmet_c_per_mwh
     cost_viol = violation_count * config.penalty_violation_per_flag
     cost_invalid_abs_request = max(0.0, float(invalid_abs_request_penalty))
+    cost_gt_toggle = max(0.0, float(gt_toggle_penalty))
+    cost_gt_delta = max(0.0, float(gt_delta_penalty))
+    cost_idle_heat_backup = max(0.0, float(idle_heat_backup_penalty))
+    cost_idle_cool_backup = max(0.0, float(idle_cool_backup_penalty))
 
     cost_total = (
         cost_grid
@@ -156,6 +168,10 @@ def compute_cost_breakdown(
         + cost_unmet_c
         + cost_viol
         + cost_invalid_abs_request
+        + cost_gt_toggle
+        + cost_gt_delta
+        + cost_idle_heat_backup
+        + cost_idle_cool_backup
     )
     return CostBreakdown(
         cost_grid_import=cost_grid_import,
@@ -173,6 +189,10 @@ def compute_cost_breakdown(
         cost_unmet_c=cost_unmet_c,
         cost_viol=cost_viol,
         cost_invalid_abs_request=cost_invalid_abs_request,
+        cost_gt_toggle=cost_gt_toggle,
+        cost_gt_delta=cost_gt_delta,
+        cost_idle_heat_backup=cost_idle_heat_backup,
+        cost_idle_cool_backup=cost_idle_cool_backup,
         cost_total=cost_total,
         reward=-cost_total,
     )
