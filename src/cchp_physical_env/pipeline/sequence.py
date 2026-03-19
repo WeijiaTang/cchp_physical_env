@@ -32,8 +32,12 @@ DEFAULT_SEQUENCE_OBSERVATION_FEATURE_KEYS = (
     "soc_bes",  # 储能系统 SOC
     "gt_on",  # GT 是否开启（上一时刻）
     "gt_state",  # GT 状态（0/1/2）
+    "p_gt_prev_mw",  # GT 上一时刻出力（MW）
+    "gt_ramp_headroom_up_mw",  # GT 上调余量（MW）
+    "gt_ramp_headroom_down_mw",  # GT 下调余量（MW）
     "e_tes_mwh",  # TES 能量（MWh）
     "t_tes_hot_k",  # TES 热端温度（K）
+    "abs_drive_margin_k",  # 吸收式制冷可用驱动温差（K）
     "sin_t",  # 日周期 sin
     "cos_t",  # 日周期 cos
     "sin_week",  # 周周期 sin

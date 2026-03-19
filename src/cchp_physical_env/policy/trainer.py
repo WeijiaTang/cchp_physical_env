@@ -553,6 +553,14 @@ def _build_sequence_obs_norm(
         elif key == "gt_state":
             offset = 1.0
             scale = 1.0
+        elif key == "p_gt_prev_mw":
+            cap = float(env_config.p_gt_cap_mw)
+            offset = 0.5 * cap
+            scale = 0.5 * max(_NORM_EPS, cap)
+        elif key in {"gt_ramp_headroom_up_mw", "gt_ramp_headroom_down_mw"}:
+            ramp = float(env_config.gt_ramp_mw_per_step)
+            offset = 0.5 * ramp
+            scale = 0.5 * max(_NORM_EPS, ramp)
         elif key == "e_tes_mwh":
             cap = float(env_config.e_tes_cap_mwh)
             offset = 0.5 * cap
@@ -562,6 +570,9 @@ def _build_sequence_obs_norm(
             center = float(env_config.hrsg_water_inlet_k) + 30.0
             offset = center
             scale = 30.0
+        elif key == "abs_drive_margin_k":
+            offset = 0.0
+            scale = max(2.0, float(env_config.abs_gate_scale_k))
         elif key in {"sin_t", "cos_t", "sin_week", "cos_week"}:
             offset = 0.0
             scale = 1.0

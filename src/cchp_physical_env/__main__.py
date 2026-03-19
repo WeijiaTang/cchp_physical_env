@@ -85,6 +85,9 @@ TRAINING_OPTION_KEYS = (
     "sb3_vec_norm_reward",
     "sb3_eval_freq",
     "sb3_eval_episode_days",
+    "sb3_eval_window_pool_size",
+    "sb3_eval_window_count",
+    "sb3_eval_window_seed",
     "sb3_ppo_n_steps",
     "sb3_ppo_gae_lambda",
     "sb3_ppo_ent_coef",
@@ -231,6 +234,9 @@ def _command_train(args: argparse.Namespace) -> None:
                 "sb3_vec_norm_reward",
                 "sb3_eval_freq",
                 "sb3_eval_episode_days",
+                "sb3_eval_window_pool_size",
+                "sb3_eval_window_count",
+                "sb3_eval_window_seed",
                 "sb3_ppo_n_steps",
                 "sb3_ppo_gae_lambda",
                 "sb3_ppo_ent_coef",
@@ -263,6 +269,9 @@ def _command_train(args: argparse.Namespace) -> None:
                 vec_norm_reward=bool(current_options["sb3_vec_norm_reward"]),
                 eval_freq=current_options["sb3_eval_freq"],
                 eval_episode_days=current_options["sb3_eval_episode_days"],
+                eval_window_pool_size=current_options["sb3_eval_window_pool_size"],
+                eval_window_count=current_options["sb3_eval_window_count"],
+                eval_window_seed=current_options["sb3_eval_window_seed"],
                 ppo_n_steps=current_options["sb3_ppo_n_steps"],
                 ppo_gae_lambda=current_options["sb3_ppo_gae_lambda"],
                 ppo_ent_coef=current_options["sb3_ppo_ent_coef"],
@@ -538,6 +547,9 @@ def _command_sb3_train(args: argparse.Namespace) -> None:
             vec_norm_reward=bool(getattr(args, "vec_norm_reward", True)),
             eval_freq=args.eval_freq,
             eval_episode_days=args.eval_episode_days,
+            eval_window_pool_size=args.eval_window_pool_size,
+            eval_window_count=args.eval_window_count,
+            eval_window_seed=args.eval_window_seed,
             ppo_n_steps=args.ppo_n_steps,
             ppo_gae_lambda=args.ppo_gae_lambda,
             ppo_ent_coef=args.ppo_ent_coef,
@@ -921,6 +933,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     train_parser.add_argument("--sb3-eval-freq", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument("--sb3-eval-episode-days", type=int, default=argparse.SUPPRESS)
+    train_parser.add_argument("--sb3-eval-window-pool-size", type=int, default=argparse.SUPPRESS)
+    train_parser.add_argument("--sb3-eval-window-count", type=int, default=argparse.SUPPRESS)
+    train_parser.add_argument("--sb3-eval-window-seed", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument("--sb3-ppo-n-steps", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument("--sb3-ppo-gae-lambda", type=float, default=argparse.SUPPRESS)
     train_parser.add_argument("--sb3-ppo-ent-coef", type=float, default=argparse.SUPPRESS)
@@ -1044,6 +1059,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sb3_train_parser.add_argument("--eval-freq", type=int, default=50_000)
     sb3_train_parser.add_argument("--eval-episode-days", type=int, default=14)
+    sb3_train_parser.add_argument("--eval-window-pool-size", type=int, default=12)
+    sb3_train_parser.add_argument("--eval-window-count", type=int, default=4)
+    sb3_train_parser.add_argument("--eval-window-seed", type=int, default=42)
     sb3_train_parser.add_argument("--ppo-n-steps", type=int, default=2048)
     sb3_train_parser.add_argument("--ppo-gae-lambda", type=float, default=0.95)
     sb3_train_parser.add_argument("--ppo-ent-coef", type=float, default=0.0)

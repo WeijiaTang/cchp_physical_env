@@ -59,6 +59,7 @@ class CostBreakdown:
     cost_unmet_h: float
     cost_unmet_c: float
     cost_viol: float
+    cost_invalid_abs_request: float
     cost_total: float
     reward: float
 
@@ -81,6 +82,7 @@ def compute_cost_breakdown(
     qh_unmet_mw: float,
     qc_unmet_mw: float,
     violation_count: int,
+    invalid_abs_request_penalty: float,
     config: "EnvConfig",
 ) -> CostBreakdown:
     """
@@ -140,6 +142,7 @@ def compute_cost_breakdown(
     cost_unmet_h = qh_unmet_mw * dt_h * config.penalty_unmet_h_per_mwh
     cost_unmet_c = qc_unmet_mw * dt_h * config.penalty_unmet_c_per_mwh
     cost_viol = violation_count * config.penalty_violation_per_flag
+    cost_invalid_abs_request = max(0.0, float(invalid_abs_request_penalty))
 
     cost_total = (
         cost_grid
@@ -152,6 +155,7 @@ def compute_cost_breakdown(
         + cost_unmet_h
         + cost_unmet_c
         + cost_viol
+        + cost_invalid_abs_request
     )
     return CostBreakdown(
         cost_grid_import=cost_grid_import,
@@ -168,6 +172,7 @@ def compute_cost_breakdown(
         cost_unmet_h=cost_unmet_h,
         cost_unmet_c=cost_unmet_c,
         cost_viol=cost_viol,
+        cost_invalid_abs_request=cost_invalid_abs_request,
         cost_total=cost_total,
         reward=-cost_total,
     )

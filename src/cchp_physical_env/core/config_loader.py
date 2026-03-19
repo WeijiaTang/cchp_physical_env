@@ -46,6 +46,9 @@ TRAINING_DEFAULTS: dict[str, Any] = {
     "sb3_vec_norm_reward": True,
     "sb3_eval_freq": 50_000,
     "sb3_eval_episode_days": 14,
+    "sb3_eval_window_pool_size": 12,
+    "sb3_eval_window_count": 4,
+    "sb3_eval_window_seed": 42,
     "sb3_ppo_n_steps": 2048,
     "sb3_ppo_gae_lambda": 0.95,
     "sb3_ppo_ent_coef": 0.0,
@@ -75,7 +78,11 @@ ENV_ENUM_ERROR_MESSAGES: dict[str, str] = {
     "bes_init_strategy": "bes_init_strategy 仅支持 fixed/min/max/half/random。",
 }
 ENV_STRIP_STRING_KEYS = {"pyomo_solver"}
-ENV_BOOL_KEYS = {"bes_dod_add_calendar_age"}
+ENV_BOOL_KEYS = {
+    "bes_dod_add_calendar_age",
+    "abs_gate_enabled",
+    "gt_action_smoothing_enabled",
+}
 # 数值范围规则：仅对需要额外范围约束的字段登记，其余数值字段只做“类型 + finite”校验。
 ENV_NUMERIC_RULES: dict[str, tuple[Callable[[float], bool], str]] = {
     "sell_price_ratio": (
@@ -121,6 +128,22 @@ ENV_NUMERIC_RULES: dict[str, tuple[Callable[[float], bool], str]] = {
     "bes_dod_battery_life_years": (
         lambda value: value > 0.0,
         "bes_dod_battery_life_years 必须 > 0。",
+    ),
+    "abs_gate_scale_k": (
+        lambda value: value > 0.0,
+        "abs_gate_scale_k 必须 > 0。",
+    ),
+    "penalty_invalid_abs_request": (
+        lambda value: value >= 0.0,
+        "penalty_invalid_abs_request 必须 >= 0。",
+    ),
+    "gt_min_on_steps": (
+        lambda value: value >= 0.0,
+        "gt_min_on_steps 必须 >= 0。",
+    ),
+    "gt_min_off_steps": (
+        lambda value: value >= 0.0,
+        "gt_min_off_steps 必须 >= 0。",
     ),
 }
 ENV_LOWERCASE_STRING_KEYS = set(ENV_ENUM_OPTIONS.keys())
@@ -206,7 +229,7 @@ def validate_env_overrides(overrides: dict[str, Any]) -> None:
             continue
         if key in ENV_BOOL_KEYS:
             if not isinstance(value, bool):
-                raise ValueError("bes_dod_add_calendar_age 必须是布尔值（true/false）。")
+                raise ValueError(f"{key} 必须是布尔值（true/false）。")
             continue
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError(f"{key} 必须是数值类型，当前为 {type(value).__name__}")
@@ -330,6 +353,16 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
             if int(value) < 0:
                 raise ValueError(f"{key} 必须 >= 0。")
             continue
+        if key in {"sb3_eval_window_seed"}:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{key} 必须是整数类型。")
+            continue
+        if key in {"sb3_eval_window_pool_size", "sb3_eval_window_count"}:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{key} 必须是整数类型。")
+            if int(value) < 0:
+                raise ValueError(f"{key} 必须 >= 0。")
+            continue
         if key == "sb3_gamma":
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ValueError("sb3_gamma 必须是数值类型。")
@@ -383,6 +416,16 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
     ).strip().lower()
     if sb3_backbone not in {"mlp", "transformer", "mamba"}:
         raise ValueError("training.sb3_backbone 仅支持 mlp/transformer/mamba。")
+    eval_window_pool_size = int(
+        overrides.get("sb3_eval_window_pool_size", TRAINING_DEFAULTS["sb3_eval_window_pool_size"])
+    )
+    eval_window_count = int(
+        overrides.get("sb3_eval_window_count", TRAINING_DEFAULTS["sb3_eval_window_count"])
+    )
+    if eval_window_pool_size == 0 and eval_window_count != 0:
+        raise ValueError("sb3_eval_window_pool_size=0 时，sb3_eval_window_count 也必须为 0。")
+    if eval_window_pool_size > 0 and eval_window_count > eval_window_pool_size:
+        raise ValueError("sb3_eval_window_count 不能大于 sb3_eval_window_pool_size。")
 
 
 def build_training_options(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -422,6 +465,9 @@ def build_training_options(overrides: dict[str, Any] | None = None) -> dict[str,
     normalized["sb3_vec_norm_reward"] = bool(normalized["sb3_vec_norm_reward"])
     normalized["sb3_eval_freq"] = int(normalized["sb3_eval_freq"])
     normalized["sb3_eval_episode_days"] = int(normalized["sb3_eval_episode_days"])
+    normalized["sb3_eval_window_pool_size"] = int(normalized["sb3_eval_window_pool_size"])
+    normalized["sb3_eval_window_count"] = int(normalized["sb3_eval_window_count"])
+    normalized["sb3_eval_window_seed"] = int(normalized["sb3_eval_window_seed"])
     normalized["sb3_ppo_n_steps"] = int(normalized["sb3_ppo_n_steps"])
     normalized["sb3_ppo_gae_lambda"] = float(normalized["sb3_ppo_gae_lambda"])
     normalized["sb3_ppo_ent_coef"] = float(normalized["sb3_ppo_ent_coef"])

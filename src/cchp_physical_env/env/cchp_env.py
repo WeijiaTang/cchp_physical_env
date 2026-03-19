@@ -70,6 +70,11 @@ def _clip(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
+def _sigmoid(value: float) -> float:
+    clipped = float(np.clip(value, -60.0, 60.0))
+    return float(1.0 / (1.0 + np.exp(-clipped)))
+
+
 @dataclass(slots=True)
 class EnvConfig:
     """
@@ -140,6 +145,12 @@ class EnvConfig:
     penalty_unmet_h_per_mwh: float
     penalty_unmet_c_per_mwh: float
     penalty_violation_per_flag: float
+    abs_gate_enabled: bool
+    abs_gate_scale_k: float
+    penalty_invalid_abs_request: float
+    gt_action_smoothing_enabled: bool
+    gt_min_on_steps: float
+    gt_min_off_steps: float
 
     hrsg_water_mass_flow_kg_per_s: float
     hrsg_water_inlet_k: float
@@ -193,6 +204,7 @@ class CCHPPhysicalEnv:
         self.gt_prev_p_mw = 0.0
         self.gt_prev_on = False
         self.gt_on_steps = 0
+        self.gt_off_steps = max(0, int(round(float(self.config.gt_min_off_steps))))
         self.bes_soc = self._init_bes_soc()
         self.boiler_prev_on = False
         self.ech_prev_on = False
@@ -303,11 +315,111 @@ class CCHPPhysicalEnv:
         self.gt_prev_p_mw = 0.0
         self.gt_prev_on = False
         self.gt_on_steps = 0
+        self.gt_off_steps = max(0, int(round(float(self.config.gt_min_off_steps))))
         self.bes_soc = self._init_bes_soc()
         self.boiler_prev_on = False
         self.ech_prev_on = False
         self.thermal_storage.reset()
         self.kpi.reset()
+
+    def _abs_drive_margin_k(self, *, tes_hot_k: float) -> float:
+        return float(tes_hot_k - float(self.abs_chiller.design.t_drive_min_k))
+
+    def _gt_ramp_headroom(self) -> tuple[float, float]:
+        prev = float(max(0.0, self.gt_prev_p_mw))
+        ramp = float(max(0.0, self.config.gt_ramp_mw_per_step))
+        cap = float(max(0.0, self.config.p_gt_cap_mw))
+        up_limit = min(cap, prev + ramp)
+        down_limit = max(0.0, prev - ramp)
+        return max(0.0, up_limit - prev), max(0.0, prev - down_limit)
+
+    def _gt_target_mw_to_action(self, p_gt_target_mw: float) -> float:
+        cap = max(1e-6, float(self.config.p_gt_cap_mw))
+        normalized = 2.0 * (float(p_gt_target_mw) / cap) - 1.0
+        return float(_clip(normalized, -1.0, 1.0))
+
+    def _preprocess_action(
+        self, action: Mapping[str, float], *, tes_hot_k: float
+    ) -> tuple[dict[str, float], dict[str, float | bool]]:
+        processed_action = {
+            key: float(action.get(key, 0.0))
+            for key in self.action_keys
+        }
+
+        drive_margin_k = self._abs_drive_margin_k(tes_hot_k=tes_hot_k)
+        gate_scale_k = max(1e-6, float(self.config.abs_gate_scale_k))
+        abs_gate = 1.0
+        if bool(self.config.abs_gate_enabled):
+            abs_gate = _sigmoid(drive_margin_k / gate_scale_k)
+        u_abs_raw = float(_clip(processed_action.get("u_abs", 0.0), 0.0, 1.0))
+        u_abs_effective = float(_clip(u_abs_raw * abs_gate, 0.0, 1.0))
+        processed_action["u_abs"] = u_abs_effective
+
+        invalid_abs_request_cost = 0.0
+        invalid_abs_request_flag = False
+        invalid_request_threshold = 0.2
+        low_gate_threshold = 0.1
+        if u_abs_raw > invalid_request_threshold and abs_gate < low_gate_threshold:
+            invalid_abs_request_flag = True
+            request_excess = (u_abs_raw - invalid_request_threshold) / max(
+                1e-6, 1.0 - invalid_request_threshold
+            )
+            gate_deficit = (low_gate_threshold - abs_gate) / max(1e-6, low_gate_threshold)
+            invalid_abs_request_cost = float(
+                max(0.0, request_excess) * max(0.0, gate_deficit) * self.config.penalty_invalid_abs_request
+            )
+
+        u_gt_raw = float(_clip(processed_action.get("u_gt", 0.0), -1.0, 1.0))
+        p_gt_requested_mw_raw = ((u_gt_raw + 1.0) * 0.5) * float(self.config.p_gt_cap_mw)
+        p_gt_requested_mw = p_gt_requested_mw_raw
+        gt_action_smoothing_applied = False
+        gt_min_on_enforced = False
+        gt_min_off_enforced = False
+
+        if bool(self.config.gt_action_smoothing_enabled):
+            ramp_limit = float(max(0.0, self.config.gt_ramp_mw_per_step))
+            low_limit = max(0.0, float(self.gt_prev_p_mw) - ramp_limit)
+            high_limit = min(float(self.config.p_gt_cap_mw), float(self.gt_prev_p_mw) + ramp_limit)
+            limited_target = float(_clip(p_gt_requested_mw, low_limit, high_limit))
+            if abs(limited_target - p_gt_requested_mw) > 1e-9:
+                gt_action_smoothing_applied = True
+            p_gt_requested_mw = limited_target
+
+        min_on_steps = max(0, int(round(float(self.config.gt_min_on_steps))))
+        min_off_steps = max(0, int(round(float(self.config.gt_min_off_steps))))
+        requested_on = p_gt_requested_mw > 1e-9
+
+        if self.gt_prev_on and (not requested_on) and int(self.gt_on_steps) < min_on_steps:
+            gt_min_on_enforced = True
+            gt_action_smoothing_applied = True
+            p_gt_requested_mw = max(float(self.config.gt_min_output_mw), float(self.gt_prev_p_mw))
+            requested_on = True
+
+        if (not self.gt_prev_on) and requested_on and int(self.gt_off_steps) < min_off_steps:
+            gt_min_off_enforced = True
+            gt_action_smoothing_applied = True
+            p_gt_requested_mw = 0.0
+            requested_on = False
+
+        if requested_on and 0.0 < p_gt_requested_mw < float(self.config.gt_min_output_mw):
+            p_gt_requested_mw = float(self.config.gt_min_output_mw)
+            gt_action_smoothing_applied = True
+
+        processed_action["u_gt"] = self._gt_target_mw_to_action(p_gt_requested_mw)
+        return processed_action, {
+            "u_abs_raw": float(u_abs_raw),
+            "u_abs_gate": float(abs_gate),
+            "u_abs_effective": float(u_abs_effective),
+            "abs_drive_margin_k": float(drive_margin_k),
+            "invalid_abs_request_cost": float(invalid_abs_request_cost),
+            "invalid_abs_request_flag": bool(invalid_abs_request_flag),
+            "u_gt_raw": float(u_gt_raw),
+            "p_gt_requested_mw_raw": float(p_gt_requested_mw_raw),
+            "p_gt_requested_mw_effective": float(p_gt_requested_mw),
+            "gt_action_smoothing_applied": bool(gt_action_smoothing_applied),
+            "gt_min_on_enforced": bool(gt_min_on_enforced),
+            "gt_min_off_enforced": bool(gt_min_off_enforced),
+        }
 
     def reset(
         self,
@@ -410,12 +522,13 @@ class CCHPPhysicalEnv:
         is_physics_mode = self._is_physics_in_loop()
         t_hot_k = float(self.thermal_storage.hot_water_temperature_k())
         e_tes_mwh = float(self.thermal_storage.energy_mwh)
+        processed_action, action_debug = self._preprocess_action(action, tes_hot_k=t_hot_k)
 
         # 说明：约束求解器需要一个“线性化的可用热量输入”（HRSG 回收热量）。
         # 这里先用当前 action 的 GT 目标做一次快速离线求解，得到 HRSG 的近似可用热量，
         # 再把这个值喂给约束求解器。
         # 注意：这一步不直接决定最终动作，只用于构造约束模型的输入。
-        u_gt_guess = _clip(float(action.get("u_gt", 0.0)), -1.0, 1.0)
+        u_gt_guess = _clip(float(processed_action.get("u_gt", 0.0)), -1.0, 1.0)
         p_gt_guess = ((u_gt_guess + 1.0) * 0.5) * self.config.p_gt_cap_mw
         gt_guess = self.gt_network.solve_offdesign(p_gt_request_mw=p_gt_guess, t_amb_k=t_amb_k)
         hrsg_guess = self.hrsg_network.solve(
@@ -431,7 +544,7 @@ class CCHPPhysicalEnv:
                 p_re_mw=float(row["pv_mw"]) + float(row["wt_mw"]),
                 p_gt_prev_mw=self.gt_prev_p_mw,
                 soc_bes=self.bes_soc,
-                action=action,
+                action=processed_action,
                 q_hrsg_available_mw=hrsg_guess.q_rec_mw,
                 cop_abs_est=self.abs_chiller.estimate_cop(self.thermal_storage.hot_water_temperature_k()),
                 cop_electric_est=self.electric_chiller.estimate_cop(t_amb_k=t_amb_k),
@@ -570,6 +683,10 @@ class CCHPPhysicalEnv:
 
         diagnostic_flags: dict[str, bool] = {
             "abs_drive_temp_low_state": t_hot_k < float(self.abs_chiller.design.t_drive_min_k),
+            "invalid_abs_request": bool(action_debug["invalid_abs_request_flag"]),
+            "gt_action_smoothing_applied": bool(action_debug["gt_action_smoothing_applied"]),
+            "gt_min_on_enforced": bool(action_debug["gt_min_on_enforced"]),
+            "gt_min_off_enforced": bool(action_debug["gt_min_off_enforced"]),
         }
 
         violation_count = sum(1 for flag in violation_flags.values() if flag)
@@ -590,6 +707,7 @@ class CCHPPhysicalEnv:
             qh_unmet_mw=qh_unmet_mw,
             qc_unmet_mw=qc_unmet_mw,
             violation_count=violation_count,
+            invalid_abs_request_penalty=float(action_debug["invalid_abs_request_cost"]),
             config=self.config,
         )
 
@@ -627,6 +745,7 @@ class CCHPPhysicalEnv:
             "cost_unmet_h": float(cost_breakdown.cost_unmet_h),
             "cost_unmet_c": float(cost_breakdown.cost_unmet_c),
             "cost_viol": float(cost_breakdown.cost_viol),
+            "cost_invalid_abs_request": float(cost_breakdown.cost_invalid_abs_request),
             "fuel_input_gt_mw_raw": float(gt_result.fuel_input_mw),
             "fuel_input_gt_effective_mw": float(fuel_input_gt_effective_mw),
             "fuel_input_gt_startup_extra_mw": float(startup_extra_fuel_mw),
@@ -643,6 +762,9 @@ class CCHPPhysicalEnv:
             "energy_unmet_c_mwh": float(qc_unmet_mw * dt_h),
             "price_e_buy": float(row["price_e"]),
             "price_e_sell": float(sell_price),
+            "u_gt_raw": float(action_debug["u_gt_raw"]),
+            "p_gt_request_mw_raw": float(action_debug["p_gt_requested_mw_raw"]),
+            "p_gt_request_mw_effective": float(action_debug["p_gt_requested_mw_effective"]),
             "p_gt_mw": float(p_gt_mw),
             "p_gt_target_mw": float(solver_result["p_gt_target_mw"]),
             "p_gt_applied_mw": float(solver_result["p_gt_applied_mw"]),
@@ -656,6 +778,10 @@ class CCHPPhysicalEnv:
             "p_ech_mw": float(ech_result.p_electric_mw),
             "q_hrsg_rec_mw": float(hrsg_result.q_rec_mw),
             "q_boiler_mw": float(boiler_result.q_heat_mw),
+            "u_abs_raw": float(action_debug["u_abs_raw"]),
+            "u_abs_gate": float(action_debug["u_abs_gate"]),
+            "u_abs_effective": float(action_debug["u_abs_effective"]),
+            "abs_drive_margin_k": float(action_debug["abs_drive_margin_k"]),
             "q_abs_cool_mw": float(abs_result.q_cool_mw),
             "q_ech_cool_mw": float(ech_result.q_cool_mw),
             "q_tes_charge_mw": float(tes_result.q_charge_mw),
@@ -680,8 +806,10 @@ class CCHPPhysicalEnv:
         self.gt_prev_on = p_gt_mw > 1e-9
         if self.gt_prev_on:
             self.gt_on_steps = int(self.gt_on_steps) + 1
+            self.gt_off_steps = 0
         else:
             self.gt_on_steps = 0
+            self.gt_off_steps = int(self.gt_off_steps) + 1
         self.boiler_prev_on = boiler_result.q_heat_mw > 1e-9
         self.ech_prev_on = ech_result.q_cool_mw > 1e-9
 
@@ -701,6 +829,8 @@ class CCHPPhysicalEnv:
     def _build_observation(self, row: pd.Series) -> dict[str, float]:
         dt_h = float(self.config.dt_hours)
         long_threshold_steps = max(1, int(round(1.0 / max(1e-9, dt_h))))
+        gt_ramp_headroom_up_mw, gt_ramp_headroom_down_mw = self._gt_ramp_headroom()
+        tes_hot_k = float(self.thermal_storage.hot_water_temperature_k())
         if not self.gt_prev_on:
             gt_state = 0.0
         elif int(self.gt_on_steps) >= long_threshold_steps:
@@ -712,6 +842,10 @@ class CCHPPhysicalEnv:
             bes_soc=self.bes_soc,
             gt_prev_on=self.gt_prev_on,
             gt_state=float(gt_state),
+            p_gt_prev_mw=float(self.gt_prev_p_mw),
+            gt_ramp_headroom_up_mw=float(gt_ramp_headroom_up_mw),
+            gt_ramp_headroom_down_mw=float(gt_ramp_headroom_down_mw),
             tes_energy_mwh=self.thermal_storage.energy_mwh,
-            tes_hot_k=self.thermal_storage.hot_water_temperature_k(),
+            tes_hot_k=tes_hot_k,
+            abs_drive_margin_k=float(self._abs_drive_margin_k(tes_hot_k=tes_hot_k)),
         )

@@ -12,8 +12,12 @@ def build_observation(
     bes_soc: float,
     gt_prev_on: bool,
     gt_state: float,
+    p_gt_prev_mw: float,
+    gt_ramp_headroom_up_mw: float,
+    gt_ramp_headroom_down_mw: float,
     tes_energy_mwh: float,
     tes_hot_k: float,
+    abs_drive_margin_k: float,
 ) -> dict[str, float]:
     timestamp = pd.to_datetime(row["timestamp"])
     minute_of_day = timestamp.hour * 60 + timestamp.minute
@@ -41,8 +45,12 @@ def build_observation(
         "soc_bes": float(bes_soc),
         "gt_on": float(1.0 if gt_prev_on else 0.0),
         "gt_state": float(gt_state),
+        "p_gt_prev_mw": float(p_gt_prev_mw),
+        "gt_ramp_headroom_up_mw": float(gt_ramp_headroom_up_mw),
+        "gt_ramp_headroom_down_mw": float(gt_ramp_headroom_down_mw),
         "e_tes_mwh": float(tes_energy_mwh),
         "t_tes_hot_k": float(tes_hot_k),
+        "abs_drive_margin_k": float(abs_drive_margin_k),
         "sin_t": float(math.sin(day_angle)),
         "cos_t": float(math.cos(day_angle)),
         "sin_week": float(math.sin(week_angle)),

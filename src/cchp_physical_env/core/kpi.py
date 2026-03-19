@@ -39,6 +39,7 @@ class KPITracker:
             "unmet_h": 0.0,
             "unmet_c": 0.0,
             "viol": 0.0,
+            "invalid_abs_request": 0.0,
         }
         self.energies_mwh = {
             "demand_e": 0.0,

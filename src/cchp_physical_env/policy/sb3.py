@@ -61,8 +61,12 @@ OBS_KEYS: tuple[str, ...] = (
     "soc_bes",
     "gt_on",
     "gt_state",
+    "p_gt_prev_mw",
+    "gt_ramp_headroom_up_mw",
+    "gt_ramp_headroom_down_mw",
     "e_tes_mwh",
     "t_tes_hot_k",
+    "abs_drive_margin_k",
     "sin_t",
     "cos_t",
     "sin_week",
@@ -176,6 +180,14 @@ def _build_observation_normalizer(
         elif key == "gt_state":
             offsets.append(1.0)
             scales.append(1.0)
+        elif key == "p_gt_prev_mw":
+            cap = max(float(eps), float(getattr(env_config, "p_gt_cap_mw", 0.0)))
+            offsets.append(0.5 * cap)
+            scales.append(0.5 * cap)
+        elif key in {"gt_ramp_headroom_up_mw", "gt_ramp_headroom_down_mw"}:
+            ramp = max(float(eps), float(getattr(env_config, "gt_ramp_mw_per_step", 0.0)))
+            offsets.append(0.5 * ramp)
+            scales.append(0.5 * ramp)
         elif key == "e_tes_mwh":
             cap = max(float(eps), float(getattr(env_config, "e_tes_cap_mwh", 0.0)))
             offsets.append(0.5 * cap)
@@ -183,6 +195,9 @@ def _build_observation_normalizer(
         elif key == "t_tes_hot_k":
             offsets.append(360.0)
             scales.append(20.0)
+        elif key == "abs_drive_margin_k":
+            offsets.append(0.0)
+            scales.append(max(2.0, float(getattr(env_config, "abs_gate_scale_k", 2.0))))
         elif key.startswith("sin_") or key.startswith("cos_"):
             offsets.append(0.0)
             scales.append(1.0)
@@ -247,6 +262,9 @@ class SB3TrainConfig:
     vec_norm_reward: bool = True
     eval_freq: int = 50_000
     eval_episode_days: int = 14
+    eval_window_pool_size: int = 0
+    eval_window_count: int = 0
+    eval_window_seed: int | None = None
     ppo_n_steps: int = 2048
     ppo_gae_lambda: float = 0.95
     ppo_ent_coef: float = 0.0
@@ -297,6 +315,20 @@ class SB3TrainConfig:
         self.eval_episode_days = int(self.eval_episode_days)
         if self.eval_episode_days < 7 or self.eval_episode_days > 30:
             raise ValueError("eval_episode_days 必须在 [7,30]。")
+        self.eval_window_pool_size = int(self.eval_window_pool_size)
+        self.eval_window_count = int(self.eval_window_count)
+        if self.eval_window_pool_size < 0:
+            raise ValueError("eval_window_pool_size 必须 >= 0。")
+        if self.eval_window_count < 0:
+            raise ValueError("eval_window_count 必须 >= 0。")
+        if self.eval_window_pool_size == 0:
+            self.eval_window_count = 0
+        if self.eval_window_count > self.eval_window_pool_size > 0:
+            raise ValueError("eval_window_count 不能大于 eval_window_pool_size。")
+        if self.eval_window_seed is None:
+            self.eval_window_seed = int(self.seed)
+        else:
+            self.eval_window_seed = int(self.eval_window_seed)
         self.ppo_n_steps = int(self.ppo_n_steps)
         if self.ppo_n_steps <= 0:
             raise ValueError("ppo_n_steps 必须 > 0。")
@@ -372,6 +404,7 @@ def make_train_env_factory(
     observation_keys: tuple[str, ...],
     normalizer: ObservationAffineNormalizer | None,
     fixed_episode_df: pd.DataFrame | None = None,
+    fixed_episode_dfs: tuple[pd.DataFrame, ...] | None = None,
 ) -> Callable[[], Any]:
     gym, *_ = _require_sb3_modules()
     observation_space, action_space = _build_spaces(
@@ -386,11 +419,17 @@ def make_train_env_factory(
             self.observation_space = observation_space
             self.action_space = action_space
             self.rng = np.random.default_rng(seed)
+            self.fixed_episode_dfs = None
+            self.fixed_episode_cursor = 0
+            if fixed_episode_dfs:
+                self.fixed_episode_dfs = tuple(
+                    item.reset_index(drop=True) for item in fixed_episode_dfs
+                )
             self.fixed_episode_df = (
                 None if fixed_episode_df is None else fixed_episode_df.reset_index(drop=True)
             )
             self.sampler = None
-            if self.fixed_episode_df is None:
+            if self.fixed_episode_df is None and self.fixed_episode_dfs is None:
                 self.sampler = make_episode_sampler(
                     train_df, episode_days=episode_days, seed=int(seed)
                 )
@@ -398,11 +437,18 @@ def make_train_env_factory(
             self.observation: dict[str, float] | None = None
             self.buffer = WindowBuffer(history_steps=int(history_steps), obs_dim=len(observation_keys))
 
+        def reset_fixed_episode_cursor(self) -> None:
+            self.fixed_episode_cursor = 0
+
         def reset(self, *, seed: int | None = None, options: dict | None = None):
             del options
             if seed is not None:
                 self.rng = np.random.default_rng(int(seed))
-            if self.fixed_episode_df is not None:
+            if self.fixed_episode_dfs is not None:
+                index = int(self.fixed_episode_cursor % len(self.fixed_episode_dfs))
+                episode_df = self.fixed_episode_dfs[index]
+                self.fixed_episode_cursor = int(self.fixed_episode_cursor + 1)
+            elif self.fixed_episode_df is not None:
                 episode_df = self.fixed_episode_df
             else:
                 if self.sampler is None:
@@ -433,23 +479,31 @@ def make_train_env_factory(
 
 def make_eval_env_factory(
     *,
-    eval_df: pd.DataFrame,
+    eval_df: pd.DataFrame | None,
     env_config: EnvConfig,
     seed: int,
     history_steps: int,
     observation_keys: tuple[str, ...],
     normalizer: ObservationAffineNormalizer | None,
+    eval_episode_dfs: tuple[pd.DataFrame, ...] | None = None,
 ) -> Callable[[], Any]:
-    episode_days = max(7, int(np.ceil(len(eval_df) * max(1e-6, float(env_config.dt_hours)) / 24.0)))
+    if eval_episode_dfs:
+        base_df = eval_episode_dfs[0]
+    elif eval_df is not None:
+        base_df = eval_df
+    else:
+        raise ValueError("make_eval_env_factory 需要 eval_df 或 eval_episode_dfs。")
+    episode_days = max(7, int(np.ceil(len(base_df) * max(1e-6, float(env_config.dt_hours)) / 24.0)))
     return make_train_env_factory(
-        train_df=eval_df,
+        train_df=base_df,
         env_config=env_config,
         seed=seed,
         episode_days=episode_days,
         history_steps=history_steps,
         observation_keys=observation_keys,
         normalizer=normalizer,
-        fixed_episode_df=eval_df.reset_index(drop=True),
+        fixed_episode_df=None if eval_df is None else eval_df.reset_index(drop=True),
+        fixed_episode_dfs=eval_episode_dfs,
     )
 
 
@@ -468,6 +522,109 @@ def _build_fixed_eval_episode_df(
             f"训练集长度不足以截取固定评估片段：需要 {steps} 步，当前仅 {len(train_df)} 步。"
         )
     return train_df.tail(steps).reset_index(drop=True)
+
+
+def _build_eval_window_pool(
+    *,
+    train_df: pd.DataFrame,
+    env_config: EnvConfig,
+    eval_episode_days: int,
+    pool_size: int,
+    window_count: int,
+    seed: int,
+) -> dict[str, Any] | None:
+    if int(pool_size) <= 0 or int(window_count) <= 0:
+        return None
+
+    steps = int(eval_episode_days) * _steps_per_day(env_config=env_config)
+    if steps <= 0:
+        raise ValueError("eval_episode_days 对应的评估步数必须 > 0。")
+    if len(train_df) < steps:
+        raise ValueError(
+            f"训练集长度不足以构建验证窗口池：需要 {steps} 步，当前仅 {len(train_df)} 步。"
+        )
+
+    max_start = len(train_df) - steps
+    candidate_starts = list(range(0, max_start + 1, steps))
+    if not candidate_starts or candidate_starts[-1] != max_start:
+        candidate_starts.append(int(max_start))
+    candidate_starts = sorted({int(value) for value in candidate_starts})
+    if not candidate_starts:
+        raise ValueError("无法从训练集构建验证窗口候选集。")
+
+    pool_target_size = min(int(pool_size), len(candidate_starts))
+    pool_positions = np.linspace(0, len(candidate_starts) - 1, num=pool_target_size)
+    pool_candidate_indices = sorted({int(round(value)) for value in pool_positions})
+    pool_indices = [candidate_starts[index] for index in pool_candidate_indices]
+
+    window_target_count = min(int(window_count), len(pool_indices))
+    pool_index_blocks = np.array_split(np.arange(len(pool_indices), dtype=int), window_target_count)
+    rng = np.random.default_rng(int(seed))
+    selected_pool_positions: list[int] = []
+    for block in pool_index_blocks:
+        if len(block) == 0:
+            continue
+        if len(block) == 1:
+            selected_pool_positions.append(int(block[0]))
+            continue
+        choice = int(rng.integers(0, len(block)))
+        selected_pool_positions.append(int(block[choice]))
+    selected_pool_positions = sorted(set(selected_pool_positions))
+    if not selected_pool_positions:
+        selected_pool_positions = [0]
+
+    windows_payload: list[dict[str, Any]] = []
+    episode_dfs: list[pd.DataFrame] = []
+    selected_indices: list[int] = []
+    for window_index, start_idx in enumerate(pool_indices):
+        end_idx = int(start_idx + steps)
+        episode_df = train_df.iloc[start_idx:end_idx].reset_index(drop=True)
+        selected = int(window_index) in selected_pool_positions
+        if selected:
+            episode_dfs.append(episode_df)
+            selected_indices.append(int(window_index))
+        windows_payload.append(
+            {
+                "window_index": int(window_index),
+                "start_idx": int(start_idx),
+                "end_idx": int(end_idx),
+                "start_timestamp": str(pd.to_datetime(episode_df["timestamp"].iloc[0]).isoformat()),
+                "end_timestamp": str(pd.to_datetime(episode_df["timestamp"].iloc[-1]).isoformat()),
+                "selected_for_eval": bool(selected),
+            }
+        )
+
+    return {
+        "mode": "fixed_multi_window_pool_v1",
+        "pool_size": int(len(pool_indices)),
+        "window_count": int(len(selected_indices)),
+        "seed": int(seed),
+        "episode_steps": int(steps),
+        "episode_days": int(eval_episode_days),
+        "selected_window_indices": selected_indices,
+        "windows": windows_payload,
+        "episode_dfs": tuple(episode_dfs),
+    }
+
+
+def _iter_unwrapped_envs(vec_env: Any) -> list[Any]:
+    current = vec_env
+    visited: set[int] = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        envs = getattr(current, "envs", None)
+        if envs is not None:
+            return list(envs)
+        current = getattr(current, "venv", None)
+    return []
+
+
+def _reset_eval_window_cursor(vec_env: Any) -> None:
+    for env in _iter_unwrapped_envs(vec_env):
+        target = getattr(env, "env", env)
+        reset_cursor = getattr(target, "reset_fixed_episode_cursor", None)
+        if callable(reset_cursor):
+            reset_cursor()
 
 
 if torch is not None and BaseFeaturesExtractor is not object:
@@ -633,6 +790,7 @@ def train_sb3_policy(
     best_model_path = run_dir / "checkpoints" / "best_model.zip"
     vecnormalize_path = run_dir / "checkpoints" / "vecnormalize.pkl"
     best_vecnormalize_path = run_dir / "checkpoints" / "best_vecnormalize.pkl"
+    eval_windows_path = run_dir / "checkpoints" / "eval_windows.json"
 
     train_statistics = compute_training_statistics(train_df)
     train_statistics_path.write_text(
@@ -640,11 +798,55 @@ def train_sb3_policy(
         encoding="utf-8",
     )
     observation_keys = tuple(OBS_KEYS)
-    eval_episode_df = _build_fixed_eval_episode_df(
+    eval_window_pool = _build_eval_window_pool(
         train_df=train_df,
         env_config=env_config,
         eval_episode_days=config.eval_episode_days,
+        pool_size=config.eval_window_pool_size,
+        window_count=config.eval_window_count,
+        seed=int(config.eval_window_seed),
     )
+    eval_episode_df: pd.DataFrame | None = None
+    eval_episode_dfs: tuple[pd.DataFrame, ...] | None = None
+    eval_n_episodes = 1
+    eval_protocol: dict[str, Any]
+    if eval_window_pool is None:
+        eval_episode_df = _build_fixed_eval_episode_df(
+            train_df=train_df,
+            env_config=env_config,
+            eval_episode_days=config.eval_episode_days,
+        )
+        eval_protocol = {
+            "mode": "fixed_tail_v1",
+            "eval_freq": int(config.eval_freq),
+            "eval_episode_days": int(config.eval_episode_days),
+            "eval_window_start": str(pd.to_datetime(eval_episode_df["timestamp"].iloc[0]).isoformat()),
+            "eval_window_end": str(pd.to_datetime(eval_episode_df["timestamp"].iloc[-1]).isoformat()),
+            "model_source_default": "best",
+        }
+    else:
+        eval_episode_dfs = tuple(eval_window_pool["episode_dfs"])
+        eval_n_episodes = max(1, len(eval_episode_dfs))
+        eval_windows_payload = {
+            key: value
+            for key, value in eval_window_pool.items()
+            if key != "episode_dfs"
+        }
+        eval_windows_path.write_text(
+            json.dumps(eval_windows_payload, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        eval_protocol = {
+            "mode": str(eval_window_pool["mode"]),
+            "eval_freq": int(config.eval_freq),
+            "eval_episode_days": int(config.eval_episode_days),
+            "pool_size": int(eval_window_pool["pool_size"]),
+            "window_count": int(eval_window_pool["window_count"]),
+            "seed": int(eval_window_pool["seed"]),
+            "selected_window_indices": list(eval_window_pool["selected_window_indices"]),
+            "eval_windows_path": str(eval_windows_path).replace("\\", "/"),
+            "model_source_default": "best",
+        }
 
     env_fns = [
         make_train_env_factory(
@@ -689,6 +891,7 @@ def train_sb3_policy(
         history_steps=config.history_steps,
         observation_keys=observation_keys,
         normalizer=None,
+        eval_episode_dfs=eval_episode_dfs,
     )
 
     def _make_eval() -> Any:
@@ -740,8 +943,14 @@ def train_sb3_policy(
         try:
             import inspect
 
-            if "optimize_memory_usage" in inspect.signature(algo_cls).parameters:
+            algo_sig_params = inspect.signature(algo_cls).parameters
+            if "optimize_memory_usage" in algo_sig_params:
                 algo_kwargs["optimize_memory_usage"] = bool(config.optimize_memory_usage)
+            if bool(algo_kwargs.get("optimize_memory_usage", False)):
+                if "replay_buffer_kwargs" in algo_sig_params:
+                    algo_kwargs["replay_buffer_kwargs"] = {"handle_timeout_termination": False}
+                else:
+                    algo_kwargs["optimize_memory_usage"] = False
         except Exception:
             pass
         if config.algo in {"td3", "ddpg"} and float(config.action_noise_std) > 0.0:
@@ -786,13 +995,7 @@ def train_sb3_policy(
             "clip_obs": 10.0,
             "clip_reward": 10.0,
         },
-        "eval_protocol": {
-            "eval_freq": int(config.eval_freq),
-            "eval_episode_days": int(config.eval_episode_days),
-            "eval_window_start": str(pd.to_datetime(eval_episode_df["timestamp"].iloc[0]).isoformat()),
-            "eval_window_end": str(pd.to_datetime(eval_episode_df["timestamp"].iloc[-1]).isoformat()),
-            "model_source_default": "best",
-        },
+        "eval_protocol": eval_protocol,
         "ppo_hyperparameters": {
             "n_steps": int(config.ppo_n_steps),
             "gae_lambda": float(config.ppo_gae_lambda),
@@ -827,6 +1030,11 @@ def train_sb3_policy(
         ),
         "train_statistics_path": str(train_statistics_path).replace("\\", "/"),
         "run_dir": str(run_dir).replace("\\", "/"),
+        "eval_windows_path": (
+            str(eval_windows_path).replace("\\", "/")
+            if eval_window_pool is not None
+            else None
+        ),
     }
 
     def _write_payload() -> None:
@@ -866,6 +1074,8 @@ def train_sb3_policy(
 
     class _BestModelEvalCallback(EvalCallback):
         def _on_step(self) -> bool:
+            if self.eval_freq > 0 and self.n_calls % self.eval_freq == 0:
+                _reset_eval_window_cursor(self.eval_env)
             previous_best = float(self.best_mean_reward)
             continue_training = super()._on_step()
             if self.best_mean_reward > previous_best:
@@ -874,7 +1084,7 @@ def train_sb3_policy(
 
     eval_callback = _BestModelEvalCallback(
         eval_env=eval_env,
-        n_eval_episodes=1,
+        n_eval_episodes=int(eval_n_episodes),
         eval_freq=max(1, int(config.eval_freq) // max(1, int(config.n_envs))),
         log_path=str(run_dir / "train" / "eval_callback"),
         best_model_save_path=str(run_dir / "checkpoints"),
