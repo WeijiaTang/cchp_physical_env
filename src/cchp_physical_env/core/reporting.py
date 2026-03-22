@@ -112,7 +112,7 @@ def write_paper_eval_artifacts(
     """
     将 eval 输出补齐为论文友好的格式：
     - summary_flat.csv：一行扁平化表格（便于多 run 汇总）
-    - cost_breakdown.csv / violation_counts.csv / diagnostic_counts.csv
+    - cost_breakdown.csv / violation_counts.csv / diagnostic_counts.csv / state_diagnostic_counts.csv
     - step_log_light.csv：去掉 per-step JSON，适合画曲线
     - daily_agg.csv：按日聚合
     """
@@ -134,8 +134,26 @@ def write_paper_eval_artifacts(
     if isinstance(diagnostic_counts, dict) and diagnostic_counts:
         write_kv_csv(out_dir / "diagnostic_counts.csv", diagnostic_counts, key_col="flag", value_col="count")
 
+    state_diagnostic_counts = summary.get("state_diagnostic_counts", {})
+    if isinstance(state_diagnostic_counts, dict) and state_diagnostic_counts:
+        write_kv_csv(
+            out_dir / "state_diagnostic_counts.csv",
+            state_diagnostic_counts,
+            key_col="flag",
+            value_col="count",
+        )
+
     light = step_log.copy()
-    drop_cols = [c for c in ("violation_flags_json", "diagnostic_flags_json", "episode_summary") if c in light.columns]
+    drop_cols = [
+        c
+        for c in (
+            "violation_flags_json",
+            "diagnostic_flags_json",
+            "state_diagnostic_flags_json",
+            "episode_summary",
+        )
+        if c in light.columns
+    ]
     if drop_cols:
         light = light.drop(columns=drop_cols)
     light.to_csv(out_dir / "step_log_light.csv", index=False)
@@ -150,6 +168,11 @@ def write_paper_eval_artifacts(
             "cost_breakdown_csv": "cost_breakdown.csv" if isinstance(cost_breakdown, dict) and cost_breakdown else None,
             "violation_counts_csv": "violation_counts.csv" if isinstance(violation_counts, dict) and violation_counts else None,
             "diagnostic_counts_csv": "diagnostic_counts.csv" if isinstance(diagnostic_counts, dict) and diagnostic_counts else None,
+            "state_diagnostic_counts_csv": (
+                "state_diagnostic_counts.csv"
+                if isinstance(state_diagnostic_counts, dict) and state_diagnostic_counts
+                else None
+            ),
             "step_log_light_csv": "step_log_light.csv",
             "daily_agg_csv": "daily_agg.csv",
         },

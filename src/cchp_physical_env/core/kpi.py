@@ -17,6 +17,8 @@ class KPITracker:
     violation_step_count: int = 0
     diagnostic_counts: dict[str, int] = field(default_factory=dict)
     diagnostic_step_count: int = 0
+    state_diagnostic_counts: dict[str, int] = field(default_factory=dict)
+    state_diagnostic_step_count: int = 0
     starts: dict[str, int] = field(default_factory=dict)
     emissions_ton: dict[str, float] = field(default_factory=dict)
 
@@ -57,6 +59,8 @@ class KPITracker:
         self.violation_step_count = 0
         self.diagnostic_counts = {}
         self.diagnostic_step_count = 0
+        self.state_diagnostic_counts = {}
+        self.state_diagnostic_step_count = 0
         self.starts = {"gt": 0, "boiler": 0, "ech": 0}
         self.emissions_ton = {"gt": 0.0, "boiler": 0.0, "total": 0.0}
 
@@ -87,6 +91,14 @@ class KPITracker:
         if any_diagnostic:
             self.diagnostic_step_count += 1
 
+        any_state_diagnostic = False
+        for key, flag in step_info.get("state_diagnostic_flags", {}).items():
+            if flag:
+                self.state_diagnostic_counts[key] = self.state_diagnostic_counts.get(key, 0) + 1
+                any_state_diagnostic = True
+        if any_state_diagnostic:
+            self.state_diagnostic_step_count += 1
+
         for key in self.starts:
             self.starts[key] += int(step_info.get(f"{key}_started", 0))
 
@@ -102,6 +114,8 @@ class KPITracker:
         violation_rate = float(self.violation_step_count / max(1, self.step_count))
         diagnostic_total = int(sum(self.diagnostic_counts.values()))
         diagnostic_rate = float(self.diagnostic_step_count / max(1, self.step_count))
+        state_diagnostic_total = int(sum(self.state_diagnostic_counts.values()))
+        state_diagnostic_rate = float(self.state_diagnostic_step_count / max(1, self.step_count))
 
         return {
             "step_count": int(self.step_count),
@@ -126,6 +140,12 @@ class KPITracker:
             "diagnostic_step_count": int(self.diagnostic_step_count),
             "diagnostic_rate": diagnostic_rate,
             "diagnostic_counts": {key: int(value) for key, value in self.diagnostic_counts.items()},
+            "state_diagnostic_total": state_diagnostic_total,
+            "state_diagnostic_step_count": int(self.state_diagnostic_step_count),
+            "state_diagnostic_rate": state_diagnostic_rate,
+            "state_diagnostic_counts": {
+                key: int(value) for key, value in self.state_diagnostic_counts.items()
+            },
             "starts": {key: int(value) for key, value in self.starts.items()},
             "emissions_ton": {key: float(value) for key, value in self.emissions_ton.items()},
         }

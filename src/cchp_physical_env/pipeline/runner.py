@@ -19,6 +19,7 @@ from ..core.data import (
 )
 from ..core.reporting import write_paper_eval_artifacts
 from ..env.cchp_env import CCHPPhysicalEnv, EnvConfig
+from .mpc import GAMPCPolicy, MILPMPCPolicy
 from .sequence import SUPPORTED_SEQUENCE_ADAPTERS, SequenceRulePolicy
 
 
@@ -196,17 +197,22 @@ def _build_policy(
     seed: int,
     train_statistics: dict,
     history_steps: int,
+    config: EnvConfig,
     sequence_adapter: str = "rule",
     sequence_feature_keys: tuple[str, ...] | None = None,
     sequence_predictor=None,
 ) -> Policy:
-    normalized = policy_name.lower().strip()
+    normalized = policy_name.lower().strip().replace("-", "_")
     if normalized == "random":
         return RandomPolicy(seed=seed)
     if normalized == "easy_rule":
         return EasyRulePolicy()
     if normalized == "rule":
         return RulePolicy(train_statistics=train_statistics)
+    if normalized == "milp_mpc":
+        return MILPMPCPolicy(config=config, history_steps=history_steps, seed=seed)
+    if normalized == "ga_mpc":
+        return GAMPCPolicy(config=config, history_steps=history_steps, seed=seed)
     if normalized == "sequence_rule":
         adapter_name = sequence_adapter.lower().strip()
         if adapter_name not in SUPPORTED_SEQUENCE_ADAPTERS:
@@ -234,6 +240,14 @@ def _run_single_episode(
     episode_df: pd.DataFrame | None = None,
 ) -> tuple[float, dict, list[dict]]:
     observation, _ = env.reset(seed=seed, episode_df=episode_df)
+    bind_context_fn = getattr(policy, "bind_episode_context", None)
+    if callable(bind_context_fn):
+        bind_context_fn(
+            env=env,
+            episode_df=env.episode_df,
+            initial_observation=observation,
+            seed=seed,
+        )
     reset_episode_fn = getattr(policy, "reset_episode", None)
     if callable(reset_episode_fn):
         reset_episode_fn(observation)
@@ -251,13 +265,16 @@ def _run_single_episode(
             log_row = {
                 key: value
                 for key, value in info.items()
-                if key not in {"violation_flags", "diagnostic_flags"}
+                if key not in {"violation_flags", "diagnostic_flags", "state_diagnostic_flags"}
             }
             log_row["violation_flags_json"] = json.dumps(
                 info.get("violation_flags", {}), ensure_ascii=False
             )
             log_row["diagnostic_flags_json"] = json.dumps(
                 info.get("diagnostic_flags", {}), ensure_ascii=False
+            )
+            log_row["state_diagnostic_flags_json"] = json.dumps(
+                info.get("state_diagnostic_flags", {}), ensure_ascii=False
             )
             step_rows.append(log_row)
 
@@ -304,6 +321,7 @@ def train_baseline(
         seed=seed,
         train_statistics=train_statistics,
         history_steps=history_steps,
+        config=config,
         sequence_adapter=sequence_adapter,
     )
     env = CCHPPhysicalEnv(exogenous_df=train_df, config=config, seed=seed)
@@ -338,6 +356,9 @@ def train_baseline(
     episodes_df = pd.DataFrame(episode_rows)
     episodes_df.to_csv(run_dir / "train" / "episodes.csv", index=False)
 
+    policy_metadata_fn = getattr(policy, "policy_metadata", None)
+    policy_metadata = policy_metadata_fn() if callable(policy_metadata_fn) else {}
+
     train_summary = {
         "mode": "train",
         "year": TRAIN_YEAR,
@@ -352,6 +373,7 @@ def train_baseline(
         "mean_unmet_e_mwh": float(episodes_df["unmet_e_mwh"].mean()),
         "mean_unmet_h_mwh": float(episodes_df["unmet_h_mwh"].mean()),
         "mean_unmet_c_mwh": float(episodes_df["unmet_c_mwh"].mean()),
+        "policy_details": policy_metadata,
     }
     (run_dir / "train" / "summary.json").write_text(
         json.dumps(train_summary, indent=2, ensure_ascii=False),
@@ -367,6 +389,7 @@ def train_baseline(
         "episode_days": episode_days,
         "episodes": episodes,
         "train_statistics_path": str(run_dir / "train" / "train_statistics.json"),
+        "policy_details": policy_metadata,
     }
     (run_dir / "checkpoints" / "baseline_policy.json").write_text(
         json.dumps(checkpoint, indent=2, ensure_ascii=False),
@@ -431,6 +454,7 @@ def evaluate_baseline(
         seed=seed,
         train_statistics=train_statistics,
         history_steps=history_steps,
+        config=config,
         sequence_adapter=sequence_adapter,
         sequence_feature_keys=sequence_feature_keys,
         sequence_predictor=sequence_predictor,
@@ -451,6 +475,9 @@ def evaluate_baseline(
     summary["history_steps"] = int(history_steps)
     summary["seed"] = seed
     summary["total_reward"] = float(total_reward)
+    policy_metadata_fn = getattr(policy, "policy_metadata", None)
+    if callable(policy_metadata_fn):
+        summary["policy_details"] = policy_metadata_fn()
 
     (output_run_dir / "eval" / "summary.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False),

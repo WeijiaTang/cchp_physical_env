@@ -100,6 +100,11 @@ TRAINING_OPTION_KEYS = (
     "sb3_ppo_gae_lambda",
     "sb3_ppo_ent_coef",
     "sb3_ppo_clip_range",
+    "sb3_dqn_action_mode",
+    "sb3_dqn_target_update_interval",
+    "sb3_dqn_exploration_fraction",
+    "sb3_dqn_exploration_initial_eps",
+    "sb3_dqn_exploration_final_eps",
     "sb3_learning_starts",
     "sb3_train_freq",
     "sb3_gradient_steps",
@@ -196,9 +201,9 @@ def _command_train(args: argparse.Namespace) -> None:
     train 子命令：根据配置路由到不同训练路径。
 
     路由逻辑：
-    1. 若 sb3_enabled=True -> 调用 SB3 训练（PPO/SAC/TD3/DDPG）
+    1. 若 sb3_enabled=True -> 调用 SB3 训练（PPO/SAC/TD3/DDPG/DQN）
     2. 若 policy=sequence_rule 且 adapter 为 mlp/transformer/mamba -> 调用 sequence trainer
-    3. 否则 -> 调用 baseline 训练（rule/random/sequence_rule）
+    3. 否则 -> 调用 baseline 训练（rule/easy_rule/random/sequence_rule/milp_mpc/ga_mpc）
 
     训练年份固定为 2024，数据来自 data/processed/cchp_main_15min_2024.csv
     """
@@ -217,6 +222,10 @@ def _command_train(args: argparse.Namespace) -> None:
             "easy_rule",
             "random",
             "sequence_rule",
+            "milp_mpc",
+            "milp-mpc",
+            "ga_mpc",
+            "ga-mpc",
         }:
             warnings.append("sb3_enabled=true 时 training.policy 仅作记录，不参与路由。")
         sb3_backbone = str(training_options.get("sb3_backbone", "mlp")).strip().lower()
@@ -257,6 +266,11 @@ def _command_train(args: argparse.Namespace) -> None:
                 "sb3_ppo_gae_lambda",
                 "sb3_ppo_ent_coef",
                 "sb3_ppo_clip_range",
+                "sb3_dqn_action_mode",
+                "sb3_dqn_target_update_interval",
+                "sb3_dqn_exploration_fraction",
+                "sb3_dqn_exploration_initial_eps",
+                "sb3_dqn_exploration_final_eps",
                 "sb3_learning_starts",
                 "sb3_train_freq",
                 "sb3_gradient_steps",
@@ -300,6 +314,11 @@ def _command_train(args: argparse.Namespace) -> None:
                 ppo_gae_lambda=current_options["sb3_ppo_gae_lambda"],
                 ppo_ent_coef=current_options["sb3_ppo_ent_coef"],
                 ppo_clip_range=current_options["sb3_ppo_clip_range"],
+                dqn_action_mode=current_options["sb3_dqn_action_mode"],
+                dqn_target_update_interval=current_options["sb3_dqn_target_update_interval"],
+                dqn_exploration_fraction=current_options["sb3_dqn_exploration_fraction"],
+                dqn_exploration_initial_eps=current_options["sb3_dqn_exploration_initial_eps"],
+                dqn_exploration_final_eps=current_options["sb3_dqn_exploration_final_eps"],
                 learning_starts=current_options["sb3_learning_starts"],
                 train_freq=current_options["sb3_train_freq"],
                 gradient_steps=current_options["sb3_gradient_steps"],
@@ -464,7 +483,7 @@ def _command_eval(args: argparse.Namespace) -> None:
 
     路由逻辑：
     1. 若 checkpoint 包含 artifact_type=sb3_policy -> 调用 SB3 评估
-    2. 否则 -> 调用 baseline 评估（rule/random/sequence_rule）
+    2. 否则 -> 调用 baseline 评估（rule/easy_rule/random/sequence_rule/milp_mpc/ga_mpc）
 
     评估年份固定为 2025，数据来自 data/processed/cchp_main_15min_2025.csv
     """
@@ -539,7 +558,7 @@ def _command_eval(args: argparse.Namespace) -> None:
 
 def _command_sb3_train(args: argparse.Namespace) -> None:
     """
-    sb3-train 子命令：使用 Stable-Baselines3 训练 PPO/SAC/TD3/DDPG。
+    sb3-train 子命令：使用 Stable-Baselines3 训练 PPO/SAC/TD3/DDPG/DQN。
 
     与 train 子命令的区别：
     - 显式指定算法（--algo）
@@ -586,6 +605,11 @@ def _command_sb3_train(args: argparse.Namespace) -> None:
             ppo_gae_lambda=args.ppo_gae_lambda,
             ppo_ent_coef=args.ppo_ent_coef,
             ppo_clip_range=args.ppo_clip_range,
+            dqn_action_mode=args.dqn_action_mode,
+            dqn_target_update_interval=args.dqn_target_update_interval,
+            dqn_exploration_fraction=args.dqn_exploration_fraction,
+            dqn_exploration_initial_eps=args.dqn_exploration_initial_eps,
+            dqn_exploration_final_eps=args.dqn_exploration_final_eps,
             learning_starts=args.learning_starts,
             train_freq=args.train_freq,
             gradient_steps=args.gradient_steps,
@@ -880,7 +904,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--policy",
         type=str,
         default=argparse.SUPPRESS,
-        choices=["rule", "easy_rule", "random", "sequence_rule", "sb3"],
+        choices=["rule", "easy_rule", "random", "sequence_rule", "milp_mpc", "milp-mpc", "ga_mpc", "ga-mpc", "sb3"],
     )
     train_parser.add_argument(
         "--env-config",
@@ -921,7 +945,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=argparse.SUPPRESS,
         help="禁用 SB3（覆盖 config.yaml 里的 sb3_enabled=true）。",
     )
-    train_parser.add_argument("--sb3-algo", type=str, default=argparse.SUPPRESS, choices=["ppo", "sac", "td3", "ddpg"])
+    train_parser.add_argument("--sb3-algo", type=str, default=argparse.SUPPRESS, choices=["ppo", "sac", "td3", "ddpg", "dqn"])
     train_parser.add_argument(
         "--sb3-backbone",
         type=str,
@@ -998,7 +1022,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="sb3_offpolicy_prefill_enabled",
         action="store_true",
         default=argparse.SUPPRESS,
-        help="为 SAC/TD3/DDPG 启用 easy_rule replay buffer 预填充。",
+        help="为 SAC/TD3/DDPG/DQN 启用 easy_rule replay buffer 预填充。",
     )
     train_parser.add_argument(
         "--no-sb3-offpolicy-prefill",
@@ -1012,6 +1036,11 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--sb3-ppo-gae-lambda", type=float, default=argparse.SUPPRESS)
     train_parser.add_argument("--sb3-ppo-ent-coef", type=float, default=argparse.SUPPRESS)
     train_parser.add_argument("--sb3-ppo-clip-range", type=float, default=argparse.SUPPRESS)
+    train_parser.add_argument("--sb3-dqn-action-mode", type=str, default=argparse.SUPPRESS, choices=["rb_v1"])
+    train_parser.add_argument("--sb3-dqn-target-update-interval", type=int, default=argparse.SUPPRESS)
+    train_parser.add_argument("--sb3-dqn-exploration-fraction", type=float, default=argparse.SUPPRESS)
+    train_parser.add_argument("--sb3-dqn-exploration-initial-eps", type=float, default=argparse.SUPPRESS)
+    train_parser.add_argument("--sb3-dqn-exploration-final-eps", type=float, default=argparse.SUPPRESS)
     train_parser.add_argument("--sb3-learning-starts", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument("--sb3-train-freq", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument("--sb3-gradient-steps", type=int, default=argparse.SUPPRESS)
@@ -1046,7 +1075,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--policy",
         type=str,
         default=argparse.SUPPRESS,
-        choices=["rule", "easy_rule", "random", "sequence_rule", "sb3"],
+        choices=["rule", "easy_rule", "random", "sequence_rule", "milp_mpc", "milp-mpc", "ga_mpc", "ga-mpc", "sb3"],
     )
     eval_parser.add_argument(
         "--env-config",
@@ -1072,7 +1101,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="SB3 checkpoint 评估时选择 best 或 last 模型（仅 SB3 生效）。",
     )
 
-    sb3_train_parser = subparsers.add_parser("sb3-train", help="用 SB3 训练 PPO/SAC/TD3/DDPG（Task-011，可选依赖）。")
+    sb3_train_parser = subparsers.add_parser("sb3-train", help="用 SB3 训练 PPO/SAC/TD3/DDPG/DQN（Task-011，可选依赖）。")
     sb3_train_parser.add_argument("--run-root", type=Path, default=Path("runs"))
     sb3_train_parser.add_argument(
         "--constraint-mode",
@@ -1081,7 +1110,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=list(DEFAULT_CONSTRAINT_MODES),
         help="覆盖 env.constraint_mode（子命令级覆盖）。",
     )
-    sb3_train_parser.add_argument("--algo", type=str, choices=["ppo", "sac", "td3", "ddpg"], default="ppo")
+    sb3_train_parser.add_argument("--algo", type=str, choices=["ppo", "sac", "td3", "ddpg", "dqn"], default="ppo")
     sb3_train_parser.add_argument(
         "--backbone",
         type=str,
@@ -1164,7 +1193,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="offpolicy_prefill_enabled",
         action="store_true",
         default=False,
-        help="为 SAC/TD3/DDPG 启用 easy_rule replay buffer 预填充。",
+        help="为 SAC/TD3/DDPG/DQN 启用 easy_rule replay buffer 预填充。",
     )
     sb3_train_parser.add_argument(
         "--no-offpolicy-prefill",
@@ -1183,6 +1212,11 @@ def build_parser() -> argparse.ArgumentParser:
     sb3_train_parser.add_argument("--ppo-gae-lambda", type=float, default=0.95)
     sb3_train_parser.add_argument("--ppo-ent-coef", type=float, default=0.0)
     sb3_train_parser.add_argument("--ppo-clip-range", type=float, default=0.2)
+    sb3_train_parser.add_argument("--dqn-action-mode", type=str, choices=["rb_v1"], default="rb_v1")
+    sb3_train_parser.add_argument("--dqn-target-update-interval", type=int, default=1000)
+    sb3_train_parser.add_argument("--dqn-exploration-fraction", type=float, default=0.3)
+    sb3_train_parser.add_argument("--dqn-exploration-initial-eps", type=float, default=1.0)
+    sb3_train_parser.add_argument("--dqn-exploration-final-eps", type=float, default=0.05)
     sb3_train_parser.add_argument("--learning-starts", type=int, default=5_000)
     sb3_train_parser.add_argument("--train-freq", type=int, default=1)
     sb3_train_parser.add_argument("--gradient-steps", type=int, default=1)
@@ -1291,7 +1325,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="覆盖 env.constraint_mode（子命令级覆盖；通常不需要，ablation 会按 --modes 生成）。",
     )
     ablation_parser.add_argument(
-        "--policy", type=str, default=argparse.SUPPRESS, choices=["rule", "easy_rule", "random", "sequence_rule"]
+        "--policy", type=str, default=argparse.SUPPRESS, choices=["rule", "easy_rule", "random", "sequence_rule", "milp_mpc", "milp-mpc", "ga_mpc", "ga-mpc"]
     )
     ablation_parser.add_argument(
         "--env-config",

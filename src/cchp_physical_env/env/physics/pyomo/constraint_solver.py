@@ -29,6 +29,9 @@ def _clip(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
+GT_MIN_OUTPUT_EPS_MW = 1e-6
+
+
 @dataclass(slots=True)
 class ConstraintConfig:
     """
@@ -133,7 +136,11 @@ class ConstraintSolver:
         p_gt_target_raw = ((u_gt + 1.0) * 0.5) * self.config.p_gt_cap_mw
         p_gt_target = p_gt_target_raw
         gt_min_output_enforced = False
-        if is_physics_mode and 0.0 < p_gt_target < self.config.gt_min_output_mw:
+        if (
+            is_physics_mode
+            and p_gt_target > GT_MIN_OUTPUT_EPS_MW
+            and p_gt_target < (self.config.gt_min_output_mw - GT_MIN_OUTPUT_EPS_MW)
+        ):
             # 对连续控制更友好的最小侵入修正：
             # 一旦判定“开机”，就直接抬升到最小稳定出力，避免在 0 与 min_output 之间出现硬断点。
             p_gt_target = self.config.gt_min_output_mw

@@ -32,7 +32,7 @@ TRAINING_DEFAULTS: dict[str, Any] = {
     "update_epochs": 8,
     "lr": 1e-4,
     "device": "auto",
-    # Task-011：可选 SB3 多算法（SAC/TD3/DDPG/PPO）
+    # Task-011：可选 SB3 多算法（SAC/TD3/DDPG/PPO/DQN）
     "sb3_enabled": False,
     "sb3_algo": "sac",
     "sb3_backbone": "transformer",
@@ -61,12 +61,17 @@ TRAINING_DEFAULTS: dict[str, Any] = {
     "sb3_ppo_gae_lambda": 0.95,
     "sb3_ppo_ent_coef": 0.0,
     "sb3_ppo_clip_range": 0.2,
+    "sb3_dqn_action_mode": "rb_v1",
+    "sb3_dqn_target_update_interval": 1_000,
+    "sb3_dqn_exploration_fraction": 0.3,
+    "sb3_dqn_exploration_initial_eps": 1.0,
+    "sb3_dqn_exploration_final_eps": 0.05,
     "sb3_learning_starts": 5_000,
     "sb3_train_freq": 1,
     "sb3_gradient_steps": 1,
     "sb3_tau": 0.005,
     "sb3_action_noise_std": 0.1,
-    # Off-policy algorithms (SAC/TD3/DDPG) use a replay buffer.
+    # Off-policy algorithms (SAC/TD3/DDPG/DQN) use a replay buffer.
     # With window observations (K,D) and n_envs>1, the default SB3 buffer_size=1e6 can easily OOM.
     "sb3_buffer_size": 50_000,
     "sb3_optimize_memory_usage": True,
@@ -360,11 +365,12 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
         "sb3_ppo_warm_start_epochs",
         "sb3_ppo_warm_start_batch_size",
         "sb3_ppo_n_steps",
+        "sb3_dqn_target_update_interval",
         "sb3_train_freq",
         "sb3_gradient_steps",
     }
     for key, value in overrides.items():
-        if key in {"policy", "sequence_adapter", "device"}:
+        if key in {"policy", "sequence_adapter", "device", "sb3_dqn_action_mode"}:
             if len(str(value).strip()) == 0:
                 raise ValueError(f"{key} 不能为空。")
             continue
@@ -451,11 +457,25 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
             if not (0.0 < numeric <= 1.0):
                 raise ValueError("sb3_ppo_gae_lambda 必须在 (0,1]。")
             continue
+        if key == "sb3_dqn_exploration_fraction":
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError("sb3_dqn_exploration_fraction 必须是数值类型。")
+            numeric = float(value)
+            if not (0.0 < numeric <= 1.0):
+                raise ValueError("sb3_dqn_exploration_fraction 必须在 (0,1]。")
+            continue
         if key in {"sb3_ppo_ent_coef", "sb3_action_noise_std"}:
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ValueError(f"{key} 必须是数值类型。")
             if float(value) < 0.0:
                 raise ValueError(f"{key} 必须 >= 0。")
+            continue
+        if key in {"sb3_dqn_exploration_initial_eps", "sb3_dqn_exploration_final_eps"}:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{key} 必须是数值类型。")
+            numeric = float(value)
+            if not (0.0 <= numeric <= 1.0):
+                raise ValueError(f"{key} 必须在 [0,1]。")
             continue
         if key in {"sb3_ppo_clip_range", "sb3_tau"}:
             if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -464,15 +484,15 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
                 raise ValueError(f"{key} 必须 > 0。")
             continue
 
-    policy = str(overrides.get("policy", TRAINING_DEFAULTS["policy"])).strip().lower()
+    policy = str(overrides.get("policy", TRAINING_DEFAULTS["policy"])).strip().lower().replace("-", "_")
     sb3_enabled_flag = bool(overrides.get("sb3_enabled", TRAINING_DEFAULTS.get("sb3_enabled", False)))
     if sb3_enabled_flag:
         # sb3_enabled=true 时，policy 仅作记录，但仍需要校验以避免拼写错误污染实验口径。
-        if policy not in {"rule", "easy_rule", "random", "sequence_rule", "sb3"}:
-            raise ValueError("training.policy 仅支持 rule/easy_rule/random/sequence_rule/sb3（sb3_enabled=true 时该字段仅作备注，不参与路由）。")
+        if policy not in {"rule", "easy_rule", "random", "sequence_rule", "milp_mpc", "ga_mpc", "sb3"}:
+            raise ValueError("training.policy 仅支持 rule/easy_rule/random/sequence_rule/milp_mpc/ga_mpc/sb3（sb3_enabled=true 时该字段仅作备注，不参与路由）。")
     else:
-        if policy not in {"rule", "easy_rule", "random", "sequence_rule"}:
-            raise ValueError("training.policy 仅支持 rule/easy_rule/random/sequence_rule（sb3_enabled=false）。")
+        if policy not in {"rule", "easy_rule", "random", "sequence_rule", "milp_mpc", "ga_mpc"}:
+            raise ValueError("training.policy 仅支持 rule/easy_rule/random/sequence_rule/milp_mpc/ga_mpc（sb3_enabled=false）。")
     sequence_adapter = str(
         overrides.get("sequence_adapter", TRAINING_DEFAULTS["sequence_adapter"])
     ).strip().lower()
@@ -483,8 +503,8 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
         raise ValueError("training.device 仅支持 auto/cpu/cuda/cuda:<index>。")
 
     sb3_algo = str(overrides.get("sb3_algo", TRAINING_DEFAULTS["sb3_algo"])).strip().lower()
-    if sb3_algo not in {"ppo", "sac", "td3", "ddpg"}:
-        raise ValueError("training.sb3_algo 仅支持 ppo/sac/td3/ddpg。")
+    if sb3_algo not in {"ppo", "sac", "td3", "ddpg", "dqn"}:
+        raise ValueError("training.sb3_algo 仅支持 ppo/sac/td3/ddpg/dqn。")
     sb3_backbone = str(
         overrides.get("sb3_backbone", TRAINING_DEFAULTS["sb3_backbone"])
     ).strip().lower()
@@ -502,6 +522,25 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
         raise ValueError("sb3_eval_window_count 不能大于 sb3_eval_window_pool_size。")
     if bool(overrides.get("sb3_residual_enabled", TRAINING_DEFAULTS["sb3_residual_enabled"])):
         raise ValueError("training.sb3_residual_enabled 当前尚未实现，请保持 false。")
+    dqn_action_mode = str(
+        overrides.get("sb3_dqn_action_mode", TRAINING_DEFAULTS["sb3_dqn_action_mode"])
+    ).strip().lower()
+    if dqn_action_mode != "rb_v1":
+        raise ValueError("training.sb3_dqn_action_mode 当前仅支持 rb_v1。")
+    dqn_initial_eps = float(
+        overrides.get(
+            "sb3_dqn_exploration_initial_eps",
+            TRAINING_DEFAULTS["sb3_dqn_exploration_initial_eps"],
+        )
+    )
+    dqn_final_eps = float(
+        overrides.get(
+            "sb3_dqn_exploration_final_eps",
+            TRAINING_DEFAULTS["sb3_dqn_exploration_final_eps"],
+        )
+    )
+    if dqn_final_eps > dqn_initial_eps:
+        raise ValueError("sb3_dqn_exploration_final_eps 不能大于 sb3_dqn_exploration_initial_eps。")
 
 
 def build_training_options(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -525,7 +564,7 @@ def build_training_options(overrides: dict[str, Any] | None = None) -> dict[str,
     normalized["batch_size"] = int(normalized["batch_size"])
     normalized["update_epochs"] = int(normalized["update_epochs"])
     normalized["lr"] = float(normalized["lr"])
-    normalized["policy"] = str(normalized["policy"]).strip().lower()
+    normalized["policy"] = str(normalized["policy"]).strip().lower().replace("-", "_")
     normalized["sequence_adapter"] = str(normalized["sequence_adapter"]).strip().lower()
     normalized["device"] = str(normalized["device"]).strip().lower()
     normalized["sb3_enabled"] = bool(normalized["sb3_enabled"])
@@ -556,6 +595,11 @@ def build_training_options(overrides: dict[str, Any] | None = None) -> dict[str,
     normalized["sb3_ppo_gae_lambda"] = float(normalized["sb3_ppo_gae_lambda"])
     normalized["sb3_ppo_ent_coef"] = float(normalized["sb3_ppo_ent_coef"])
     normalized["sb3_ppo_clip_range"] = float(normalized["sb3_ppo_clip_range"])
+    normalized["sb3_dqn_action_mode"] = str(normalized["sb3_dqn_action_mode"]).strip().lower()
+    normalized["sb3_dqn_target_update_interval"] = int(normalized["sb3_dqn_target_update_interval"])
+    normalized["sb3_dqn_exploration_fraction"] = float(normalized["sb3_dqn_exploration_fraction"])
+    normalized["sb3_dqn_exploration_initial_eps"] = float(normalized["sb3_dqn_exploration_initial_eps"])
+    normalized["sb3_dqn_exploration_final_eps"] = float(normalized["sb3_dqn_exploration_final_eps"])
     normalized["sb3_learning_starts"] = int(normalized["sb3_learning_starts"])
     normalized["sb3_train_freq"] = int(normalized["sb3_train_freq"])
     normalized["sb3_gradient_steps"] = int(normalized["sb3_gradient_steps"])

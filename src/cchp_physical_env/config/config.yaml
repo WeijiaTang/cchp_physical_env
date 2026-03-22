@@ -74,22 +74,22 @@ env:
   penalty_violation_per_flag: 50.0
   abs_gate_enabled: true
   abs_gate_scale_k: 2.0
-  abs_deadzone_gate_th: 0.10
-  abs_deadzone_u_th: 0.05
-  abs_invalid_req_u_th: 0.20
-  abs_invalid_req_gate_th: 0.10
-  penalty_invalid_abs_request: 1.0
+  abs_deadzone_gate_th: 0.15
+  abs_deadzone_u_th: 0.10
+  abs_invalid_req_u_th: 0.10
+  abs_invalid_req_gate_th: 0.20
+  penalty_invalid_abs_request: 10.0
   gt_action_smoothing_enabled: true
-  gt_min_on_steps: 6.0
-  gt_min_off_steps: 6.0
-  penalty_gt_toggle: 25.0
-  penalty_gt_delta_mw: 1.0
+  gt_min_on_steps: 8.0
+  gt_min_off_steps: 8.0
+  penalty_gt_toggle: 100.0
+  penalty_gt_delta_mw: 5.0
   heat_unmet_th_mw: 0.05
   cool_unmet_th_mw: 0.05
-  heat_backup_idle_th_mw: 0.20
-  cool_backup_idle_th_mw: 0.20
-  penalty_idle_heat_backup: 10.0
-  penalty_idle_cool_backup: 10.0
+  heat_backup_idle_th_mw: 0.50
+  cool_backup_idle_th_mw: 0.50
+  penalty_idle_heat_backup: 50.0
+  penalty_idle_cool_backup: 50.0
 
   # HRSG 边界（建议不改：物理口径）
   hrsg_water_mass_flow_kg_per_s: 45.0
@@ -115,7 +115,7 @@ training:
   # 训练随机种子（影响 episode 随机切片起点、采样与初始化；用于复现实验）
   seed: 42
   # 策略类型：
-  # - rule / random：基线策略（不训练深度模型，主要由 episodes 控制评估/统计采样量）
+  # - rule / easy_rule / random / milp_mpc / ga_mpc：基线策略（不训练深度模型，主要由 episodes 控制评估/统计采样量）
   # - sequence_rule：序列策略（transformer/mamba），会走深度训练（train_steps/batch_size/update_epochs/lr 生效）
   policy: sequence_rule
   # sequence_rule 的骨干网络：rule / mlp / transformer / mamba
@@ -124,6 +124,7 @@ training:
   sequence_adapter: transformer
   # 序列策略输入窗口长度（单位：步）。15min 数据下：16 步≈4 小时上下文。
   # 常改：越大越能看长期依赖，但训练更慢/更吃显存。
+  # policy=milp_mpc/ga_mpc 时，该字段也作为 MPC planning horizon 的输入（内部会做上限裁剪以控制求解开销）。
   history_steps: 32
   # 每个 episode 的时间切片长度（单位：天），强约束：[7, 30]。
   # - 这不是“训练总天数”，而是每次 rollout 的连续窗口长度。
@@ -145,12 +146,12 @@ training:
   # 设备：auto / cpu / cuda（sequence_rule 生效）。Kaggle 常用 auto 或 cuda。
   device: auto
 
-  # Task-011：可选 SB3 多算法训练（PPO/SAC/TD3/DDPG）
+  # Task-011：可选 SB3 多算法训练（PPO/SAC/TD3/DDPG/DQN）
   # 说明：
   # - CLI 优先：命令行显式传参会覆盖这里的默认值
   # - 若 sb3_enabled=true，则 `train` 命令会优先走 SB3 算法训练（而不是 baseline/sequence trainer）
   sb3_enabled: false
-  # 选择算法：ppo / sac / td3 / ddpg
+  # 选择算法：ppo / sac / td3 / ddpg / dqn
   sb3_algo: sac
   # SB3 policy backbone：mlp / transformer / mamba
   # - mlp：窗口 flatten 后走 MLP（最稳）
@@ -214,7 +215,17 @@ training:
   sb3_ppo_clip_range: 0.2
 
   # ------------------------------
-  # Off-policy 专属超参数（SAC/TD3/DDPG）
+  # DQN 专属超参数（仅 algo=dqn 时真正生效）
+  # - 当前默认采用论文风格的 rule-based discrete action（rb_v1）
+  # ------------------------------
+  sb3_dqn_action_mode: rb_v1
+  sb3_dqn_target_update_interval: 1000
+  sb3_dqn_exploration_fraction: 0.3
+  sb3_dqn_exploration_initial_eps: 1.0
+  sb3_dqn_exploration_final_eps: 0.05
+
+  # ------------------------------
+  # Off-policy 通用超参数（SAC/TD3/DDPG/DQN）
   # ------------------------------
 
   # replay buffer 在开始学习前的随机探索步数（learning_starts）
@@ -228,7 +239,7 @@ training:
   sb3_tau: 0.005
   # 动作噪声标准差（主要用于 TD3/DDPG 的探索；SAC 也可作为额外噪声项）
   sb3_action_noise_std: 0.1
-  # Off-policy replay buffer（SAC/TD3/DDPG）。窗口观测 + n_envs>1 时默认 1e6 非常容易 OOM。
+  # Off-policy replay buffer（SAC/TD3/DDPG/DQN）。窗口观测 + n_envs>1 时默认 1e6 非常容易 OOM。
   sb3_buffer_size: 50000
   # 开启 replay buffer 内存优化（减少 next_obs 存储）。推荐保持开启。
   sb3_optimize_memory_usage: true

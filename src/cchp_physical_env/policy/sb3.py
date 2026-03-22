@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -79,7 +79,7 @@ OBS_KEYS: tuple[str, ...] = (
 def _require_torch() -> None:
     if torch is None:  # pragma: no cover
         raise ModuleNotFoundError(
-            "未检测到 torch。SAC/TD3/DDPG 训练需要 PyTorch。\n"
+            "未检测到 torch。PPO/SAC/TD3/DDPG/DQN 训练需要 PyTorch。\n"
             "建议先安装 PyTorch（按本机 CUDA/CPU 版本选择）。"
         )
 
@@ -110,7 +110,7 @@ def _require_sb3_modules():
     try:
         import gymnasium as gym
         from gymnasium import spaces
-        from stable_baselines3 import DDPG, PPO, SAC, TD3
+        from stable_baselines3 import DDPG, DQN, PPO, SAC, TD3
         from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
     except ModuleNotFoundError as error:  # pragma: no cover
         raise ModuleNotFoundError(
@@ -120,7 +120,7 @@ def _require_sb3_modules():
             "  uv pip install stable-baselines3 gymnasium\n"
             "然后再运行 sb3-train/sb3-eval。"
         ) from error
-    return gym, spaces, PPO, SAC, TD3, DDPG, DummyVecEnv, VecNormalize
+    return gym, spaces, PPO, SAC, TD3, DDPG, DQN, DummyVecEnv, VecNormalize
 
 
 def _timestamped_run_dir(
@@ -264,6 +264,144 @@ def _action_dict_to_vector(action_dict: Mapping[str, float]) -> np.ndarray:
 
 
 @dataclass(slots=True)
+class RuleBasedDiscreteActionMapper:
+    env_config: EnvConfig
+    train_statistics: dict
+    action_mode: str = "rb_v1"
+    _rule_policy: Any = field(init=False, repr=False)
+    _easy_rule_policy: Any = field(init=False, repr=False)
+    _action_labels: tuple[str, ...] = field(
+        init=False,
+        repr=False,
+        default=(
+            "easy_rule",
+            "easy_gt_off",
+            "easy_gt_mid",
+            "easy_gt_high",
+            "easy_bes_charge",
+            "easy_bes_discharge",
+            "rule",
+            "rule_gt_off",
+            "rule_gt_mid",
+            "rule_bes_charge",
+            "rule_bes_discharge",
+            "rule_boiler_boost",
+            "rule_ech_only",
+            "rule_abs_prefer",
+            "safety_backup",
+            "tes_discharge",
+        ),
+    )
+
+    def __post_init__(self) -> None:
+        normalized_mode = str(self.action_mode).strip().lower()
+        if normalized_mode != "rb_v1":
+            raise ValueError("DQN 离散动作模式当前仅支持 rb_v1。")
+        self.action_mode = normalized_mode
+        from ..pipeline.runner import EasyRulePolicy, RulePolicy
+
+        self._rule_policy = RulePolicy(
+            train_statistics=self.train_statistics,
+            p_gt_cap_mw=float(self.env_config.p_gt_cap_mw),
+            q_ech_cap_mw=float(self.env_config.q_ech_cap_mw),
+        )
+        self._easy_rule_policy = EasyRulePolicy(
+            p_gt_cap_mw=float(self.env_config.p_gt_cap_mw),
+            q_boiler_cap_mw=float(self.env_config.q_boiler_cap_mw),
+            q_ech_cap_mw=float(self.env_config.q_ech_cap_mw),
+        )
+
+    @property
+    def action_labels(self) -> tuple[str, ...]:
+        return self._action_labels
+
+    @property
+    def action_count(self) -> int:
+        return int(len(self._action_labels))
+
+    def expert_prefill_action(self, observation: Mapping[str, float]) -> int:
+        del observation
+        return 0
+
+    def _gt_action_from_mw(self, p_gt_target_mw: float) -> float:
+        cap = max(1e-6, float(self.env_config.p_gt_cap_mw))
+        normalized = 2.0 * (float(p_gt_target_mw) / cap) - 1.0
+        return float(np.clip(normalized, -1.0, 1.0))
+
+    def _boiler_follow(self, observation: Mapping[str, float]) -> float:
+        qh_dem = float(observation.get("qh_dem_mw", 0.0))
+        return float(np.clip(qh_dem / max(1e-6, float(self.env_config.q_boiler_cap_mw)), 0.0, 1.0))
+
+    def _ech_follow(self, observation: Mapping[str, float]) -> float:
+        qc_dem = float(observation.get("qc_dem_mw", 0.0))
+        return float(np.clip(qc_dem / max(1e-6, float(self.env_config.q_ech_cap_mw)), 0.0, 1.0))
+
+    def _abs_prefer(self, action: dict[str, float], observation: Mapping[str, float]) -> None:
+        drive_margin_k = float(observation.get("abs_drive_margin_k", 0.0))
+        if drive_margin_k <= 0.0:
+            action["u_abs"] = 0.0
+            action["u_ech"] = self._ech_follow(observation)
+            return
+        qc_dem = float(observation.get("qc_dem_mw", 0.0))
+        q_abs_cool_cap = max(1e-6, float(self.env_config.q_abs_cool_cap_mw))
+        action["u_abs"] = float(np.clip(max(0.35, qc_dem / q_abs_cool_cap), 0.0, 1.0))
+        action["u_ech"] = float(min(float(action.get("u_ech", 0.0)), 0.25))
+
+    def decode(self, action: Any, observation: Mapping[str, float]) -> dict[str, float]:
+        action_index = int(np.asarray(action).reshape(-1)[0])
+        if action_index < 0 or action_index >= self.action_count:
+            raise ValueError(f"DQN 离散动作索引越界: {action_index}")
+        label = self._action_labels[action_index]
+
+        if label.startswith("easy_"):
+            decoded = dict(self._easy_rule_policy.act(dict(observation)))
+        elif label == "safety_backup":
+            decoded = {
+                "u_gt": -1.0,
+                "u_bes": 0.0,
+                "u_boiler": self._boiler_follow(observation),
+                "u_abs": 0.0,
+                "u_ech": self._ech_follow(observation),
+                "u_tes": 0.0,
+            }
+        elif label == "tes_discharge":
+            decoded = dict(self._rule_policy.act(dict(observation)))
+        else:
+            decoded = dict(self._rule_policy.act(dict(observation)))
+
+        if label == "easy_gt_off" or label == "rule_gt_off":
+            decoded["u_gt"] = -1.0
+        elif label == "easy_gt_mid" or label == "rule_gt_mid":
+            decoded["u_gt"] = self._gt_action_from_mw(0.5 * float(self.env_config.p_gt_cap_mw))
+        elif label == "easy_gt_high":
+            decoded["u_gt"] = self._gt_action_from_mw(0.85 * float(self.env_config.p_gt_cap_mw))
+
+        if label == "easy_bes_charge" or label == "rule_bes_charge":
+            decoded["u_bes"] = -0.8
+        elif label == "easy_bes_discharge" or label == "rule_bes_discharge":
+            decoded["u_bes"] = 0.8
+
+        if label == "rule_boiler_boost":
+            decoded["u_boiler"] = max(float(decoded.get("u_boiler", 0.0)), max(0.35, self._boiler_follow(observation)))
+        elif label == "rule_ech_only":
+            decoded["u_abs"] = 0.0
+            decoded["u_ech"] = self._ech_follow(observation)
+        elif label == "rule_abs_prefer":
+            self._abs_prefer(decoded, observation)
+        elif label == "tes_discharge":
+            e_tes = float(observation.get("e_tes_mwh", 0.0))
+            decoded["u_tes"] = 0.6 if e_tes > 0.25 * float(self.env_config.e_tes_cap_mwh) else 0.0
+
+        decoded["u_gt"] = float(np.clip(decoded.get("u_gt", 0.0), -1.0, 1.0))
+        decoded["u_bes"] = float(np.clip(decoded.get("u_bes", 0.0), -1.0, 1.0))
+        decoded["u_boiler"] = float(np.clip(decoded.get("u_boiler", 0.0), 0.0, 1.0))
+        decoded["u_abs"] = float(np.clip(decoded.get("u_abs", 0.0), 0.0, 1.0))
+        decoded["u_ech"] = float(np.clip(decoded.get("u_ech", 0.0), 0.0, 1.0))
+        decoded["u_tes"] = float(np.clip(decoded.get("u_tes", 0.0), -1.0, 1.0))
+        return decoded
+
+
+@dataclass(slots=True)
 class SB3TrainConfig:
     algo: str
     backbone: str = "mlp"
@@ -293,6 +431,11 @@ class SB3TrainConfig:
     ppo_gae_lambda: float = 0.95
     ppo_ent_coef: float = 0.0
     ppo_clip_range: float = 0.2
+    dqn_action_mode: str = "rb_v1"
+    dqn_target_update_interval: int = 1_000
+    dqn_exploration_fraction: float = 0.3
+    dqn_exploration_initial_eps: float = 1.0
+    dqn_exploration_final_eps: float = 0.05
     learning_starts: int = 5_000
     train_freq: int = 1
     gradient_steps: int = 1
@@ -305,8 +448,8 @@ class SB3TrainConfig:
 
     def __post_init__(self) -> None:
         self.algo = str(self.algo).strip().lower()
-        if self.algo not in {"ppo", "sac", "td3", "ddpg"}:
-            raise ValueError("sb3 algo 仅支持 ppo/sac/td3/ddpg。")
+        if self.algo not in {"ppo", "sac", "td3", "ddpg", "dqn"}:
+            raise ValueError("sb3 algo 仅支持 ppo/sac/td3/ddpg/dqn。")
         self.backbone = str(self.backbone).strip().lower()
         if self.backbone not in {"mlp", "transformer", "mamba"}:
             raise ValueError("sb3 backbone 仅支持 mlp/transformer/mamba。")
@@ -385,6 +528,19 @@ class SB3TrainConfig:
         self.ppo_clip_range = float(self.ppo_clip_range)
         if self.ppo_clip_range <= 0.0:
             raise ValueError("ppo_clip_range 必须 > 0。")
+        self.dqn_action_mode = str(self.dqn_action_mode).strip().lower()
+        if self.dqn_action_mode != "rb_v1":
+            raise ValueError("dqn_action_mode 当前仅支持 rb_v1。")
+        self.dqn_target_update_interval = int(self.dqn_target_update_interval)
+        if self.dqn_target_update_interval <= 0:
+            raise ValueError("dqn_target_update_interval 必须 > 0。")
+        self.dqn_exploration_fraction = float(self.dqn_exploration_fraction)
+        if not (0.0 < self.dqn_exploration_fraction <= 1.0):
+            raise ValueError("dqn_exploration_fraction 必须在 (0,1]。")
+        self.dqn_exploration_initial_eps = float(self.dqn_exploration_initial_eps)
+        self.dqn_exploration_final_eps = float(self.dqn_exploration_final_eps)
+        if not (0.0 <= self.dqn_exploration_final_eps <= self.dqn_exploration_initial_eps <= 1.0):
+            raise ValueError("DQN epsilon 参数必须满足 0 <= final <= initial <= 1。")
         self.learning_starts = int(self.learning_starts)
         if self.learning_starts < 0:
             raise ValueError("learning_starts 必须 >= 0。")
@@ -410,15 +566,26 @@ class SB3TrainConfig:
         self.device = str(self.device).strip().lower()
 
 
-def _build_spaces(*, history_steps: int, obs_dim: int):
+def _build_spaces(
+    *,
+    history_steps: int,
+    obs_dim: int,
+    algo: str,
+    discrete_action_count: int = 0,
+):
     _, spaces, *_ = _require_sb3_modules()
-    # action: [u_gt,u_bes,u_boiler,u_abs,u_ech,u_tes]
-    action_space = spaces.Box(
-        low=np.asarray([-1.0, -1.0, 0.0, 0.0, 0.0, -1.0], dtype=np.float32),
-        high=np.asarray([1.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=np.float32),
-        shape=(6,),
-        dtype=np.float32,
-    )
+    if str(algo).strip().lower() == "dqn":
+        if int(discrete_action_count) <= 1:
+            raise ValueError("DQN 离散动作数量必须 > 1。")
+        action_space = spaces.Discrete(int(discrete_action_count))
+    else:
+        # action: [u_gt,u_bes,u_boiler,u_abs,u_ech,u_tes]
+        action_space = spaces.Box(
+            low=np.asarray([-1.0, -1.0, 0.0, 0.0, 0.0, -1.0], dtype=np.float32),
+            high=np.asarray([1.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=np.float32),
+            shape=(6,),
+            dtype=np.float32,
+        )
     history_steps_int = int(history_steps)
     if history_steps_int <= 0:
         raise ValueError("history_steps 必须 > 0。")
@@ -447,12 +614,17 @@ def make_train_env_factory(
     history_steps: int,
     observation_keys: tuple[str, ...],
     normalizer: ObservationAffineNormalizer | None,
+    algo: str = "ppo",
+    discrete_action_mapper: RuleBasedDiscreteActionMapper | None = None,
     fixed_episode_df: pd.DataFrame | None = None,
     fixed_episode_dfs: tuple[pd.DataFrame, ...] | None = None,
 ) -> Callable[[], Any]:
     gym, *_ = _require_sb3_modules()
     observation_space, action_space = _build_spaces(
-        history_steps=history_steps, obs_dim=len(observation_keys)
+        history_steps=history_steps,
+        obs_dim=len(observation_keys),
+        algo=algo,
+        discrete_action_count=0 if discrete_action_mapper is None else discrete_action_mapper.action_count,
     )
 
     class _CCHPSB3TrainEnv(gym.Env):
@@ -462,6 +634,7 @@ def make_train_env_factory(
             super().__init__()
             self.observation_space = observation_space
             self.action_space = action_space
+            self.discrete_action_mapper = discrete_action_mapper
             self.rng = np.random.default_rng(seed)
             self.fixed_episode_dfs = None
             self.fixed_episode_cursor = 0
@@ -509,7 +682,10 @@ def make_train_env_factory(
         def step(self, action):
             if self.observation is None:
                 raise RuntimeError("环境未 reset。")
-            action_dict = _action_vector_to_env_action(action)
+            if self.discrete_action_mapper is None:
+                action_dict = _action_vector_to_env_action(action)
+            else:
+                action_dict = self.discrete_action_mapper.decode(action, self.observation)
             next_obs, reward, terminated, truncated, info = self.env.step(action_dict)
             self.observation = next_obs
             vector = _observation_dict_to_vector(next_obs, keys=observation_keys)
@@ -529,6 +705,8 @@ def make_eval_env_factory(
     history_steps: int,
     observation_keys: tuple[str, ...],
     normalizer: ObservationAffineNormalizer | None,
+    algo: str = "ppo",
+    discrete_action_mapper: RuleBasedDiscreteActionMapper | None = None,
     eval_episode_dfs: tuple[pd.DataFrame, ...] | None = None,
 ) -> Callable[[], Any]:
     if eval_episode_dfs:
@@ -546,6 +724,8 @@ def make_eval_env_factory(
         history_steps=history_steps,
         observation_keys=observation_keys,
         normalizer=normalizer,
+        algo=algo,
+        discrete_action_mapper=discrete_action_mapper,
         fixed_episode_df=None if eval_df is None else eval_df.reset_index(drop=True),
         fixed_episode_dfs=eval_episode_dfs,
     )
@@ -1013,6 +1193,7 @@ def _prefill_offpolicy_replay_buffer(
     config: SB3TrainConfig,
     observation_keys: tuple[str, ...],
     DummyVecEnv: Any,
+    discrete_action_mapper: RuleBasedDiscreteActionMapper | None = None,
 ) -> dict[str, Any]:
     from ..pipeline.runner import EasyRulePolicy
 
@@ -1037,6 +1218,8 @@ def _prefill_offpolicy_replay_buffer(
             history_steps=config.history_steps,
             observation_keys=observation_keys,
             normalizer=None,
+            algo=config.algo,
+            discrete_action_mapper=discrete_action_mapper,
         )
         for idx in range(int(config.n_envs))
     ]
@@ -1057,15 +1240,30 @@ def _prefill_offpolicy_replay_buffer(
     episode_resets = 0
     try:
         while collected_steps < target_steps:
-            action_batch = np.asarray(
-                [
-                    _action_dict_to_vector(
-                        easy_rule.act(getattr(carrier_env, "observation"))
-                    )
-                    for carrier_env in carrier_envs
-                ],
-                dtype=np.float32,
-            )
+            if config.algo == "dqn":
+                action_batch = np.asarray(
+                    [
+                        int(
+                            getattr(carrier_env, "discrete_action_mapper").expert_prefill_action(
+                                getattr(carrier_env, "observation")
+                            )
+                        )
+                        for carrier_env in carrier_envs
+                    ],
+                    dtype=np.int64,
+                )
+                replay_actions = action_batch.reshape(-1, 1)
+            else:
+                action_batch = np.asarray(
+                    [
+                        _action_dict_to_vector(
+                            easy_rule.act(getattr(carrier_env, "observation"))
+                        )
+                        for carrier_env in carrier_envs
+                    ],
+                    dtype=np.float32,
+                )
+                replay_actions = action_batch
             next_observation, rewards, dones, infos = prefill_env.step(action_batch)
             next_observation = np.asarray(next_observation, dtype=np.float32)
             rewards_array = np.asarray(rewards, dtype=np.float32).reshape(-1)
@@ -1078,7 +1276,7 @@ def _prefill_offpolicy_replay_buffer(
             model.replay_buffer.add(
                 observation,
                 stored_next_obs,
-                action_batch,
+                replay_actions,
                 rewards_array,
                 dones_array,
                 list(infos),
@@ -1255,7 +1453,7 @@ def train_sb3_policy(
     config: SB3TrainConfig,
     run_root: str | Path = "runs",
 ) -> dict[str, Any]:
-    gym, _, PPO, SAC, TD3, DDPG, DummyVecEnv, VecNormalize = _require_sb3_modules()
+    gym, _, PPO, SAC, TD3, DDPG, DQN, DummyVecEnv, VecNormalize = _require_sb3_modules()
     del gym
 
     try:
@@ -1294,6 +1492,13 @@ def train_sb3_policy(
         encoding="utf-8",
     )
     observation_keys = tuple(OBS_KEYS)
+    discrete_action_mapper = None
+    if config.algo == "dqn":
+        discrete_action_mapper = RuleBasedDiscreteActionMapper(
+            env_config=env_config,
+            train_statistics=train_statistics,
+            action_mode=config.dqn_action_mode,
+        )
     eval_window_pool = _build_eval_window_pool(
         train_df=train_df,
         env_config=env_config,
@@ -1353,6 +1558,8 @@ def train_sb3_policy(
             history_steps=config.history_steps,
             observation_keys=observation_keys,
             normalizer=None,
+            algo=config.algo,
+            discrete_action_mapper=discrete_action_mapper,
         )
         for idx in range(config.n_envs)
     ]
@@ -1380,7 +1587,7 @@ def train_sb3_policy(
             gamma=float(config.gamma),
         )
 
-    algo_cls = {"ppo": PPO, "sac": SAC, "td3": TD3, "ddpg": DDPG}[config.algo]
+    algo_cls = {"ppo": PPO, "sac": SAC, "td3": TD3, "ddpg": DDPG, "dqn": DQN}[config.algo]
     policy_kwargs = _sb3_policy_kwargs_for_backbone(backbone=config.backbone)
     policy_kwargs_serializable: dict[str, Any] = {}
     if policy_kwargs:
@@ -1402,6 +1609,15 @@ def train_sb3_policy(
                 "clip_range": float(config.ppo_clip_range),
             }
         )
+    if config.algo == "dqn":
+        algo_kwargs["buffer_size"] = int(config.buffer_size)
+        algo_kwargs["learning_starts"] = int(config.learning_starts)
+        algo_kwargs["train_freq"] = (int(config.train_freq), "step")
+        algo_kwargs["gradient_steps"] = int(config.gradient_steps)
+        algo_kwargs["target_update_interval"] = int(config.dqn_target_update_interval)
+        algo_kwargs["exploration_fraction"] = float(config.dqn_exploration_fraction)
+        algo_kwargs["exploration_initial_eps"] = float(config.dqn_exploration_initial_eps)
+        algo_kwargs["exploration_final_eps"] = float(config.dqn_exploration_final_eps)
     if config.algo in {"sac", "td3", "ddpg"}:
         algo_kwargs["buffer_size"] = int(config.buffer_size)
         algo_kwargs["learning_starts"] = int(config.learning_starts)
@@ -1478,7 +1694,7 @@ def train_sb3_policy(
                 if warm_vec_env is not None:
                     warm_vec_env.close()
     if bool(config.offpolicy_prefill_enabled):
-        if config.algo not in {"sac", "td3", "ddpg"}:
+        if config.algo not in {"sac", "td3", "ddpg", "dqn"}:
             offpolicy_prefill_summary["status"] = "skipped_non_offpolicy"
         else:
             offpolicy_prefill_summary = _prefill_offpolicy_replay_buffer(
@@ -1488,6 +1704,7 @@ def train_sb3_policy(
                 config=config,
                 observation_keys=observation_keys,
                 DummyVecEnv=DummyVecEnv,
+                discrete_action_mapper=discrete_action_mapper,
             )
 
     eval_factory = make_eval_env_factory(
@@ -1497,6 +1714,8 @@ def train_sb3_policy(
         history_steps=config.history_steps,
         observation_keys=observation_keys,
         normalizer=None,
+        algo=config.algo,
+        discrete_action_mapper=discrete_action_mapper,
         eval_episode_dfs=eval_episode_dfs,
     )
 
@@ -1564,6 +1783,16 @@ def train_sb3_policy(
             "buffer_size": int(config.buffer_size),
             "optimize_memory_usage": bool(config.optimize_memory_usage),
         },
+        "dqn_hyperparameters": {
+            "action_mode": str(config.dqn_action_mode),
+            "target_update_interval": int(config.dqn_target_update_interval),
+            "exploration_fraction": float(config.dqn_exploration_fraction),
+            "exploration_initial_eps": float(config.dqn_exploration_initial_eps),
+            "exploration_final_eps": float(config.dqn_exploration_final_eps),
+        },
+        "dqn_action_labels": []
+        if discrete_action_mapper is None
+        else list(discrete_action_mapper.action_labels),
         "buffer_size": int(config.buffer_size),
         "optimize_memory_usage": bool(config.optimize_memory_usage),
         "device": str(config.device),
@@ -1852,7 +2081,7 @@ def evaluate_sb3_policy(
     model_source: str = "best",
     device: str = "auto",
 ) -> dict[str, Any]:
-    _, _, PPO, SAC, TD3, DDPG, DummyVecEnv, VecNormalize = _require_sb3_modules()
+    _, _, PPO, SAC, TD3, DDPG, DQN, DummyVecEnv, VecNormalize = _require_sb3_modules()
 
     year = _extract_year(eval_df)
     if year != EVAL_YEAR:
@@ -1864,10 +2093,10 @@ def evaluate_sb3_policy(
         raise ValueError("checkpoint_json 不是 sb3_policy。")
 
     algo = str(ckpt.get("algo", "")).strip().lower()
-    if algo not in {"ppo", "sac", "td3", "ddpg"}:
+    if algo not in {"ppo", "sac", "td3", "ddpg", "dqn"}:
         raise ValueError(f"未知 algo: {algo}")
 
-    algo_cls = {"ppo": PPO, "sac": SAC, "td3": TD3, "ddpg": DDPG}[algo]
+    algo_cls = {"ppo": PPO, "sac": SAC, "td3": TD3, "ddpg": DDPG, "dqn": DQN}[algo]
     resolved_model_path, resolved_vecnormalize_path, resolved_model_source = _resolve_sb3_eval_artifacts(
         checkpoint_json=checkpoint_json_path,
         checkpoint_payload=ckpt,
@@ -1898,6 +2127,27 @@ def evaluate_sb3_policy(
             env_config=env_config,
             keys=observation_keys,
         )
+    elif algo == "dqn":
+        train_statistics_path = ckpt.get("train_statistics_path")
+        if not train_statistics_path:
+            raise ValueError("DQN checkpoint 缺少 train_statistics_path，无法重建离散动作映射。")
+        resolved_train_statistics_path = _resolve_checkpoint_sidecar_path(
+            checkpoint_json=checkpoint_json_path,
+            path_value=str(train_statistics_path),
+            artifact_label="SB3 训练统计文件（train_statistics.json）",
+        )
+        train_statistics = json.loads(resolved_train_statistics_path.read_text(encoding="utf-8"))
+    else:
+        train_statistics = None
+
+    discrete_action_mapper = None
+    if algo == "dqn":
+        dqn_hparams = ckpt.get("dqn_hyperparameters") or {}
+        discrete_action_mapper = RuleBasedDiscreteActionMapper(
+            env_config=env_config,
+            train_statistics=train_statistics if train_statistics is not None else {},
+            action_mode=str(dqn_hparams.get("action_mode", "rb_v1")),
+        )
 
     output_run_dir = Path(run_dir)
     (output_run_dir / "eval").mkdir(parents=True, exist_ok=True)
@@ -1911,6 +2161,8 @@ def evaluate_sb3_policy(
                 history_steps=history_steps,
                 observation_keys=observation_keys,
                 normalizer=normalizer,
+                algo=algo,
+                discrete_action_mapper=discrete_action_mapper,
             )
         ]
     )
@@ -1938,10 +2190,13 @@ def evaluate_sb3_policy(
         log_row = {
             key: value
             for key, value in info.items()
-            if key not in {"violation_flags", "diagnostic_flags", "terminal_observation"}
+            if key not in {"violation_flags", "diagnostic_flags", "state_diagnostic_flags", "terminal_observation"}
         }
         log_row["violation_flags_json"] = json.dumps(info.get("violation_flags", {}), ensure_ascii=False)
         log_row["diagnostic_flags_json"] = json.dumps(info.get("diagnostic_flags", {}), ensure_ascii=False)
+        log_row["state_diagnostic_flags_json"] = json.dumps(
+            info.get("state_diagnostic_flags", {}), ensure_ascii=False
+        )
         step_rows.append(log_row)
 
     fallback_env = getattr(base_eval_env.envs[0], "env", base_eval_env.envs[0])

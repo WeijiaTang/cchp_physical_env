@@ -29,7 +29,7 @@ Observation 语义：
 
 常见坑：
 - reward = -total_cost（取负值，RL 最大化 reward 等价于最小化成本）
-- violation_rate 可能被吸收式制冷机驱动温度标志影响，需检查诊断
+- diagnostic_rate 仅统计控制相关诊断；环境/工况状态单独记入 state_diagnostic_rate
 - 外送电价格为 sell_price_ratio * price_e，且有 cap 和额外惩罚
 """
 from __future__ import annotations
@@ -73,6 +73,9 @@ def _clip(value: float, low: float, high: float) -> float:
 def _sigmoid(value: float) -> float:
     clipped = float(np.clip(value, -60.0, 60.0))
     return float(1.0 / (1.0 + np.exp(-clipped)))
+
+
+GT_MIN_OUTPUT_EPS_MW = 1e-6
 
 
 @dataclass(slots=True)
@@ -393,7 +396,11 @@ class CCHPPhysicalEnv:
         gt_action_smoothing_applied = False
         gt_min_on_enforced = False
         gt_min_off_enforced = False
-        p_gt_target_below_min = 0.0 < p_gt_requested_mw_raw < float(self.config.gt_min_output_mw)
+        gt_min_output_mw = float(self.config.gt_min_output_mw)
+        p_gt_target_below_min = (
+            p_gt_requested_mw_raw > GT_MIN_OUTPUT_EPS_MW
+            and p_gt_requested_mw_raw < (gt_min_output_mw - GT_MIN_OUTPUT_EPS_MW)
+        )
 
         if bool(self.config.gt_action_smoothing_enabled):
             ramp_limit = float(max(0.0, self.config.gt_ramp_mw_per_step))
@@ -709,9 +716,11 @@ class CCHPPhysicalEnv:
         # 仅 reward_only 下记录 heat_overcommit：physics_in_loop 已按分配策略避免该情况。
         violation_flags["heat_overcommit_reward_only"] = (not is_physics_mode) and heat_overcommit_flag
 
-        diagnostic_flags: dict[str, bool] = {
+        state_diagnostic_flags: dict[str, bool] = {
             "abs_drive_temp_low_state": t_hot_k < float(self.abs_chiller.design.t_drive_min_k),
             "abs_deadzone_active": bool(action_debug["abs_deadzone_active"]),
+        }
+        diagnostic_flags: dict[str, bool] = {
             "invalid_abs_request": bool(action_debug["invalid_abs_request_flag"]),
             "gt_action_smoothing_applied": bool(action_debug["gt_action_smoothing_applied"]),
             "gt_min_on_enforced": bool(action_debug["gt_min_on_enforced"]),
@@ -864,6 +873,7 @@ class CCHPPhysicalEnv:
             "solver_error": solver_result["solver_error"],
             "violation_flags": violation_flags,
             "diagnostic_flags": diagnostic_flags,
+            "state_diagnostic_flags": state_diagnostic_flags,
             "gt_started": gt_started,
             "boiler_started": boiler_started,
             "ech_started": ech_started,
