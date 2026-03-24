@@ -63,6 +63,10 @@ OBS_KEYS: tuple[str, ...] = (
     "soc_bes",
     "gt_on",
     "gt_state",
+    "gt_on_steps",
+    "gt_off_steps",
+    "gt_min_on_remaining_steps",
+    "gt_min_off_remaining_steps",
     "p_gt_prev_mw",
     "gt_ramp_headroom_up_mw",
     "gt_ramp_headroom_down_mw",
@@ -249,6 +253,21 @@ def _action_vector_to_env_action(action_vector: np.ndarray) -> dict[str, float]:
     }
 
 
+def _action_vector_to_residual_delta(action_vector: np.ndarray) -> dict[str, float]:
+    vector = np.asarray(action_vector, dtype=np.float32).reshape(-1)
+    if vector.shape[0] != 6:
+        raise ValueError(f"残差动作维度不匹配：期望 6，当前 {int(vector.shape[0])}")
+    u_gt, u_bes, u_boiler, u_abs, u_ech, u_tes = (float(item) for item in vector.tolist())
+    return {
+        "u_gt": float(np.clip(u_gt, -1.0, 1.0)),
+        "u_bes": float(np.clip(u_bes, -1.0, 1.0)),
+        "u_boiler": float(np.clip(u_boiler, -1.0, 1.0)),
+        "u_abs": float(np.clip(u_abs, -1.0, 1.0)),
+        "u_ech": float(np.clip(u_ech, -1.0, 1.0)),
+        "u_tes": float(np.clip(u_tes, -1.0, 1.0)),
+    }
+
+
 def _action_dict_to_vector(action_dict: Mapping[str, float]) -> np.ndarray:
     return np.asarray(
         [
@@ -261,6 +280,77 @@ def _action_dict_to_vector(action_dict: Mapping[str, float]) -> np.ndarray:
         ],
         dtype=np.float32,
     )
+
+
+def _clip_env_action_value(action_key: str, value: float) -> float:
+    if action_key in {"u_gt", "u_bes", "u_tes"}:
+        return float(np.clip(value, -1.0, 1.0))
+    return float(np.clip(value, 0.0, 1.0))
+
+
+def _compose_residual_action(
+    *,
+    base_action: Mapping[str, float],
+    delta_action: Mapping[str, float],
+    residual_scale: float,
+) -> tuple[dict[str, float], dict[str, float | bool | str]]:
+    scale = float(max(0.0, residual_scale))
+    composed: dict[str, float] = {}
+    delta_l1 = 0.0
+    base_l1 = 0.0
+    for key in ("u_gt", "u_bes", "u_boiler", "u_abs", "u_ech", "u_tes"):
+        base_value = _clip_env_action_value(key, float(base_action.get(key, 0.0)))
+        delta_value = float(np.clip(delta_action.get(key, 0.0), -1.0, 1.0)) * scale
+        composed[key] = _clip_env_action_value(key, base_value + delta_value)
+        delta_l1 += abs(delta_value)
+        base_l1 += abs(base_value)
+    return composed, {
+        "policy_residual_enabled": True,
+        "policy_residual_scale": float(scale),
+        "policy_residual_delta_l1": float(delta_l1),
+        "policy_base_action_l1": float(base_l1),
+    }
+
+
+def _paper_model_label(
+    *,
+    algo: str,
+    dqn_action_mode: str = "",
+    residual_enabled: bool = False,
+    residual_policy: str = "rule",
+) -> str:
+    normalized_algo = str(algo).strip().lower()
+    if normalized_algo == "dqn" and str(dqn_action_mode).strip().lower() == "rb_v1":
+        return "rbDQN"
+    base_label = normalized_algo.upper()
+    if bool(residual_enabled) and normalized_algo in {"ppo", "sac", "td3", "ddpg"}:
+        residual_prefix = str(residual_policy).strip().lower().replace("-", "_")
+        return f"{base_label}+{residual_prefix}_residual"
+    return base_label
+
+
+def _build_residual_expert_policy(
+    *,
+    policy_name: str,
+    env_config: EnvConfig,
+    train_statistics: dict[str, Any] | None,
+) -> Any:
+    from ..pipeline.runner import EasyRulePolicy, RulePolicy
+
+    normalized = str(policy_name).strip().lower().replace("-", "_")
+    if normalized == "rule":
+        return RulePolicy(
+            train_statistics={} if train_statistics is None else train_statistics,
+            p_gt_cap_mw=float(env_config.p_gt_cap_mw),
+            q_ech_cap_mw=float(env_config.q_ech_cap_mw),
+        )
+    if normalized == "easy_rule":
+        return EasyRulePolicy(
+            p_gt_cap_mw=float(env_config.p_gt_cap_mw),
+            q_boiler_cap_mw=float(env_config.q_boiler_cap_mw),
+            q_ech_cap_mw=float(env_config.q_ech_cap_mw),
+        )
+    raise ValueError("residual_policy 当前仅支持 rule/easy_rule。")
 
 
 @dataclass(slots=True)
@@ -319,9 +409,19 @@ class RuleBasedDiscreteActionMapper:
     def action_count(self) -> int:
         return int(len(self._action_labels))
 
-    def expert_prefill_action(self, observation: Mapping[str, float]) -> int:
+    def expert_prefill_action(
+        self,
+        observation: Mapping[str, float],
+        *,
+        expert_policy: str = "easy_rule",
+    ) -> int:
         del observation
-        return 0
+        normalized = str(expert_policy).strip().lower().replace("-", "_")
+        if normalized == "easy_rule":
+            return int(self._action_labels.index("easy_rule"))
+        if normalized == "rule":
+            return int(self._action_labels.index("rule"))
+        raise ValueError(f"不支持的 DQN prefill expert_policy: {expert_policy}")
 
     def _gt_action_from_mw(self, p_gt_target_mw: float) -> float:
         cap = max(1e-6, float(self.env_config.p_gt_cap_mw))
@@ -421,12 +521,15 @@ class SB3TrainConfig:
     eval_window_seed: int | None = None
     ppo_warm_start_enabled: bool = False
     residual_enabled: bool = False
+    residual_policy: str = "rule"
+    residual_scale: float = 0.35
     ppo_warm_start_samples: int = 16_384
     ppo_warm_start_epochs: int = 4
     ppo_warm_start_batch_size: int = 256
     ppo_warm_start_lr: float = 1e-4
     offpolicy_prefill_enabled: bool = False
     offpolicy_prefill_steps: int = 0
+    offpolicy_prefill_policy: str = "easy_rule"
     ppo_n_steps: int = 2048
     ppo_gae_lambda: float = 0.95
     ppo_ent_coef: float = 0.0
@@ -443,6 +546,10 @@ class SB3TrainConfig:
     action_noise_std: float = 0.1
     buffer_size: int = 50_000
     optimize_memory_usage: bool = True
+    best_gate_enabled: bool = True
+    best_gate_electric_min: float = 1.0
+    best_gate_heat_min: float = 0.999
+    best_gate_cool_min: float = 0.999
     seed: int = 42
     device: str = "auto"
 
@@ -498,8 +605,12 @@ class SB3TrainConfig:
             self.eval_window_seed = int(self.eval_window_seed)
         self.ppo_warm_start_enabled = bool(self.ppo_warm_start_enabled)
         self.residual_enabled = bool(self.residual_enabled)
-        if self.residual_enabled:
-            raise ValueError("residual_enabled 当前尚未实现，请保持 false。")
+        self.residual_policy = str(self.residual_policy).strip().lower().replace("-", "_")
+        if self.residual_policy not in {"rule", "easy_rule"}:
+            raise ValueError("residual_policy 当前仅支持 rule/easy_rule。")
+        self.residual_scale = float(self.residual_scale)
+        if self.residual_scale < 0.0 or self.residual_scale > 1.0:
+            raise ValueError("residual_scale 必须在 [0,1]。")
         self.ppo_warm_start_samples = int(self.ppo_warm_start_samples)
         if self.ppo_warm_start_samples <= 0:
             raise ValueError("ppo_warm_start_samples 必须 > 0。")
@@ -516,6 +627,11 @@ class SB3TrainConfig:
         self.offpolicy_prefill_steps = int(self.offpolicy_prefill_steps)
         if self.offpolicy_prefill_steps < 0:
             raise ValueError("offpolicy_prefill_steps 必须 >= 0。")
+        self.offpolicy_prefill_policy = (
+            str(self.offpolicy_prefill_policy).strip().lower().replace("-", "_")
+        )
+        if self.offpolicy_prefill_policy not in {"easy_rule", "rule"}:
+            raise ValueError("offpolicy_prefill_policy 当前仅支持 easy_rule/rule。")
         self.ppo_n_steps = int(self.ppo_n_steps)
         if self.ppo_n_steps <= 0:
             raise ValueError("ppo_n_steps 必须 > 0。")
@@ -562,6 +678,17 @@ class SB3TrainConfig:
         if self.buffer_size < self.batch_size:
             raise ValueError("buffer_size 必须 >= batch_size（否则 replay buffer 采样无意义）。")
         self.optimize_memory_usage = bool(self.optimize_memory_usage)
+        self.best_gate_enabled = bool(self.best_gate_enabled)
+        self.best_gate_electric_min = float(self.best_gate_electric_min)
+        self.best_gate_heat_min = float(self.best_gate_heat_min)
+        self.best_gate_cool_min = float(self.best_gate_cool_min)
+        for field_name, value in (
+            ("best_gate_electric_min", self.best_gate_electric_min),
+            ("best_gate_heat_min", self.best_gate_heat_min),
+            ("best_gate_cool_min", self.best_gate_cool_min),
+        ):
+            if value < 0.0 or value > 1.0:
+                raise ValueError(f"{field_name} 必须在 [0,1]。")
         self.seed = int(self.seed)
         self.device = str(self.device).strip().lower()
 
@@ -572,6 +699,7 @@ def _build_spaces(
     obs_dim: int,
     algo: str,
     discrete_action_count: int = 0,
+    residual_enabled: bool = False,
 ):
     _, spaces, *_ = _require_sb3_modules()
     if str(algo).strip().lower() == "dqn":
@@ -579,13 +707,21 @@ def _build_spaces(
             raise ValueError("DQN 离散动作数量必须 > 1。")
         action_space = spaces.Discrete(int(discrete_action_count))
     else:
-        # action: [u_gt,u_bes,u_boiler,u_abs,u_ech,u_tes]
-        action_space = spaces.Box(
-            low=np.asarray([-1.0, -1.0, 0.0, 0.0, 0.0, -1.0], dtype=np.float32),
-            high=np.asarray([1.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=np.float32),
-            shape=(6,),
-            dtype=np.float32,
-        )
+        if bool(residual_enabled):
+            action_space = spaces.Box(
+                low=np.asarray([-1.0, -1.0, -1.0, -1.0, -1.0, -1.0], dtype=np.float32),
+                high=np.asarray([1.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=np.float32),
+                shape=(6,),
+                dtype=np.float32,
+            )
+        else:
+            # action: [u_gt,u_bes,u_boiler,u_abs,u_ech,u_tes]
+            action_space = spaces.Box(
+                low=np.asarray([-1.0, -1.0, 0.0, 0.0, 0.0, -1.0], dtype=np.float32),
+                high=np.asarray([1.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=np.float32),
+                shape=(6,),
+                dtype=np.float32,
+            )
     history_steps_int = int(history_steps)
     if history_steps_int <= 0:
         raise ValueError("history_steps 必须 > 0。")
@@ -616,15 +752,20 @@ def make_train_env_factory(
     normalizer: ObservationAffineNormalizer | None,
     algo: str = "ppo",
     discrete_action_mapper: RuleBasedDiscreteActionMapper | None = None,
+    residual_policy_name: str | None = None,
+    residual_scale: float = 0.0,
+    train_statistics: dict[str, Any] | None = None,
     fixed_episode_df: pd.DataFrame | None = None,
     fixed_episode_dfs: tuple[pd.DataFrame, ...] | None = None,
 ) -> Callable[[], Any]:
     gym, *_ = _require_sb3_modules()
+    residual_active = bool(residual_policy_name) and discrete_action_mapper is None
     observation_space, action_space = _build_spaces(
         history_steps=history_steps,
         obs_dim=len(observation_keys),
         algo=algo,
         discrete_action_count=0 if discrete_action_mapper is None else discrete_action_mapper.action_count,
+        residual_enabled=residual_active,
     )
 
     class _CCHPSB3TrainEnv(gym.Env):
@@ -635,6 +776,15 @@ def make_train_env_factory(
             self.observation_space = observation_space
             self.action_space = action_space
             self.discrete_action_mapper = discrete_action_mapper
+            self.residual_policy_name = None if residual_policy_name is None else str(residual_policy_name)
+            self.residual_scale = float(max(0.0, residual_scale))
+            self.residual_policy = None
+            if residual_active:
+                self.residual_policy = _build_residual_expert_policy(
+                    policy_name=str(residual_policy_name),
+                    env_config=env_config,
+                    train_statistics=train_statistics,
+                )
             self.rng = np.random.default_rng(seed)
             self.fixed_episode_dfs = None
             self.fixed_episode_cursor = 0
@@ -682,11 +832,25 @@ def make_train_env_factory(
         def step(self, action):
             if self.observation is None:
                 raise RuntimeError("环境未 reset。")
+            residual_debug: dict[str, float | bool | str] = {}
             if self.discrete_action_mapper is None:
-                action_dict = _action_vector_to_env_action(action)
+                if self.residual_policy is None:
+                    action_dict = _action_vector_to_env_action(action)
+                else:
+                    base_action = self.residual_policy.act(self.observation)
+                    delta_action = _action_vector_to_residual_delta(action)
+                    action_dict, residual_debug = _compose_residual_action(
+                        base_action=base_action,
+                        delta_action=delta_action,
+                        residual_scale=self.residual_scale,
+                    )
+                    residual_debug["policy_residual_policy"] = str(self.residual_policy_name)
             else:
                 action_dict = self.discrete_action_mapper.decode(action, self.observation)
             next_obs, reward, terminated, truncated, info = self.env.step(action_dict)
+            if residual_debug:
+                info = dict(info)
+                info.update(residual_debug)
             self.observation = next_obs
             vector = _observation_dict_to_vector(next_obs, keys=observation_keys)
             if normalizer is not None:
@@ -707,6 +871,9 @@ def make_eval_env_factory(
     normalizer: ObservationAffineNormalizer | None,
     algo: str = "ppo",
     discrete_action_mapper: RuleBasedDiscreteActionMapper | None = None,
+    residual_policy_name: str | None = None,
+    residual_scale: float = 0.0,
+    train_statistics: dict[str, Any] | None = None,
     eval_episode_dfs: tuple[pd.DataFrame, ...] | None = None,
 ) -> Callable[[], Any]:
     if eval_episode_dfs:
@@ -726,6 +893,9 @@ def make_eval_env_factory(
         normalizer=normalizer,
         algo=algo,
         discrete_action_mapper=discrete_action_mapper,
+        residual_policy_name=residual_policy_name,
+        residual_scale=residual_scale,
+        train_statistics=train_statistics,
         fixed_episode_df=None if eval_df is None else eval_df.reset_index(drop=True),
         fixed_episode_dfs=eval_episode_dfs,
     )
@@ -1019,6 +1189,151 @@ def _copy_vecnormalize_stats(source_env: Any, target_env: Any) -> None:
     _copy_running_mean_std(getattr(source_env, "ret_rms", None), getattr(target_env, "ret_rms", None))
 
 
+def _extract_eval_episode_summary(*, info: Mapping[str, Any] | None, vec_env: Any) -> dict[str, Any]:
+    if isinstance(info, Mapping):
+        raw_summary = info.get("episode_summary")
+        if isinstance(raw_summary, Mapping):
+            return dict(raw_summary)
+    base_env = _get_single_unwrapped_env(vec_env)
+    carrier = getattr(base_env, "env", base_env)
+    kpi = getattr(carrier, "kpi", None)
+    if kpi is None:
+        raise RuntimeError("评估环境缺少 KPI tracker，无法提取 episode_summary。")
+    return dict(kpi.summary())
+
+
+def _aggregate_eval_metrics(
+    *,
+    episode_rewards: list[float],
+    episode_summaries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    reward_array = np.asarray(episode_rewards, dtype=np.float64)
+    total_costs = np.asarray(
+        [float(summary.get("total_cost", 0.0)) for summary in episode_summaries],
+        dtype=np.float64,
+    )
+    heat_reliability = np.asarray(
+        [float((summary.get("reliability") or {}).get("heat", 0.0)) for summary in episode_summaries],
+        dtype=np.float64,
+    )
+    cool_reliability = np.asarray(
+        [float((summary.get("reliability") or {}).get("cooling", 0.0)) for summary in episode_summaries],
+        dtype=np.float64,
+    )
+    electric_reliability = np.asarray(
+        [float((summary.get("reliability") or {}).get("electric", 0.0)) for summary in episode_summaries],
+        dtype=np.float64,
+    )
+    violation_rates = np.asarray(
+        [float(summary.get("violation_rate", 0.0)) for summary in episode_summaries],
+        dtype=np.float64,
+    )
+    unmet_heat = np.asarray(
+        [float((summary.get("unmet_energy_mwh") or {}).get("heat", 0.0)) for summary in episode_summaries],
+        dtype=np.float64,
+    )
+    unmet_cool = np.asarray(
+        [float((summary.get("unmet_energy_mwh") or {}).get("cooling", 0.0)) for summary in episode_summaries],
+        dtype=np.float64,
+    )
+    return {
+        "episodes": int(len(episode_rewards)),
+        "mean_reward": float(reward_array.mean()) if len(reward_array) else float("-inf"),
+        "mean_total_cost": float(total_costs.mean()) if len(total_costs) else float("inf"),
+        "mean_violation_rate": float(violation_rates.mean()) if len(violation_rates) else 0.0,
+        "mean_unmet_heat_mwh": float(unmet_heat.mean()) if len(unmet_heat) else 0.0,
+        "mean_unmet_cool_mwh": float(unmet_cool.mean()) if len(unmet_cool) else 0.0,
+        "reliability_mean": {
+            "electric": float(electric_reliability.mean()) if len(electric_reliability) else 0.0,
+            "heat": float(heat_reliability.mean()) if len(heat_reliability) else 0.0,
+            "cooling": float(cool_reliability.mean()) if len(cool_reliability) else 0.0,
+        },
+        "reliability_min": {
+            "electric": float(electric_reliability.min()) if len(electric_reliability) else 0.0,
+            "heat": float(heat_reliability.min()) if len(heat_reliability) else 0.0,
+            "cooling": float(cool_reliability.min()) if len(cool_reliability) else 0.0,
+        },
+        "episode_rewards": [float(value) for value in reward_array.tolist()],
+        "episode_total_costs": [float(value) for value in total_costs.tolist()],
+        "episode_reliability_heat": [float(value) for value in heat_reliability.tolist()],
+        "episode_reliability_cooling": [float(value) for value in cool_reliability.tolist()],
+        "episode_reliability_electric": [float(value) for value in electric_reliability.tolist()],
+    }
+
+
+def _evaluate_current_policy(
+    *,
+    model: Any,
+    eval_env: Any,
+    n_eval_episodes: int,
+    deterministic: bool = True,
+) -> dict[str, Any]:
+    _reset_eval_window_cursor(eval_env)
+    episode_rewards: list[float] = []
+    episode_summaries: list[dict[str, Any]] = []
+    for _ in range(max(1, int(n_eval_episodes))):
+        observation = eval_env.reset()
+        terminated = False
+        total_reward = 0.0
+        final_info: dict[str, Any] = {}
+        while not terminated:
+            action_vec, _ = model.predict(observation, deterministic=bool(deterministic))
+            observation, rewards, dones, infos = eval_env.step(action_vec)
+            total_reward += float(np.asarray(rewards, dtype=np.float64).reshape(-1)[0])
+            terminated = bool(np.asarray(dones).reshape(-1)[0])
+            final_info = dict(infos[0] if infos else {})
+        episode_rewards.append(float(total_reward))
+        episode_summaries.append(_extract_eval_episode_summary(info=final_info, vec_env=eval_env))
+    aggregated = _aggregate_eval_metrics(
+        episode_rewards=episode_rewards,
+        episode_summaries=episode_summaries,
+    )
+    aggregated["episode_summaries"] = episode_summaries
+    return aggregated
+
+
+def _build_reliability_gate_result(
+    *,
+    metrics: Mapping[str, Any],
+    config: SB3TrainConfig,
+) -> dict[str, Any]:
+    thresholds = {
+        "electric": float(config.best_gate_electric_min),
+        "heat": float(config.best_gate_heat_min),
+        "cooling": float(config.best_gate_cool_min),
+    }
+    if not bool(config.best_gate_enabled):
+        return {
+            "enabled": False,
+            "passed": True,
+            "thresholds": thresholds,
+            "actual": dict(metrics.get("reliability_min", {})),
+            "failed_metrics": [],
+        }
+
+    reliability_min = dict(metrics.get("reliability_min", {}))
+    failed_metrics: list[dict[str, float | str]] = []
+    for key, threshold in thresholds.items():
+        actual = float(reliability_min.get(key, 0.0))
+        if actual + 1e-9 < float(threshold):
+            failed_metrics.append(
+                {
+                    "metric": str(key),
+                    "actual": float(actual),
+                    "threshold": float(threshold),
+                }
+            )
+    return {
+        "enabled": True,
+        "passed": len(failed_metrics) == 0,
+        "thresholds": thresholds,
+        "actual": {
+            key: float(reliability_min.get(key, 0.0)) for key in ("electric", "heat", "cooling")
+        },
+        "failed_metrics": failed_metrics,
+    }
+
+
 def _extract_actor_mean_actions(model: Any, obs_tensor: Tensor) -> Tensor:
     distribution = model.policy.get_distribution(obs_tensor)
     inner_distribution = getattr(distribution, "distribution", None)
@@ -1191,11 +1506,12 @@ def _prefill_offpolicy_replay_buffer(
     train_df: pd.DataFrame,
     env_config: EnvConfig,
     config: SB3TrainConfig,
+    train_statistics: dict[str, Any],
     observation_keys: tuple[str, ...],
     DummyVecEnv: Any,
     discrete_action_mapper: RuleBasedDiscreteActionMapper | None = None,
 ) -> dict[str, Any]:
-    from ..pipeline.runner import EasyRulePolicy
+    from ..pipeline.runner import EasyRulePolicy, RulePolicy
 
     target_steps = int(config.offpolicy_prefill_steps)
     if target_steps <= 0:
@@ -1220,6 +1536,13 @@ def _prefill_offpolicy_replay_buffer(
             normalizer=None,
             algo=config.algo,
             discrete_action_mapper=discrete_action_mapper,
+            residual_policy_name=(
+                str(config.residual_policy)
+                if bool(config.residual_enabled and config.algo != "dqn")
+                else None
+            ),
+            residual_scale=float(config.residual_scale),
+            train_statistics=train_statistics,
         )
         for idx in range(int(config.n_envs))
     ]
@@ -1230,11 +1553,18 @@ def _prefill_offpolicy_replay_buffer(
         prefill_env.close()
         raise RuntimeError("off-policy prefill 失败：未找到底层 observation carrier。")
 
-    easy_rule = EasyRulePolicy(
-        p_gt_cap_mw=float(env_config.p_gt_cap_mw),
-        q_boiler_cap_mw=float(env_config.q_boiler_cap_mw),
-        q_ech_cap_mw=float(env_config.q_ech_cap_mw),
-    )
+    if config.offpolicy_prefill_policy == "rule":
+        expert_policy = RulePolicy(
+            train_statistics=train_statistics,
+            p_gt_cap_mw=float(env_config.p_gt_cap_mw),
+            q_ech_cap_mw=float(env_config.q_ech_cap_mw),
+        )
+    else:
+        expert_policy = EasyRulePolicy(
+            p_gt_cap_mw=float(env_config.p_gt_cap_mw),
+            q_boiler_cap_mw=float(env_config.q_boiler_cap_mw),
+            q_ech_cap_mw=float(env_config.q_ech_cap_mw),
+        )
 
     collected_steps = 0
     episode_resets = 0
@@ -1245,7 +1575,8 @@ def _prefill_offpolicy_replay_buffer(
                     [
                         int(
                             getattr(carrier_env, "discrete_action_mapper").expert_prefill_action(
-                                getattr(carrier_env, "observation")
+                                getattr(carrier_env, "observation"),
+                                expert_policy=config.offpolicy_prefill_policy,
                             )
                         )
                         for carrier_env in carrier_envs
@@ -1254,15 +1585,18 @@ def _prefill_offpolicy_replay_buffer(
                 )
                 replay_actions = action_batch.reshape(-1, 1)
             else:
-                action_batch = np.asarray(
-                    [
-                        _action_dict_to_vector(
-                            easy_rule.act(getattr(carrier_env, "observation"))
-                        )
-                        for carrier_env in carrier_envs
-                    ],
-                    dtype=np.float32,
-                )
+                if bool(config.residual_enabled):
+                    action_batch = np.zeros((len(carrier_envs), 6), dtype=np.float32)
+                else:
+                    action_batch = np.asarray(
+                        [
+                            _action_dict_to_vector(
+                                expert_policy.act(getattr(carrier_env, "observation"))
+                            )
+                            for carrier_env in carrier_envs
+                        ],
+                        dtype=np.float32,
+                    )
                 replay_actions = action_batch
             next_observation, rewards, dones, infos = prefill_env.step(action_batch)
             next_observation = np.asarray(next_observation, dtype=np.float32)
@@ -1293,7 +1627,14 @@ def _prefill_offpolicy_replay_buffer(
     return {
         "enabled": True,
         "applied": True,
-        "mode": "easy_rule_replay_prefill_v1",
+        "mode": f"{config.offpolicy_prefill_policy}_replay_prefill_v1",
+        "policy_name": str(config.offpolicy_prefill_policy),
+        "residual_enabled": bool(config.residual_enabled and config.algo != "dqn"),
+        "replay_action_mode": (
+            "zero_delta_follow_residual_base_v1"
+            if bool(config.residual_enabled and config.algo != "dqn")
+            else "expert_action_v1"
+        ),
         "steps": int(collected_steps),
         "target_steps": int(target_steps),
         "effective_learning_starts": int(effective_learning_starts),
@@ -1457,7 +1798,7 @@ def train_sb3_policy(
     del gym
 
     try:
-        from stable_baselines3.common.callbacks import BaseCallback, CallbackList, EvalCallback
+        from stable_baselines3.common.callbacks import BaseCallback, CallbackList
         from stable_baselines3.common.logger import configure as sb3_configure_logger
         from stable_baselines3.common.monitor import Monitor
         from stable_baselines3.common.noise import NormalActionNoise
@@ -1482,9 +1823,12 @@ def train_sb3_policy(
     checkpoint_path = run_dir / "checkpoints" / "baseline_policy.json"
     model_path = run_dir / "checkpoints" / "sb3_model.zip"
     best_model_path = run_dir / "checkpoints" / "best_model.zip"
+    best_reward_model_path = run_dir / "checkpoints" / "best_reward_model.zip"
     vecnormalize_path = run_dir / "checkpoints" / "vecnormalize.pkl"
     best_vecnormalize_path = run_dir / "checkpoints" / "best_vecnormalize.pkl"
+    best_reward_vecnormalize_path = run_dir / "checkpoints" / "best_reward_vecnormalize.pkl"
     eval_windows_path = run_dir / "checkpoints" / "eval_windows.json"
+    eval_history_path = run_dir / "train" / "eval_callback" / "reliability_eval_history.jsonl"
 
     train_statistics = compute_training_statistics(train_df)
     train_statistics_path.write_text(
@@ -1499,6 +1843,13 @@ def train_sb3_policy(
             train_statistics=train_statistics,
             action_mode=config.dqn_action_mode,
         )
+    residual_active = bool(config.residual_enabled and config.algo != "dqn")
+    paper_model_label = _paper_model_label(
+        algo=config.algo,
+        dqn_action_mode=config.dqn_action_mode,
+        residual_enabled=residual_active,
+        residual_policy=config.residual_policy,
+    )
     eval_window_pool = _build_eval_window_pool(
         train_df=train_df,
         env_config=env_config,
@@ -1560,6 +1911,9 @@ def train_sb3_policy(
             normalizer=None,
             algo=config.algo,
             discrete_action_mapper=discrete_action_mapper,
+            residual_policy_name=str(config.residual_policy) if residual_active else None,
+            residual_scale=float(config.residual_scale),
+            train_statistics=train_statistics,
         )
         for idx in range(config.n_envs)
     ]
@@ -1670,6 +2024,8 @@ def train_sb3_policy(
     if bool(config.ppo_warm_start_enabled):
         if config.algo != "ppo":
             warm_start_summary["status"] = "skipped_non_ppo"
+        elif residual_active:
+            warm_start_summary["status"] = "skipped_residual_mode"
         else:
             warm_obs, warm_targets, warm_vec_env = _collect_easy_rule_warm_start_dataset(
                 train_df=train_df,
@@ -1702,6 +2058,7 @@ def train_sb3_policy(
                 train_df=train_df,
                 env_config=env_config,
                 config=config,
+                train_statistics=train_statistics,
                 observation_keys=observation_keys,
                 DummyVecEnv=DummyVecEnv,
                 discrete_action_mapper=discrete_action_mapper,
@@ -1716,6 +2073,9 @@ def train_sb3_policy(
         normalizer=None,
         algo=config.algo,
         discrete_action_mapper=discrete_action_mapper,
+        residual_policy_name=str(config.residual_policy) if residual_active else None,
+        residual_scale=float(config.residual_scale),
+        train_statistics=train_statistics,
         eval_episode_dfs=eval_episode_dfs,
     )
 
@@ -1739,6 +2099,7 @@ def train_sb3_policy(
     payload = {
         "artifact_type": "sb3_policy",
         "algo": config.algo,
+        "paper_model_label": paper_model_label,
         "policy": "MlpPolicy",
         "backbone": str(config.backbone),
         "history_steps": int(config.history_steps),
@@ -1761,6 +2122,22 @@ def train_sb3_policy(
         "eval_protocol": eval_protocol,
         "warm_start": warm_start_summary,
         "offpolicy_prefill": offpolicy_prefill_summary,
+        "residual": {
+            "enabled": bool(residual_active),
+            "requested": bool(config.residual_enabled),
+            "policy": str(config.residual_policy),
+            "scale": float(config.residual_scale),
+        },
+        "best_model_selection": {
+            "mode": "reliability_gate_then_reward_v1" if bool(config.best_gate_enabled) else "reward_best_v1",
+            "gate_enabled": bool(config.best_gate_enabled),
+            "thresholds": {
+                "electric": float(config.best_gate_electric_min),
+                "heat": float(config.best_gate_heat_min),
+                "cooling": float(config.best_gate_cool_min),
+            },
+            "history_path": str(eval_history_path).replace("\\", "/"),
+        },
         "ppo_hyperparameters": {
             "warm_start_enabled": bool(config.ppo_warm_start_enabled),
             "warm_start_samples": int(config.ppo_warm_start_samples),
@@ -1775,6 +2152,7 @@ def train_sb3_policy(
         "offpolicy_hyperparameters": {
             "prefill_enabled": bool(config.offpolicy_prefill_enabled),
             "prefill_steps": int(config.offpolicy_prefill_steps),
+            "prefill_policy": str(config.offpolicy_prefill_policy),
             "learning_starts": int(config.learning_starts),
             "train_freq": int(config.train_freq),
             "gradient_steps": int(config.gradient_steps),
@@ -1804,11 +2182,15 @@ def train_sb3_policy(
         "policy_kwargs": policy_kwargs_serializable,
         "model_path": str(model_path).replace("\\", "/"),
         "best_model_path": str(best_model_path).replace("\\", "/"),
+        "best_reward_model_path": str(best_reward_model_path).replace("\\", "/"),
         "vecnormalize_path": (
             str(vecnormalize_path).replace("\\", "/") if use_vecnormalize else None
         ),
         "best_vecnormalize_path": (
             str(best_vecnormalize_path).replace("\\", "/") if use_vecnormalize else None
+        ),
+        "best_reward_vecnormalize_path": (
+            str(best_reward_vecnormalize_path).replace("\\", "/") if use_vecnormalize else None
         ),
         "train_statistics_path": str(train_statistics_path).replace("\\", "/"),
         "run_dir": str(run_dir).replace("\\", "/"),
@@ -1854,25 +2236,102 @@ def train_sb3_policy(
         def _on_training_end(self) -> None:
             self._save_bundle()
 
-    class _BestModelEvalCallback(EvalCallback):
-        def _on_step(self) -> bool:
-            if self.eval_freq > 0 and self.n_calls % self.eval_freq == 0:
-                _reset_eval_window_cursor(self.eval_env)
-            previous_best = float(self.best_mean_reward)
-            continue_training = super()._on_step()
-            if self.best_mean_reward > previous_best:
-                _save_vecnormalize_bundle(best_vecnormalize_path if use_vecnormalize else None)
-            return continue_training
+    class _ReliabilityAwareEvalCallback(BaseCallback):
+        def __init__(
+            self,
+            *,
+            eval_env: Any,
+            n_eval_episodes: int,
+            eval_freq: int,
+            deterministic: bool,
+            history_path: Path,
+        ) -> None:
+            super().__init__()
+            self.eval_env = eval_env
+            self.n_eval_episodes = int(max(1, n_eval_episodes))
+            self.eval_freq = int(max(1, eval_freq))
+            self.deterministic = bool(deterministic)
+            self.history_path = history_path
+            self.best_mean_reward = float("-inf")
+            self.best_reward_mean = float("-inf")
+            self.best_gate_passed = False
+            self.best_snapshot: dict[str, Any] | None = None
+            self.best_reward_snapshot: dict[str, Any] | None = None
 
-    eval_callback = _BestModelEvalCallback(
+        def _save_selection_bundle(self, *, path: Path, vecnorm_path: Path | None) -> None:
+            self.model.save(str(path))
+            _save_vecnormalize_bundle(vecnorm_path if use_vecnormalize else None)
+
+        def _append_history(self, payload_item: dict[str, Any]) -> None:
+            self.history_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.history_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload_item, ensure_ascii=False) + "\n")
+
+        def _on_step(self) -> bool:
+            if self.n_calls % self.eval_freq != 0:
+                return True
+            if use_vecnormalize:
+                _copy_vecnormalize_stats(train_env, self.eval_env)
+            metrics = _evaluate_current_policy(
+                model=self.model,
+                eval_env=self.eval_env,
+                n_eval_episodes=self.n_eval_episodes,
+                deterministic=self.deterministic,
+            )
+            gate_result = _build_reliability_gate_result(metrics=metrics, config=config)
+            history_item = {
+                "timesteps": int(self.num_timesteps),
+                "mean_reward": float(metrics["mean_reward"]),
+                "mean_total_cost": float(metrics["mean_total_cost"]),
+                "mean_violation_rate": float(metrics["mean_violation_rate"]),
+                "mean_unmet_heat_mwh": float(metrics["mean_unmet_heat_mwh"]),
+                "mean_unmet_cool_mwh": float(metrics["mean_unmet_cool_mwh"]),
+                "reliability_mean": dict(metrics["reliability_mean"]),
+                "reliability_min": dict(metrics["reliability_min"]),
+                "gate": gate_result,
+            }
+            self._append_history(history_item)
+            self.logger.record("eval/mean_reward", float(metrics["mean_reward"]))
+            self.logger.record("eval/mean_total_cost", float(metrics["mean_total_cost"]))
+            self.logger.record("eval/reliability_heat_min", float(metrics["reliability_min"]["heat"]))
+            self.logger.record("eval/reliability_cooling_min", float(metrics["reliability_min"]["cooling"]))
+            self.logger.record("eval/reliability_electric_min", float(metrics["reliability_min"]["electric"]))
+            self.logger.record("eval/gate_passed", float(1.0 if gate_result["passed"] else 0.0))
+
+            if float(metrics["mean_reward"]) > float(self.best_reward_mean):
+                self.best_reward_mean = float(metrics["mean_reward"])
+                self.best_reward_snapshot = {
+                    "timesteps": int(self.num_timesteps),
+                    "metrics": dict(metrics),
+                    "gate": dict(gate_result),
+                }
+                self._save_selection_bundle(
+                    path=best_reward_model_path,
+                    vecnorm_path=best_reward_vecnormalize_path,
+                )
+
+            current_rank = (1 if bool(gate_result["passed"]) else 0, float(metrics["mean_reward"]))
+            best_rank = (1 if bool(self.best_gate_passed) else 0, float(self.best_mean_reward))
+            if current_rank > best_rank:
+                self.best_gate_passed = bool(gate_result["passed"])
+                self.best_mean_reward = float(metrics["mean_reward"])
+                self.best_snapshot = {
+                    "timesteps": int(self.num_timesteps),
+                    "metrics": dict(metrics),
+                    "gate": dict(gate_result),
+                }
+                self._save_selection_bundle(
+                    path=best_model_path,
+                    vecnorm_path=best_vecnormalize_path,
+                )
+            return True
+
+    eval_callback = _ReliabilityAwareEvalCallback(
         eval_env=eval_env,
         n_eval_episodes=int(eval_n_episodes),
         eval_freq=max(1, int(config.eval_freq) // max(1, int(config.n_envs))),
-        log_path=str(run_dir / "train" / "eval_callback"),
-        best_model_save_path=str(run_dir / "checkpoints"),
         deterministic=True,
-        render=False,
-        verbose=1,
+        history_path=eval_history_path,
     )
     latest_callback = _LatestModelCallback(
         save_every_steps=max(10_000, int(config.eval_freq)),
@@ -1886,10 +2345,25 @@ def train_sb3_policy(
         model.save(str(best_model_path))
     if use_vecnormalize and not best_vecnormalize_path.exists():
         _save_vecnormalize_bundle(best_vecnormalize_path)
+    if not best_reward_model_path.exists():
+        model.save(str(best_reward_model_path))
+    if use_vecnormalize and not best_reward_vecnormalize_path.exists():
+        _save_vecnormalize_bundle(best_reward_vecnormalize_path)
     payload["training_complete"] = True
     payload["training_timesteps_completed"] = int(getattr(model, "num_timesteps", config.total_timesteps))
     best_reward = float(getattr(eval_callback, "best_mean_reward", float("-inf")))
+    reward_leader = float(getattr(eval_callback, "best_reward_mean", float("-inf")))
     payload["best_mean_reward"] = None if not np.isfinite(best_reward) else best_reward
+    payload["best_reward_mean_reward"] = None if not np.isfinite(reward_leader) else reward_leader
+    if getattr(eval_callback, "best_snapshot", None) is not None:
+        payload["best_model_selection"]["selected"] = eval_callback.best_snapshot
+        payload["best_model_selection"]["gate_passed"] = bool(eval_callback.best_gate_passed)
+    else:
+        payload["best_model_selection"]["selected"] = None
+        payload["best_model_selection"]["gate_passed"] = False
+        payload["best_model_selection"]["fallback_reason"] = "no_eval_triggered"
+    if getattr(eval_callback, "best_reward_snapshot", None) is not None:
+        payload["best_model_selection"]["reward_leader"] = eval_callback.best_reward_snapshot
     _write_payload()
     eval_env.close()
     train_env.close()
@@ -2107,36 +2581,36 @@ def evaluate_sb3_policy(
     if history_steps <= 0:
         raise ValueError("checkpoint_json.history_steps 必须 > 0。")
     observation_keys = tuple(str(item) for item in (ckpt.get("observation_keys") or OBS_KEYS))
+    residual_payload = ckpt.get("residual") or {}
+    residual_enabled = bool(residual_payload.get("enabled", False))
+    residual_policy_name = str(residual_payload.get("policy", "rule"))
+    residual_scale = float(residual_payload.get("scale", 0.0))
     normalizer = None
     obs_norm = ckpt.get("obs_norm") or {}
     obs_norm_mode = ""
     if isinstance(obs_norm, dict):
         obs_norm_mode = str(obs_norm.get("mode", "")).strip().lower()
-    if resolved_vecnormalize_path is None and obs_norm_mode in {"zscore_affine_v1", "affine_v1"}:
-        train_statistics_path = ckpt.get("train_statistics_path")
+    train_statistics_path = ckpt.get("train_statistics_path")
+    needs_train_statistics = (
+        algo == "dqn"
+        or (resolved_vecnormalize_path is None and obs_norm_mode in {"zscore_affine_v1", "affine_v1"})
+        or (residual_enabled and residual_policy_name == "rule")
+    )
+    if needs_train_statistics:
         if not train_statistics_path:
-            raise ValueError("checkpoint_json 启用了 obs_norm 但缺少 train_statistics_path。")
+            raise ValueError("checkpoint_json 缺少 train_statistics_path，无法重建评估所需 sidecar。")
         resolved_train_statistics_path = _resolve_checkpoint_sidecar_path(
             checkpoint_json=checkpoint_json_path,
             path_value=str(train_statistics_path),
             artifact_label="SB3 训练统计文件（train_statistics.json）",
         )
         train_statistics = json.loads(resolved_train_statistics_path.read_text(encoding="utf-8"))
-        normalizer = _build_observation_normalizer(
-            train_statistics=train_statistics,
-            env_config=env_config,
-            keys=observation_keys,
-        )
-    elif algo == "dqn":
-        train_statistics_path = ckpt.get("train_statistics_path")
-        if not train_statistics_path:
-            raise ValueError("DQN checkpoint 缺少 train_statistics_path，无法重建离散动作映射。")
-        resolved_train_statistics_path = _resolve_checkpoint_sidecar_path(
-            checkpoint_json=checkpoint_json_path,
-            path_value=str(train_statistics_path),
-            artifact_label="SB3 训练统计文件（train_statistics.json）",
-        )
-        train_statistics = json.loads(resolved_train_statistics_path.read_text(encoding="utf-8"))
+        if resolved_vecnormalize_path is None and obs_norm_mode in {"zscore_affine_v1", "affine_v1"}:
+            normalizer = _build_observation_normalizer(
+                train_statistics=train_statistics,
+                env_config=env_config,
+                keys=observation_keys,
+            )
     else:
         train_statistics = None
 
@@ -2163,6 +2637,9 @@ def evaluate_sb3_policy(
                 normalizer=normalizer,
                 algo=algo,
                 discrete_action_mapper=discrete_action_mapper,
+                residual_policy_name=residual_policy_name if residual_enabled else None,
+                residual_scale=residual_scale,
+                train_statistics=train_statistics,
             )
         ]
     )
@@ -2207,12 +2684,26 @@ def evaluate_sb3_policy(
     summary["year"] = int(EVAL_YEAR)
     summary["policy"] = "sb3"
     summary["algo"] = algo
+    summary["paper_model_label"] = str(
+        ckpt.get("paper_model_label")
+        or _paper_model_label(
+            algo=algo,
+            dqn_action_mode=str((ckpt.get("dqn_hyperparameters") or {}).get("action_mode", "")),
+            residual_enabled=residual_enabled,
+            residual_policy=residual_policy_name,
+        )
+    )
     summary["backbone"] = str(ckpt.get("backbone", ""))
     summary["history_steps"] = int(history_steps)
     summary["seed"] = int(seed)
     summary["checkpoint_json"] = str(checkpoint_json_path).replace("\\", "/")
     summary["model_source"] = str(resolved_model_source)
     summary["resolved_model_path"] = str(resolved_model_path).replace("\\", "/")
+    summary["residual"] = {
+        "enabled": bool(residual_enabled),
+        "policy": str(residual_policy_name),
+        "scale": float(residual_scale),
+    }
     if resolved_vecnormalize_path is not None:
         summary["resolved_vecnormalize_path"] = str(resolved_vecnormalize_path).replace("\\", "/")
 

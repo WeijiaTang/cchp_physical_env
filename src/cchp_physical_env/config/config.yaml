@@ -32,6 +32,9 @@ env:
   gt_om_var_cost_per_mwh: 20.0
   gt_start_cost: 250.0
   gt_startup_fuel_correction_ratio: 0.10
+  gt_dynamic_om_enabled: true
+  gt_cycle_cost: 250.0
+  gt_cycle_hours: 1.0
 
   p_bes_cap_mw: 4.0
   e_bes_cap_mwh: 8.0
@@ -152,11 +155,11 @@ training:
   # - 若 sb3_enabled=true，则 `train` 命令会优先走 SB3 算法训练（而不是 baseline/sequence trainer）
   sb3_enabled: false
   # 选择算法：ppo / sac / td3 / ddpg / dqn
-  sb3_algo: sac
+  sb3_algo: ddpg
   # SB3 policy backbone：mlp / transformer / mamba
   # - mlp：窗口 flatten 后走 MLP（最稳）
   # - transformer/mamba：用序列编码器提取特征，再交给 SB3 算法头（可用于 “SAC+Transformer” 对比）
-  sb3_backbone: transformer
+  sb3_backbone: mlp
   # SB3 输入窗口长度（步），与 sequence_rule 的 history_steps 概念一致
   sb3_history_steps: 32
   # SB3 总交互步数（训练预算）
@@ -164,9 +167,9 @@ training:
   # 并行环境数量（DummyVecEnv），>1 可加速但更吃资源
   sb3_n_envs: 4
   # 学习率（SB3）
-  sb3_learning_rate: 0.0003
+  sb3_learning_rate: 0.0001
   # batch size（SB3）
-  sb3_batch_size: 512
+  sb3_batch_size: 256
   # 折扣因子（SB3）
   sb3_gamma: 0.99
 
@@ -193,13 +196,16 @@ training:
   sb3_eval_window_count: 4
   sb3_eval_window_seed: 42
   sb3_ppo_warm_start_enabled: false
-  sb3_residual_enabled: false
+  sb3_residual_enabled: true
+  sb3_residual_policy: rule
+  sb3_residual_scale: 0.25
   sb3_ppo_warm_start_samples: 16384
   sb3_ppo_warm_start_epochs: 4
   sb3_ppo_warm_start_batch_size: 256
   sb3_ppo_warm_start_lr: 0.0001
-  sb3_offpolicy_prefill_enabled: false
-  sb3_offpolicy_prefill_steps: 0
+  sb3_offpolicy_prefill_enabled: true
+  sb3_offpolicy_prefill_steps: 20000
+  sb3_offpolicy_prefill_policy: rule
 
   # ------------------------------
   # PPO 专属超参数（仅 algo=ppo 时真正生效）
@@ -230,16 +236,21 @@ training:
 
   # replay buffer 在开始学习前的随机探索步数（learning_starts）
   # - 环境较复杂时适当增大有利于稳定
-  sb3_learning_starts: 5000
+  sb3_learning_starts: 20000
   # 训练频率（每隔多少环境步做一次训练）；与 SB3 的 train_freq 对齐
-  sb3_train_freq: 1
+  sb3_train_freq: 4
   # 每次训练更新做多少次梯度步（gradient_steps）
-  sb3_gradient_steps: 1
+  sb3_gradient_steps: 4
   # target 网络软更新系数 tau（TD3/DDPG/SAC 常用）
   sb3_tau: 0.005
   # 动作噪声标准差（主要用于 TD3/DDPG 的探索；SAC 也可作为额外噪声项）
-  sb3_action_noise_std: 0.1
+  sb3_action_noise_std: 0.05
   # Off-policy replay buffer（SAC/TD3/DDPG/DQN）。窗口观测 + n_envs>1 时默认 1e6 非常容易 OOM。
-  sb3_buffer_size: 50000
+  sb3_buffer_size: 100000
   # 开启 replay buffer 内存优化（减少 next_obs 存储）。推荐保持开启。
   sb3_optimize_memory_usage: true
+  # best checkpoint 选择：先过可靠性门槛，再按 reward 选最优。
+  sb3_best_gate_enabled: true
+  sb3_best_gate_electric_min: 1.0
+  sb3_best_gate_heat_min: 0.999
+  sb3_best_gate_cool_min: 0.999

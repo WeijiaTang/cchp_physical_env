@@ -115,6 +115,9 @@ class EnvConfig:
     gt_om_var_cost_per_mwh: float
     gt_start_cost: float
     gt_startup_fuel_correction_ratio: float
+    gt_dynamic_om_enabled: bool
+    gt_cycle_cost: float
+    gt_cycle_hours: float
 
     p_bes_cap_mw: float
     e_bes_cap_mwh: float
@@ -697,6 +700,7 @@ class CCHPPhysicalEnv:
 
         gt_started = int((not self.gt_prev_on) and (p_gt_mw > 1e-9))
         gt_toggled = bool(self.gt_prev_on != (p_gt_mw > 1e-9))
+        gt_on_steps_effective = int(self.gt_on_steps) + 1 if p_gt_mw > 1e-9 else 0
         gt_toggle_cost = float(max(0.0, float(self.config.penalty_gt_toggle)) if gt_toggled else 0.0)
         fuel_input_gt_effective_mw, startup_extra_fuel_mw = apply_gt_startup_fuel_correction(
             fuel_input_gt_mw=gt_result.fuel_input_mw,
@@ -766,6 +770,7 @@ class CCHPPhysicalEnv:
             fuel_input_gt_effective_mw=fuel_input_gt_effective_mw,
             p_gt_mw=p_gt_mw,
             gt_started=gt_started,
+            gt_on_steps=gt_on_steps_effective,
             bes_degradation_cost=bes_degradation_cost,
             boiler_fuel_input_mw=boiler_result.fuel_input_mw,
             p_unmet_e_mw=grid_balance["p_unmet_e_mw"],
@@ -910,17 +915,27 @@ class CCHPPhysicalEnv:
         long_threshold_steps = max(1, int(round(1.0 / max(1e-9, dt_h))))
         gt_ramp_headroom_up_mw, gt_ramp_headroom_down_mw = self._gt_ramp_headroom()
         tes_hot_k = float(self.thermal_storage.hot_water_temperature_k())
+        min_on_steps = max(0, int(round(float(self.config.gt_min_on_steps))))
+        min_off_steps = max(0, int(round(float(self.config.gt_min_off_steps))))
         if not self.gt_prev_on:
             gt_state = 0.0
         elif int(self.gt_on_steps) >= long_threshold_steps:
             gt_state = 2.0
         else:
             gt_state = 1.0
+        gt_on_steps = int(self.gt_on_steps)
+        gt_off_steps = int(self.gt_off_steps)
+        gt_min_on_remaining_steps = max(0, min_on_steps - gt_on_steps) if self.gt_prev_on else 0
+        gt_min_off_remaining_steps = max(0, min_off_steps - gt_off_steps) if (not self.gt_prev_on) else 0
         return build_observation(
             row=row,
             bes_soc=self.bes_soc,
             gt_prev_on=self.gt_prev_on,
             gt_state=float(gt_state),
+            gt_on_steps=float(gt_on_steps),
+            gt_off_steps=float(gt_off_steps),
+            gt_min_on_remaining_steps=float(gt_min_on_remaining_steps),
+            gt_min_off_remaining_steps=float(gt_min_off_remaining_steps),
             p_gt_prev_mw=float(self.gt_prev_p_mw),
             gt_ramp_headroom_up_mw=float(gt_ramp_headroom_up_mw),
             gt_ramp_headroom_down_mw=float(gt_ramp_headroom_down_mw),

@@ -34,13 +34,13 @@ TRAINING_DEFAULTS: dict[str, Any] = {
     "device": "auto",
     # Task-011：可选 SB3 多算法（SAC/TD3/DDPG/PPO/DQN）
     "sb3_enabled": False,
-    "sb3_algo": "sac",
-    "sb3_backbone": "transformer",
+    "sb3_algo": "ddpg",
+    "sb3_backbone": "mlp",
     "sb3_history_steps": 32,
     "sb3_total_timesteps": 2_000_000,
     "sb3_n_envs": 4,
-    "sb3_learning_rate": 3e-4,
-    "sb3_batch_size": 512,
+    "sb3_learning_rate": 1e-4,
+    "sb3_batch_size": 256,
     "sb3_gamma": 0.99,
     "sb3_vec_norm_obs": True,
     "sb3_vec_norm_reward": True,
@@ -50,13 +50,16 @@ TRAINING_DEFAULTS: dict[str, Any] = {
     "sb3_eval_window_count": 4,
     "sb3_eval_window_seed": 42,
     "sb3_ppo_warm_start_enabled": False,
-    "sb3_residual_enabled": False,
+    "sb3_residual_enabled": True,
+    "sb3_residual_policy": "rule",
+    "sb3_residual_scale": 0.25,
     "sb3_ppo_warm_start_samples": 16384,
     "sb3_ppo_warm_start_epochs": 4,
     "sb3_ppo_warm_start_batch_size": 256,
     "sb3_ppo_warm_start_lr": 1e-4,
-    "sb3_offpolicy_prefill_enabled": False,
-    "sb3_offpolicy_prefill_steps": 0,
+    "sb3_offpolicy_prefill_enabled": True,
+    "sb3_offpolicy_prefill_steps": 20_000,
+    "sb3_offpolicy_prefill_policy": "rule",
     "sb3_ppo_n_steps": 2048,
     "sb3_ppo_gae_lambda": 0.95,
     "sb3_ppo_ent_coef": 0.0,
@@ -66,15 +69,19 @@ TRAINING_DEFAULTS: dict[str, Any] = {
     "sb3_dqn_exploration_fraction": 0.3,
     "sb3_dqn_exploration_initial_eps": 1.0,
     "sb3_dqn_exploration_final_eps": 0.05,
-    "sb3_learning_starts": 5_000,
-    "sb3_train_freq": 1,
-    "sb3_gradient_steps": 1,
+    "sb3_learning_starts": 20_000,
+    "sb3_train_freq": 4,
+    "sb3_gradient_steps": 4,
     "sb3_tau": 0.005,
-    "sb3_action_noise_std": 0.1,
+    "sb3_action_noise_std": 0.05,
     # Off-policy algorithms (SAC/TD3/DDPG/DQN) use a replay buffer.
     # With window observations (K,D) and n_envs>1, the default SB3 buffer_size=1e6 can easily OOM.
-    "sb3_buffer_size": 50_000,
+    "sb3_buffer_size": 100_000,
     "sb3_optimize_memory_usage": True,
+    "sb3_best_gate_enabled": True,
+    "sb3_best_gate_electric_min": 1.0,
+    "sb3_best_gate_heat_min": 0.999,
+    "sb3_best_gate_cool_min": 0.999,
 }
 
 # env 参数校验规则表：
@@ -95,6 +102,7 @@ ENV_BOOL_KEYS = {
     "bes_dod_add_calendar_age",
     "abs_gate_enabled",
     "gt_action_smoothing_enabled",
+    "gt_dynamic_om_enabled",
 }
 # 数值范围规则：仅对需要额外范围约束的字段登记，其余数值字段只做“类型 + finite”校验。
 ENV_NUMERIC_RULES: dict[str, tuple[Callable[[float], bool], str]] = {
@@ -117,6 +125,14 @@ ENV_NUMERIC_RULES: dict[str, tuple[Callable[[float], bool], str]] = {
     "penalty_export_over_soft_cap_per_mwh": (
         lambda value: value >= 0.0,
         "penalty_export_over_soft_cap_per_mwh 必须 >= 0。",
+    ),
+    "gt_cycle_cost": (
+        lambda value: value >= 0.0,
+        "gt_cycle_cost 必须 >= 0。",
+    ),
+    "gt_cycle_hours": (
+        lambda value: value > 0.0,
+        "gt_cycle_hours 必须 > 0。",
     ),
     "bes_self_discharge_per_hour": (
         lambda value: 0.0 <= value <= 1.0,
@@ -345,6 +361,7 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
         "sb3_ppo_warm_start_enabled",
         "sb3_residual_enabled",
         "sb3_offpolicy_prefill_enabled",
+        "sb3_best_gate_enabled",
     }
     int_keys = {
         "seed",
@@ -370,7 +387,14 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
         "sb3_gradient_steps",
     }
     for key, value in overrides.items():
-        if key in {"policy", "sequence_adapter", "device", "sb3_dqn_action_mode"}:
+        if key in {
+            "policy",
+            "sequence_adapter",
+            "device",
+            "sb3_dqn_action_mode",
+            "sb3_offpolicy_prefill_policy",
+            "sb3_residual_policy",
+        }:
             if len(str(value).strip()) == 0:
                 raise ValueError(f"{key} 不能为空。")
             continue
@@ -464,11 +488,18 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
             if not (0.0 < numeric <= 1.0):
                 raise ValueError("sb3_dqn_exploration_fraction 必须在 (0,1]。")
             continue
-        if key in {"sb3_ppo_ent_coef", "sb3_action_noise_std"}:
+        if key in {"sb3_ppo_ent_coef", "sb3_action_noise_std", "sb3_residual_scale"}:
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ValueError(f"{key} 必须是数值类型。")
             if float(value) < 0.0:
                 raise ValueError(f"{key} 必须 >= 0。")
+            continue
+        if key in {"sb3_best_gate_electric_min", "sb3_best_gate_heat_min", "sb3_best_gate_cool_min"}:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{key} 必须是数值类型。")
+            numeric = float(value)
+            if not (0.0 <= numeric <= 1.0):
+                raise ValueError(f"{key} 必须在 [0,1]。")
             continue
         if key in {"sb3_dqn_exploration_initial_eps", "sb3_dqn_exploration_final_eps"}:
             if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -520,13 +551,29 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
         raise ValueError("sb3_eval_window_pool_size=0 时，sb3_eval_window_count 也必须为 0。")
     if eval_window_pool_size > 0 and eval_window_count > eval_window_pool_size:
         raise ValueError("sb3_eval_window_count 不能大于 sb3_eval_window_pool_size。")
-    if bool(overrides.get("sb3_residual_enabled", TRAINING_DEFAULTS["sb3_residual_enabled"])):
-        raise ValueError("training.sb3_residual_enabled 当前尚未实现，请保持 false。")
+    residual_policy = str(
+        overrides.get("sb3_residual_policy", TRAINING_DEFAULTS["sb3_residual_policy"])
+    ).strip().lower().replace("-", "_")
+    if residual_policy not in {"easy_rule", "rule"}:
+        raise ValueError("training.sb3_residual_policy 当前仅支持 easy_rule/rule。")
+    residual_scale = float(
+        overrides.get("sb3_residual_scale", TRAINING_DEFAULTS["sb3_residual_scale"])
+    )
+    if residual_scale < 0.0 or residual_scale > 1.0:
+        raise ValueError("training.sb3_residual_scale 必须在 [0,1]。")
     dqn_action_mode = str(
         overrides.get("sb3_dqn_action_mode", TRAINING_DEFAULTS["sb3_dqn_action_mode"])
     ).strip().lower()
     if dqn_action_mode != "rb_v1":
         raise ValueError("training.sb3_dqn_action_mode 当前仅支持 rb_v1。")
+    offpolicy_prefill_policy = str(
+        overrides.get(
+            "sb3_offpolicy_prefill_policy",
+            TRAINING_DEFAULTS["sb3_offpolicy_prefill_policy"],
+        )
+    ).strip().lower().replace("-", "_")
+    if offpolicy_prefill_policy not in {"easy_rule", "rule"}:
+        raise ValueError("training.sb3_offpolicy_prefill_policy 当前仅支持 easy_rule/rule。")
     dqn_initial_eps = float(
         overrides.get(
             "sb3_dqn_exploration_initial_eps",
@@ -541,6 +588,10 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
     )
     if dqn_final_eps > dqn_initial_eps:
         raise ValueError("sb3_dqn_exploration_final_eps 不能大于 sb3_dqn_exploration_initial_eps。")
+    for key in ("sb3_best_gate_electric_min", "sb3_best_gate_heat_min", "sb3_best_gate_cool_min"):
+        gate_value = float(overrides.get(key, TRAINING_DEFAULTS[key]))
+        if gate_value < 0.0 or gate_value > 1.0:
+            raise ValueError(f"{key} 必须在 [0,1]。")
 
 
 def build_training_options(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -585,12 +636,19 @@ def build_training_options(overrides: dict[str, Any] | None = None) -> dict[str,
     normalized["sb3_eval_window_seed"] = int(normalized["sb3_eval_window_seed"])
     normalized["sb3_ppo_warm_start_enabled"] = bool(normalized["sb3_ppo_warm_start_enabled"])
     normalized["sb3_residual_enabled"] = bool(normalized["sb3_residual_enabled"])
+    normalized["sb3_residual_policy"] = (
+        str(normalized["sb3_residual_policy"]).strip().lower().replace("-", "_")
+    )
+    normalized["sb3_residual_scale"] = float(normalized["sb3_residual_scale"])
     normalized["sb3_offpolicy_prefill_enabled"] = bool(normalized["sb3_offpolicy_prefill_enabled"])
     normalized["sb3_ppo_warm_start_samples"] = int(normalized["sb3_ppo_warm_start_samples"])
     normalized["sb3_ppo_warm_start_epochs"] = int(normalized["sb3_ppo_warm_start_epochs"])
     normalized["sb3_ppo_warm_start_batch_size"] = int(normalized["sb3_ppo_warm_start_batch_size"])
     normalized["sb3_ppo_warm_start_lr"] = float(normalized["sb3_ppo_warm_start_lr"])
     normalized["sb3_offpolicy_prefill_steps"] = int(normalized["sb3_offpolicy_prefill_steps"])
+    normalized["sb3_offpolicy_prefill_policy"] = (
+        str(normalized["sb3_offpolicy_prefill_policy"]).strip().lower().replace("-", "_")
+    )
     normalized["sb3_ppo_n_steps"] = int(normalized["sb3_ppo_n_steps"])
     normalized["sb3_ppo_gae_lambda"] = float(normalized["sb3_ppo_gae_lambda"])
     normalized["sb3_ppo_ent_coef"] = float(normalized["sb3_ppo_ent_coef"])
@@ -607,4 +665,8 @@ def build_training_options(overrides: dict[str, Any] | None = None) -> dict[str,
     normalized["sb3_action_noise_std"] = float(normalized["sb3_action_noise_std"])
     normalized["sb3_buffer_size"] = int(normalized["sb3_buffer_size"])
     normalized["sb3_optimize_memory_usage"] = bool(normalized["sb3_optimize_memory_usage"])
+    normalized["sb3_best_gate_enabled"] = bool(normalized["sb3_best_gate_enabled"])
+    normalized["sb3_best_gate_electric_min"] = float(normalized["sb3_best_gate_electric_min"])
+    normalized["sb3_best_gate_heat_min"] = float(normalized["sb3_best_gate_heat_min"])
+    normalized["sb3_best_gate_cool_min"] = float(normalized["sb3_best_gate_cool_min"])
     return normalized

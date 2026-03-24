@@ -90,12 +90,15 @@ TRAINING_OPTION_KEYS = (
     "sb3_eval_window_seed",
     "sb3_ppo_warm_start_enabled",
     "sb3_residual_enabled",
+    "sb3_residual_policy",
+    "sb3_residual_scale",
     "sb3_ppo_warm_start_samples",
     "sb3_ppo_warm_start_epochs",
     "sb3_ppo_warm_start_batch_size",
     "sb3_ppo_warm_start_lr",
     "sb3_offpolicy_prefill_enabled",
     "sb3_offpolicy_prefill_steps",
+    "sb3_offpolicy_prefill_policy",
     "sb3_ppo_n_steps",
     "sb3_ppo_gae_lambda",
     "sb3_ppo_ent_coef",
@@ -112,6 +115,10 @@ TRAINING_OPTION_KEYS = (
     "sb3_action_noise_std",
     "sb3_buffer_size",
     "sb3_optimize_memory_usage",
+    "sb3_best_gate_enabled",
+    "sb3_best_gate_electric_min",
+    "sb3_best_gate_heat_min",
+    "sb3_best_gate_cool_min",
 )
 
 
@@ -256,6 +263,8 @@ def _command_train(args: argparse.Namespace) -> None:
                 "sb3_eval_window_seed",
                 "sb3_ppo_warm_start_enabled",
                 "sb3_residual_enabled",
+                "sb3_residual_policy",
+                "sb3_residual_scale",
                 "sb3_ppo_warm_start_samples",
                 "sb3_ppo_warm_start_epochs",
                 "sb3_ppo_warm_start_batch_size",
@@ -278,6 +287,10 @@ def _command_train(args: argparse.Namespace) -> None:
                 "sb3_action_noise_std",
                 "sb3_buffer_size",
                 "sb3_optimize_memory_usage",
+                "sb3_best_gate_enabled",
+                "sb3_best_gate_electric_min",
+                "sb3_best_gate_heat_min",
+                "sb3_best_gate_cool_min",
             }
         )
         eval_df_cache: pd.DataFrame | None = None
@@ -304,12 +317,15 @@ def _command_train(args: argparse.Namespace) -> None:
                 eval_window_seed=current_options["sb3_eval_window_seed"],
                 ppo_warm_start_enabled=bool(current_options["sb3_ppo_warm_start_enabled"]),
                 residual_enabled=bool(current_options["sb3_residual_enabled"]),
+                residual_policy=current_options["sb3_residual_policy"],
+                residual_scale=current_options["sb3_residual_scale"],
                 ppo_warm_start_samples=current_options["sb3_ppo_warm_start_samples"],
                 ppo_warm_start_epochs=current_options["sb3_ppo_warm_start_epochs"],
                 ppo_warm_start_batch_size=current_options["sb3_ppo_warm_start_batch_size"],
                 ppo_warm_start_lr=current_options["sb3_ppo_warm_start_lr"],
                 offpolicy_prefill_enabled=bool(current_options["sb3_offpolicy_prefill_enabled"]),
                 offpolicy_prefill_steps=current_options["sb3_offpolicy_prefill_steps"],
+                offpolicy_prefill_policy=current_options["sb3_offpolicy_prefill_policy"],
                 ppo_n_steps=current_options["sb3_ppo_n_steps"],
                 ppo_gae_lambda=current_options["sb3_ppo_gae_lambda"],
                 ppo_ent_coef=current_options["sb3_ppo_ent_coef"],
@@ -326,6 +342,10 @@ def _command_train(args: argparse.Namespace) -> None:
                 action_noise_std=current_options["sb3_action_noise_std"],
                 buffer_size=current_options["sb3_buffer_size"],
                 optimize_memory_usage=bool(current_options["sb3_optimize_memory_usage"]),
+                best_gate_enabled=bool(current_options["sb3_best_gate_enabled"]),
+                best_gate_electric_min=current_options["sb3_best_gate_electric_min"],
+                best_gate_heat_min=current_options["sb3_best_gate_heat_min"],
+                best_gate_cool_min=current_options["sb3_best_gate_cool_min"],
                 seed=seed,
                 device=current_options["device"],
             )
@@ -569,56 +589,69 @@ def _command_sb3_train(args: argparse.Namespace) -> None:
     env_overrides = load_env_overrides(_resolve_env_config_path(args))
     force_mode = getattr(args, "constraint_mode", None)
     env_config = build_env_config_from_overrides(env_overrides, force_constraint_mode=force_mode)
+    training_defaults = build_training_options(load_training_overrides(_resolve_env_config_path(args)))
 
-    seed_values = _normalize_seed_list(args.seed, fallback=42)
+    def _arg_or_training_default(arg_name: str, training_key: str):
+        if hasattr(args, arg_name):
+            return getattr(args, arg_name)
+        return training_defaults[training_key]
+
+    seed_values = _normalize_seed_list(getattr(args, "seed", None), fallback=int(training_defaults["seed"]))
     multi_seed = len(seed_values) > 1
     eval_df_cache: pd.DataFrame | None = None
     outputs: list[dict[str, object]] = []
 
     for seed in seed_values:
         config = SB3TrainConfig(
-            algo=args.algo,
-            backbone=args.backbone,
-            history_steps=args.history_steps,
-            total_timesteps=args.total_timesteps,
-            episode_days=args.episode_days,
-            n_envs=args.n_envs,
-            learning_rate=args.learning_rate,
-            batch_size=args.batch_size,
-            gamma=args.gamma,
-            vec_norm_obs=bool(getattr(args, "vec_norm_obs", True)),
-            vec_norm_reward=bool(getattr(args, "vec_norm_reward", True)),
-            eval_freq=args.eval_freq,
-            eval_episode_days=args.eval_episode_days,
-            eval_window_pool_size=args.eval_window_pool_size,
-            eval_window_count=args.eval_window_count,
-            eval_window_seed=args.eval_window_seed,
-            ppo_warm_start_enabled=bool(getattr(args, "ppo_warm_start_enabled", False)),
-            residual_enabled=bool(getattr(args, "residual_enabled", False)),
-            ppo_warm_start_samples=args.ppo_warm_start_samples,
-            ppo_warm_start_epochs=args.ppo_warm_start_epochs,
-            ppo_warm_start_batch_size=args.ppo_warm_start_batch_size,
-            ppo_warm_start_lr=args.ppo_warm_start_lr,
-            offpolicy_prefill_enabled=bool(getattr(args, "offpolicy_prefill_enabled", False)),
-            offpolicy_prefill_steps=args.offpolicy_prefill_steps,
-            ppo_n_steps=args.ppo_n_steps,
-            ppo_gae_lambda=args.ppo_gae_lambda,
-            ppo_ent_coef=args.ppo_ent_coef,
-            ppo_clip_range=args.ppo_clip_range,
-            dqn_action_mode=args.dqn_action_mode,
-            dqn_target_update_interval=args.dqn_target_update_interval,
-            dqn_exploration_fraction=args.dqn_exploration_fraction,
-            dqn_exploration_initial_eps=args.dqn_exploration_initial_eps,
-            dqn_exploration_final_eps=args.dqn_exploration_final_eps,
-            learning_starts=args.learning_starts,
-            train_freq=args.train_freq,
-            gradient_steps=args.gradient_steps,
-            tau=args.tau,
-            action_noise_std=args.action_noise_std,
-            buffer_size=args.buffer_size,
-            optimize_memory_usage=bool(getattr(args, "optimize_memory_usage", True)),
+            algo=str(_arg_or_training_default("algo", "sb3_algo")),
+            backbone=str(_arg_or_training_default("backbone", "sb3_backbone")),
+            history_steps=int(_arg_or_training_default("history_steps", "sb3_history_steps")),
+            total_timesteps=int(_arg_or_training_default("total_timesteps", "sb3_total_timesteps")),
+            episode_days=int(_arg_or_training_default("episode_days", "episode_days")),
+            n_envs=int(_arg_or_training_default("n_envs", "sb3_n_envs")),
+            learning_rate=float(_arg_or_training_default("learning_rate", "sb3_learning_rate")),
+            batch_size=int(_arg_or_training_default("batch_size", "sb3_batch_size")),
+            gamma=float(_arg_or_training_default("gamma", "sb3_gamma")),
+            vec_norm_obs=bool(_arg_or_training_default("vec_norm_obs", "sb3_vec_norm_obs")),
+            vec_norm_reward=bool(_arg_or_training_default("vec_norm_reward", "sb3_vec_norm_reward")),
+            eval_freq=int(_arg_or_training_default("eval_freq", "sb3_eval_freq")),
+            eval_episode_days=int(_arg_or_training_default("eval_episode_days", "sb3_eval_episode_days")),
+            eval_window_pool_size=int(_arg_or_training_default("eval_window_pool_size", "sb3_eval_window_pool_size")),
+            eval_window_count=int(_arg_or_training_default("eval_window_count", "sb3_eval_window_count")),
+            eval_window_seed=int(_arg_or_training_default("eval_window_seed", "sb3_eval_window_seed")),
+            ppo_warm_start_enabled=bool(_arg_or_training_default("ppo_warm_start_enabled", "sb3_ppo_warm_start_enabled")),
+            residual_enabled=bool(_arg_or_training_default("residual_enabled", "sb3_residual_enabled")),
+            residual_policy=str(_arg_or_training_default("residual_policy", "sb3_residual_policy")),
+            residual_scale=float(_arg_or_training_default("residual_scale", "sb3_residual_scale")),
+            ppo_warm_start_samples=int(_arg_or_training_default("ppo_warm_start_samples", "sb3_ppo_warm_start_samples")),
+            ppo_warm_start_epochs=int(_arg_or_training_default("ppo_warm_start_epochs", "sb3_ppo_warm_start_epochs")),
+            ppo_warm_start_batch_size=int(_arg_or_training_default("ppo_warm_start_batch_size", "sb3_ppo_warm_start_batch_size")),
+            ppo_warm_start_lr=float(_arg_or_training_default("ppo_warm_start_lr", "sb3_ppo_warm_start_lr")),
+            offpolicy_prefill_enabled=bool(_arg_or_training_default("offpolicy_prefill_enabled", "sb3_offpolicy_prefill_enabled")),
+            offpolicy_prefill_steps=int(_arg_or_training_default("offpolicy_prefill_steps", "sb3_offpolicy_prefill_steps")),
+            offpolicy_prefill_policy=str(_arg_or_training_default("offpolicy_prefill_policy", "sb3_offpolicy_prefill_policy")),
+            ppo_n_steps=int(_arg_or_training_default("ppo_n_steps", "sb3_ppo_n_steps")),
+            ppo_gae_lambda=float(_arg_or_training_default("ppo_gae_lambda", "sb3_ppo_gae_lambda")),
+            ppo_ent_coef=float(_arg_or_training_default("ppo_ent_coef", "sb3_ppo_ent_coef")),
+            ppo_clip_range=float(_arg_or_training_default("ppo_clip_range", "sb3_ppo_clip_range")),
+            dqn_action_mode=str(_arg_or_training_default("dqn_action_mode", "sb3_dqn_action_mode")),
+            dqn_target_update_interval=int(_arg_or_training_default("dqn_target_update_interval", "sb3_dqn_target_update_interval")),
+            dqn_exploration_fraction=float(_arg_or_training_default("dqn_exploration_fraction", "sb3_dqn_exploration_fraction")),
+            dqn_exploration_initial_eps=float(_arg_or_training_default("dqn_exploration_initial_eps", "sb3_dqn_exploration_initial_eps")),
+            dqn_exploration_final_eps=float(_arg_or_training_default("dqn_exploration_final_eps", "sb3_dqn_exploration_final_eps")),
+            learning_starts=int(_arg_or_training_default("learning_starts", "sb3_learning_starts")),
+            train_freq=int(_arg_or_training_default("train_freq", "sb3_train_freq")),
+            gradient_steps=int(_arg_or_training_default("gradient_steps", "sb3_gradient_steps")),
+            tau=float(_arg_or_training_default("tau", "sb3_tau")),
+            action_noise_std=float(_arg_or_training_default("action_noise_std", "sb3_action_noise_std")),
+            buffer_size=int(_arg_or_training_default("buffer_size", "sb3_buffer_size")),
+            optimize_memory_usage=bool(_arg_or_training_default("optimize_memory_usage", "sb3_optimize_memory_usage")),
+            best_gate_enabled=bool(_arg_or_training_default("best_gate_enabled", "sb3_best_gate_enabled")),
+            best_gate_electric_min=float(_arg_or_training_default("best_gate_electric_min", "sb3_best_gate_electric_min")),
+            best_gate_heat_min=float(_arg_or_training_default("best_gate_heat_min", "sb3_best_gate_heat_min")),
+            best_gate_cool_min=float(_arg_or_training_default("best_gate_cool_min", "sb3_best_gate_cool_min")),
             seed=seed,
-            device=args.device,
+            device=str(_arg_or_training_default("device", "device")),
         )
         result = train_sb3_policy(
             train_df=train_df,
@@ -1011,8 +1044,23 @@ def build_parser() -> argparse.ArgumentParser:
         dest="sb3_residual_enabled",
         action="store_true",
         default=argparse.SUPPRESS,
-        help="预留参数：当前 residual 模式尚未实现，会在配置校验阶段报错。",
+        help="启用连续动作算法的 rule residual 模式：动作解释为相对基线策略的残差。",
     )
+    train_parser.add_argument(
+        "--no-sb3-residual",
+        dest="sb3_residual_enabled",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="关闭连续动作算法的 residual 模式。",
+    )
+    train_parser.add_argument(
+        "--sb3-residual-policy",
+        type=str,
+        default=argparse.SUPPRESS,
+        choices=["easy_rule", "rule"],
+        help="residual 基线策略来源：easy_rule 或 rule。",
+    )
+    train_parser.add_argument("--sb3-residual-scale", type=float, default=argparse.SUPPRESS)
     train_parser.add_argument("--sb3-ppo-warm-start-samples", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument("--sb3-ppo-warm-start-epochs", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument("--sb3-ppo-warm-start-batch-size", type=int, default=argparse.SUPPRESS)
@@ -1022,7 +1070,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="sb3_offpolicy_prefill_enabled",
         action="store_true",
         default=argparse.SUPPRESS,
-        help="为 SAC/TD3/DDPG/DQN 启用 easy_rule replay buffer 预填充。",
+        help="为 SAC/TD3/DDPG/DQN 启用规则 replay buffer 预填充。",
     )
     train_parser.add_argument(
         "--no-sb3-offpolicy-prefill",
@@ -1032,6 +1080,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="关闭 off-policy replay buffer 预填充。",
     )
     train_parser.add_argument("--sb3-offpolicy-prefill-steps", type=int, default=argparse.SUPPRESS)
+    train_parser.add_argument(
+        "--sb3-offpolicy-prefill-policy",
+        type=str,
+        default=argparse.SUPPRESS,
+        choices=["easy_rule", "rule"],
+        help="off-policy 预填充的专家策略来源：easy_rule 或 rule。",
+    )
     train_parser.add_argument("--sb3-ppo-n-steps", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument("--sb3-ppo-gae-lambda", type=float, default=argparse.SUPPRESS)
     train_parser.add_argument("--sb3-ppo-ent-coef", type=float, default=argparse.SUPPRESS)
@@ -1060,6 +1115,23 @@ def build_parser() -> argparse.ArgumentParser:
         default=argparse.SUPPRESS,
         help="禁用 replay buffer 的内存优化（不推荐，可能 OOM）。",
     )
+    train_parser.add_argument(
+        "--sb3-best-gate-enabled",
+        dest="sb3_best_gate_enabled",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="best checkpoint 选择时启用可靠性门槛。",
+    )
+    train_parser.add_argument(
+        "--no-sb3-best-gate",
+        dest="sb3_best_gate_enabled",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="关闭可靠性门槛，回退到纯 reward best。",
+    )
+    train_parser.add_argument("--sb3-best-gate-electric-min", type=float, default=argparse.SUPPRESS)
+    train_parser.add_argument("--sb3-best-gate-heat-min", type=float, default=argparse.SUPPRESS)
+    train_parser.add_argument("--sb3-best-gate-cool-min", type=float, default=argparse.SUPPRESS)
 
     eval_parser = subparsers.add_parser("eval", help="运行 baseline 评估（固定 2025）。")
     eval_parser.add_argument("--run-dir", type=Path, default=None)
@@ -1110,31 +1182,31 @@ def build_parser() -> argparse.ArgumentParser:
         choices=list(DEFAULT_CONSTRAINT_MODES),
         help="覆盖 env.constraint_mode（子命令级覆盖）。",
     )
-    sb3_train_parser.add_argument("--algo", type=str, choices=["ppo", "sac", "td3", "ddpg", "dqn"], default="ppo")
+    sb3_train_parser.add_argument("--algo", type=str, choices=["ppo", "sac", "td3", "ddpg", "dqn"], default=argparse.SUPPRESS)
     sb3_train_parser.add_argument(
         "--backbone",
         type=str,
         choices=["mlp", "transformer", "mamba"],
-        default="mlp",
+        default=argparse.SUPPRESS,
         help="SB3 特征提取骨干：mlp/transformer/mamba（用于 SAC+Transformer 等对比）。",
     )
     sb3_train_parser.add_argument(
         "--history-steps",
         type=int,
-        default=16,
+        default=argparse.SUPPRESS,
         help="SB3 序列窗口长度（步）。",
     )
-    sb3_train_parser.add_argument("--total-timesteps", type=int, default=200_000)
-    sb3_train_parser.add_argument("--episode-days", type=int, default=14)
-    sb3_train_parser.add_argument("--n-envs", type=int, default=1)
-    sb3_train_parser.add_argument("--learning-rate", type=float, default=3e-4)
-    sb3_train_parser.add_argument("--batch-size", type=int, default=256)
-    sb3_train_parser.add_argument("--gamma", type=float, default=0.99)
+    sb3_train_parser.add_argument("--total-timesteps", type=int, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--episode-days", type=int, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--n-envs", type=int, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--learning-rate", type=float, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--batch-size", type=int, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--gamma", type=float, default=argparse.SUPPRESS)
     sb3_train_parser.add_argument(
         "--vec-norm-obs",
         dest="vec_norm_obs",
         action="store_true",
-        default=True,
+        default=argparse.SUPPRESS,
         help="启用 VecNormalize 观测归一化（默认开启）。",
     )
     sb3_train_parser.add_argument(
@@ -1148,7 +1220,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--vec-norm-reward",
         dest="vec_norm_reward",
         action="store_true",
-        default=True,
+        default=argparse.SUPPRESS,
         help="启用 VecNormalize 奖励归一化（默认开启）。",
     )
     sb3_train_parser.add_argument(
@@ -1158,16 +1230,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=argparse.SUPPRESS,
         help="关闭 VecNormalize 奖励归一化。",
     )
-    sb3_train_parser.add_argument("--eval-freq", type=int, default=50_000)
-    sb3_train_parser.add_argument("--eval-episode-days", type=int, default=14)
-    sb3_train_parser.add_argument("--eval-window-pool-size", type=int, default=12)
-    sb3_train_parser.add_argument("--eval-window-count", type=int, default=4)
-    sb3_train_parser.add_argument("--eval-window-seed", type=int, default=42)
+    sb3_train_parser.add_argument("--eval-freq", type=int, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--eval-episode-days", type=int, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--eval-window-pool-size", type=int, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--eval-window-count", type=int, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--eval-window-seed", type=int, default=argparse.SUPPRESS)
     sb3_train_parser.add_argument(
         "--ppo-warm-start-enabled",
         dest="ppo_warm_start_enabled",
         action="store_true",
-        default=False,
+        default=argparse.SUPPRESS,
         help="启用 easy_rule 行为克隆预热（当前仅 PPO 支持）。",
     )
     sb3_train_parser.add_argument(
@@ -1181,19 +1253,34 @@ def build_parser() -> argparse.ArgumentParser:
         "--residual-enabled",
         dest="residual_enabled",
         action="store_true",
-        default=False,
-        help="预留参数：当前 residual 模式尚未实现，会在配置校验阶段报错。",
+        default=argparse.SUPPRESS,
+        help="启用连续动作算法的 rule residual 模式：动作解释为相对基线策略的残差。",
     )
-    sb3_train_parser.add_argument("--ppo-warm-start-samples", type=int, default=16384)
-    sb3_train_parser.add_argument("--ppo-warm-start-epochs", type=int, default=4)
-    sb3_train_parser.add_argument("--ppo-warm-start-batch-size", type=int, default=256)
-    sb3_train_parser.add_argument("--ppo-warm-start-lr", type=float, default=1e-4)
+    sb3_train_parser.add_argument(
+        "--no-residual",
+        dest="residual_enabled",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="关闭连续动作算法的 residual 模式。",
+    )
+    sb3_train_parser.add_argument(
+        "--residual-policy",
+        type=str,
+        default=argparse.SUPPRESS,
+        choices=["easy_rule", "rule"],
+        help="residual 基线策略来源：easy_rule 或 rule。",
+    )
+    sb3_train_parser.add_argument("--residual-scale", type=float, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--ppo-warm-start-samples", type=int, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--ppo-warm-start-epochs", type=int, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--ppo-warm-start-batch-size", type=int, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--ppo-warm-start-lr", type=float, default=argparse.SUPPRESS)
     sb3_train_parser.add_argument(
         "--offpolicy-prefill-enabled",
         dest="offpolicy_prefill_enabled",
         action="store_true",
-        default=False,
-        help="为 SAC/TD3/DDPG/DQN 启用 easy_rule replay buffer 预填充。",
+        default=argparse.SUPPRESS,
+        help="为 SAC/TD3/DDPG/DQN 启用规则 replay buffer 预填充。",
     )
     sb3_train_parser.add_argument(
         "--no-offpolicy-prefill",
@@ -1205,28 +1292,35 @@ def build_parser() -> argparse.ArgumentParser:
     sb3_train_parser.add_argument(
         "--offpolicy-prefill-steps",
         type=int,
-        default=0,
+        default=argparse.SUPPRESS,
         help="预填充步数；0 表示自动使用 learning_starts。",
     )
-    sb3_train_parser.add_argument("--ppo-n-steps", type=int, default=2048)
-    sb3_train_parser.add_argument("--ppo-gae-lambda", type=float, default=0.95)
-    sb3_train_parser.add_argument("--ppo-ent-coef", type=float, default=0.0)
-    sb3_train_parser.add_argument("--ppo-clip-range", type=float, default=0.2)
-    sb3_train_parser.add_argument("--dqn-action-mode", type=str, choices=["rb_v1"], default="rb_v1")
-    sb3_train_parser.add_argument("--dqn-target-update-interval", type=int, default=1000)
-    sb3_train_parser.add_argument("--dqn-exploration-fraction", type=float, default=0.3)
-    sb3_train_parser.add_argument("--dqn-exploration-initial-eps", type=float, default=1.0)
-    sb3_train_parser.add_argument("--dqn-exploration-final-eps", type=float, default=0.05)
-    sb3_train_parser.add_argument("--learning-starts", type=int, default=5_000)
-    sb3_train_parser.add_argument("--train-freq", type=int, default=1)
-    sb3_train_parser.add_argument("--gradient-steps", type=int, default=1)
-    sb3_train_parser.add_argument("--tau", type=float, default=0.005)
-    sb3_train_parser.add_argument("--action-noise-std", type=float, default=0.1)
-    sb3_train_parser.add_argument("--buffer-size", type=int, default=50_000, help="off-policy replay buffer 大小。")
+    sb3_train_parser.add_argument(
+        "--offpolicy-prefill-policy",
+        type=str,
+        default=argparse.SUPPRESS,
+        choices=["easy_rule", "rule"],
+        help="off-policy 预填充的专家策略来源：easy_rule 或 rule。",
+    )
+    sb3_train_parser.add_argument("--ppo-n-steps", type=int, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--ppo-gae-lambda", type=float, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--ppo-ent-coef", type=float, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--ppo-clip-range", type=float, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--dqn-action-mode", type=str, choices=["rb_v1"], default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--dqn-target-update-interval", type=int, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--dqn-exploration-fraction", type=float, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--dqn-exploration-initial-eps", type=float, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--dqn-exploration-final-eps", type=float, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--learning-starts", type=int, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--train-freq", type=int, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--gradient-steps", type=int, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--tau", type=float, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--action-noise-std", type=float, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--buffer-size", type=int, default=argparse.SUPPRESS, help="off-policy replay buffer 大小。")
     sb3_train_parser.add_argument(
         "--optimize-memory-usage",
         action="store_true",
-        default=True,
+        default=argparse.SUPPRESS,
         help="启用 replay buffer 内存优化（默认开启；可显著降低内存占用）。",
     )
     sb3_train_parser.add_argument(
@@ -1236,8 +1330,25 @@ def build_parser() -> argparse.ArgumentParser:
         default=argparse.SUPPRESS,
         help="禁用 replay buffer 内存优化（不推荐）。",
     )
-    sb3_train_parser.add_argument("--device", type=str, default="auto")
-    sb3_train_parser.add_argument("--seed", type=str, default="42")
+    sb3_train_parser.add_argument(
+        "--best-gate-enabled",
+        dest="best_gate_enabled",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="best checkpoint 选择时启用可靠性门槛（默认开启）。",
+    )
+    sb3_train_parser.add_argument(
+        "--no-best-gate",
+        dest="best_gate_enabled",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="关闭可靠性门槛，回退到纯 reward best。",
+    )
+    sb3_train_parser.add_argument("--best-gate-electric-min", type=float, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--best-gate-heat-min", type=float, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--best-gate-cool-min", type=float, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--device", type=str, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--seed", type=str, default=argparse.SUPPRESS)
     sb3_train_parser.add_argument(
         "--eval-after-train",
         action="store_true",

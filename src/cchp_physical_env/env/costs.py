@@ -80,6 +80,7 @@ def compute_cost_breakdown(
     fuel_input_gt_effective_mw: float,
     p_gt_mw: float,
     gt_started: int,
+    gt_on_steps: int,
     bes_degradation_cost: float,
     boiler_fuel_input_mw: float,
     p_unmet_e_mw: float,
@@ -138,7 +139,17 @@ def compute_cost_breakdown(
         + cost_grid_export_penalty
     )
     cost_gt_fuel = fuel_input_gt_effective_mw * dt_h * price_gas
-    cost_gt_om = p_gt_mw * dt_h * config.gt_om_var_cost_per_mwh + gt_started * config.gt_start_cost
+    if bool(getattr(config, "gt_dynamic_om_enabled", False)):
+        cycle_hours = max(float(dt_h), float(getattr(config, "gt_cycle_hours", dt_h)))
+        cycle_steps = max(1, int(round(cycle_hours / max(1e-9, float(dt_h)))))
+        if float(p_gt_mw) > 1e-9 and int(gt_on_steps) <= cycle_steps:
+            cost_gt_om = float(getattr(config, "gt_cycle_cost", 0.0)) / float(cycle_steps)
+        elif float(p_gt_mw) > 1e-9:
+            cost_gt_om = p_gt_mw * dt_h * config.gt_om_var_cost_per_mwh
+        else:
+            cost_gt_om = 0.0
+    else:
+        cost_gt_om = p_gt_mw * dt_h * config.gt_om_var_cost_per_mwh + gt_started * config.gt_start_cost
     cost_bes_degr = max(0.0, float(bes_degradation_cost))
     cost_boiler = boiler_fuel_input_mw * dt_h * price_gas
 
