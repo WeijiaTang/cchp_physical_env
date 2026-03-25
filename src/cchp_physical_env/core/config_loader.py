@@ -49,7 +49,7 @@ TRAINING_DEFAULTS: dict[str, Any] = {
     "sb3_eval_window_pool_size": 12,
     "sb3_eval_window_count": 4,
     "sb3_eval_window_seed": 42,
-    "sb3_ppo_warm_start_enabled": False,
+    "sb3_ppo_warm_start_enabled": True,
     "sb3_residual_enabled": True,
     "sb3_residual_policy": "rule",
     "sb3_residual_scale": 0.25,
@@ -82,6 +82,11 @@ TRAINING_DEFAULTS: dict[str, Any] = {
     "sb3_best_gate_electric_min": 1.0,
     "sb3_best_gate_heat_min": 0.999,
     "sb3_best_gate_cool_min": 0.999,
+    "sb3_plateau_control_enabled": True,
+    "sb3_plateau_patience_evals": 6,
+    "sb3_plateau_lr_decay_factor": 0.3,
+    "sb3_plateau_min_lr": 1e-5,
+    "sb3_plateau_early_stop_patience_evals": 4,
 }
 
 # env 参数校验规则表：
@@ -362,6 +367,7 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
         "sb3_residual_enabled",
         "sb3_offpolicy_prefill_enabled",
         "sb3_best_gate_enabled",
+        "sb3_plateau_control_enabled",
     }
     int_keys = {
         "seed",
@@ -385,6 +391,8 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
         "sb3_dqn_target_update_interval",
         "sb3_train_freq",
         "sb3_gradient_steps",
+        "sb3_plateau_patience_evals",
+        "sb3_plateau_early_stop_patience_evals",
     }
     for key, value in overrides.items():
         if key in {
@@ -433,7 +441,7 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
                 if int(value) <= 0 and key != "seed":
                     raise ValueError(f"{key} 必须 > 0。")
             continue
-        if key in {"lr", "sb3_learning_rate"}:
+        if key in {"lr", "sb3_learning_rate", "sb3_plateau_min_lr"}:
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ValueError(f"{key} 必须是数值类型。")
             if float(value) <= 0.0:
@@ -488,11 +496,22 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
             if not (0.0 < numeric <= 1.0):
                 raise ValueError("sb3_dqn_exploration_fraction 必须在 (0,1]。")
             continue
-        if key in {"sb3_ppo_ent_coef", "sb3_action_noise_std", "sb3_residual_scale"}:
+        if key in {
+            "sb3_ppo_ent_coef",
+            "sb3_action_noise_std",
+            "sb3_residual_scale",
+        }:
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ValueError(f"{key} 必须是数值类型。")
             if float(value) < 0.0:
                 raise ValueError(f"{key} 必须 >= 0。")
+            continue
+        if key in {"sb3_plateau_lr_decay_factor"}:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{key} 必须是数值类型。")
+            numeric = float(value)
+            if not (0.0 < numeric < 1.0):
+                raise ValueError(f"{key} 必须在 (0,1) 内。")
             continue
         if key in {"sb3_best_gate_electric_min", "sb3_best_gate_heat_min", "sb3_best_gate_cool_min"}:
             if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -592,6 +611,10 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
         gate_value = float(overrides.get(key, TRAINING_DEFAULTS[key]))
         if gate_value < 0.0 or gate_value > 1.0:
             raise ValueError(f"{key} 必须在 [0,1]。")
+    plateau_min_lr = float(overrides.get("sb3_plateau_min_lr", TRAINING_DEFAULTS["sb3_plateau_min_lr"]))
+    learning_rate = float(overrides.get("sb3_learning_rate", TRAINING_DEFAULTS["sb3_learning_rate"]))
+    if plateau_min_lr > learning_rate:
+        raise ValueError("sb3_plateau_min_lr 不能大于 sb3_learning_rate。")
 
 
 def build_training_options(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -669,4 +692,11 @@ def build_training_options(overrides: dict[str, Any] | None = None) -> dict[str,
     normalized["sb3_best_gate_electric_min"] = float(normalized["sb3_best_gate_electric_min"])
     normalized["sb3_best_gate_heat_min"] = float(normalized["sb3_best_gate_heat_min"])
     normalized["sb3_best_gate_cool_min"] = float(normalized["sb3_best_gate_cool_min"])
+    normalized["sb3_plateau_control_enabled"] = bool(normalized["sb3_plateau_control_enabled"])
+    normalized["sb3_plateau_patience_evals"] = int(normalized["sb3_plateau_patience_evals"])
+    normalized["sb3_plateau_lr_decay_factor"] = float(normalized["sb3_plateau_lr_decay_factor"])
+    normalized["sb3_plateau_min_lr"] = float(normalized["sb3_plateau_min_lr"])
+    normalized["sb3_plateau_early_stop_patience_evals"] = int(
+        normalized["sb3_plateau_early_stop_patience_evals"]
+    )
     return normalized

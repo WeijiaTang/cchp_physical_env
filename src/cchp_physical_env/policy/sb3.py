@@ -2,11 +2,12 @@
 # Ref: docs/spec/architecture.md (Pattern: Policy / Optional Dependency Integration)
 from __future__ import annotations
 
+import functools
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -18,7 +19,12 @@ from ..core.data import (
     load_exogenous_data,
     make_episode_sampler,
 )
-from ..core.reporting import flatten_mapping, write_one_row_csv, write_paper_eval_artifacts
+from ..core.reporting import (
+    flatten_mapping,
+    write_learning_curve_artifacts,
+    write_one_row_csv,
+    write_paper_eval_artifacts,
+)
 from ..env.cchp_env import CCHPPhysicalEnv, EnvConfig
 
 try:
@@ -108,6 +114,22 @@ def _build_mamba_config(*, d_model: int, n_layer: int, d_state: int, d_conv: int
         use_cache=False,
         use_mambapy=False,
     )
+
+
+def _build_sinusoidal_position_encoding(*, seq_len: int, d_model: int) -> Tensor:
+    _require_torch()
+    if int(seq_len) <= 0:
+        raise ValueError("seq_len 必须 > 0。")
+    if int(d_model) <= 0:
+        raise ValueError("d_model 必须 > 0。")
+    position = torch.arange(int(seq_len), dtype=torch.float32).unsqueeze(1)
+    div_term = torch.exp(
+        torch.arange(0, int(d_model), 2, dtype=torch.float32) * (-np.log(10_000.0) / float(d_model))
+    )
+    encoding = torch.zeros(int(seq_len), int(d_model), dtype=torch.float32)
+    encoding[:, 0::2] = torch.sin(position * div_term)
+    encoding[:, 1::2] = torch.cos(position * div_term[: encoding[:, 1::2].shape[1]])
+    return encoding.unsqueeze(0)
 
 
 def _require_sb3_modules():
@@ -519,7 +541,7 @@ class SB3TrainConfig:
     eval_window_pool_size: int = 0
     eval_window_count: int = 0
     eval_window_seed: int | None = None
-    ppo_warm_start_enabled: bool = False
+    ppo_warm_start_enabled: bool = True
     residual_enabled: bool = False
     residual_policy: str = "rule"
     residual_scale: float = 0.35
@@ -550,6 +572,11 @@ class SB3TrainConfig:
     best_gate_electric_min: float = 1.0
     best_gate_heat_min: float = 0.999
     best_gate_cool_min: float = 0.999
+    plateau_control_enabled: bool = True
+    plateau_patience_evals: int = 6
+    plateau_lr_decay_factor: float = 0.3
+    plateau_min_lr: float = 1e-5
+    plateau_early_stop_patience_evals: int = 4
     seed: int = 42
     device: str = "auto"
 
@@ -689,6 +716,21 @@ class SB3TrainConfig:
         ):
             if value < 0.0 or value > 1.0:
                 raise ValueError(f"{field_name} 必须在 [0,1]。")
+        self.plateau_control_enabled = bool(self.plateau_control_enabled)
+        self.plateau_patience_evals = int(self.plateau_patience_evals)
+        if self.plateau_patience_evals <= 0:
+            raise ValueError("plateau_patience_evals 必须 > 0。")
+        self.plateau_lr_decay_factor = float(self.plateau_lr_decay_factor)
+        if not (0.0 < self.plateau_lr_decay_factor < 1.0):
+            raise ValueError("plateau_lr_decay_factor 必须在 (0,1) 内。")
+        self.plateau_min_lr = float(self.plateau_min_lr)
+        if self.plateau_min_lr <= 0.0:
+            raise ValueError("plateau_min_lr 必须 > 0。")
+        if self.plateau_min_lr > self.learning_rate:
+            raise ValueError("plateau_min_lr 不能大于 learning_rate。")
+        self.plateau_early_stop_patience_evals = int(self.plateau_early_stop_patience_evals)
+        if self.plateau_early_stop_patience_evals <= 0:
+            raise ValueError("plateau_early_stop_patience_evals 必须 > 0。")
         self.seed = int(self.seed)
         self.device = str(self.device).strip().lower()
 
@@ -1032,45 +1074,57 @@ if torch is not None and BaseFeaturesExtractor is not object:
         )
         return torch.clamp(safe, min=-float(clip_value), max=float(clip_value))
 
-    class SB3TransformerWindowExtractor(BaseFeaturesExtractor):
-        def __init__(
-            self,
-            observation_space: Any,
-            *,
-            d_model: int = 128,
-            n_head: int = 4,
-            n_layer: int = 3,
-            dropout: float = 0.1,
-        ) -> None:
-            shape = getattr(observation_space, "shape", None)
-            if not shape or len(shape) != 2:
-                raise ValueError("TransformerWindowExtractor 仅支持 Box(K,D) observation_space。")
-            _, obs_dim = int(shape[0]), int(shape[1])
-            super().__init__(observation_space, features_dim=int(d_model))
-            self.input_norm = nn.LayerNorm(obs_dim)
-            self.input_proj = nn.Linear(obs_dim, int(d_model))
-            encoder_layer = nn.TransformerEncoderLayer(
-                d_model=int(d_model),
-                nhead=int(n_head),
-                dim_feedforward=int(d_model) * 4,
-                dropout=float(dropout),
-                activation="gelu",
-                batch_first=True,
-                norm_first=True,
-            )
-            self.transformer = nn.TransformerEncoder(encoder_layer=encoder_layer, num_layers=int(n_layer))
-            self.output_norm = nn.LayerNorm(int(d_model))
+class SB3TransformerWindowExtractor(BaseFeaturesExtractor):
+    def __init__(
+        self,
+        observation_space: Any,
+        *,
+        d_model: int = 128,
+        n_head: int = 4,
+        n_layer: int = 3,
+        dropout: float = 0.1,
+        pos_encoding: str = "sinusoidal",
+    ) -> None:
+        shape = getattr(observation_space, "shape", None)
+        if not shape or len(shape) != 2:
+            raise ValueError("TransformerWindowExtractor 仅支持 Box(K,D) observation_space。")
+        seq_len, obs_dim = int(shape[0]), int(shape[1])
+        super().__init__(observation_space, features_dim=int(d_model))
+        self.pos_encoding = str(pos_encoding).strip().lower()
+        if self.pos_encoding != "sinusoidal":
+            raise ValueError("TransformerWindowExtractor 当前仅支持 sinusoidal positional encoding。")
+        self.input_norm = nn.LayerNorm(obs_dim)
+        self.input_proj = nn.Linear(obs_dim, int(d_model))
+        self.input_dropout = nn.Dropout(float(dropout))
+        self.register_buffer(
+            "positional_encoding",
+            _build_sinusoidal_position_encoding(seq_len=seq_len, d_model=int(d_model)),
+            persistent=False,
+        )
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=int(d_model),
+            nhead=int(n_head),
+            dim_feedforward=int(d_model) * 4,
+            dropout=float(dropout),
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer=encoder_layer, num_layers=int(n_layer))
+        self.output_norm = nn.LayerNorm(int(d_model))
 
-        def forward(self, observations: Tensor) -> Tensor:
-            if observations.dim() != 3:
-                raise ValueError("SB3 Transformer extractor 输入必须是 (B,K,D)。")
-            safe_observations = _sanitize_window_observations(observations)
-            normalized_observations = self.input_norm(safe_observations)
-            hidden = self.input_proj(normalized_observations)
-            hidden = self.transformer(hidden)
-            hidden = torch.nan_to_num(hidden, nan=0.0, posinf=1e4, neginf=-1e4)
-            hidden_last = self.output_norm(hidden[:, -1, :])
-            return hidden_last
+    def forward(self, observations: Tensor) -> Tensor:
+        if observations.dim() != 3:
+            raise ValueError("SB3 Transformer extractor 输入必须是 (B,K,D)。")
+        safe_observations = _sanitize_window_observations(observations)
+        normalized_observations = self.input_norm(safe_observations)
+        hidden = self.input_proj(normalized_observations)
+        hidden = hidden + self.positional_encoding[:, : hidden.shape[1], :].to(hidden.dtype)
+        hidden = self.input_dropout(hidden)
+        hidden = self.transformer(hidden)
+        hidden = torch.nan_to_num(hidden, nan=0.0, posinf=1e4, neginf=-1e4)
+        hidden_last = self.output_norm(hidden[:, -1, :])
+        return hidden_last
 
 
     class SB3MambaWindowExtractor(BaseFeaturesExtractor):
@@ -1127,7 +1181,13 @@ def _sb3_policy_kwargs_for_backbone(*, backbone: str) -> dict[str, Any]:
             raise ModuleNotFoundError("未检测到 stable-baselines3。")
         return {
             "features_extractor_class": SB3TransformerWindowExtractor,
-            "features_extractor_kwargs": {"d_model": 128, "n_head": 4, "n_layer": 3, "dropout": 0.1},
+            "features_extractor_kwargs": {
+                "d_model": 128,
+                "n_head": 4,
+                "n_layer": 3,
+                "dropout": 0.1,
+                "pos_encoding": "sinusoidal",
+            },
         }
     if normalized == "mamba":
         if BaseFeaturesExtractor is object:  # pragma: no cover
@@ -1187,6 +1247,73 @@ def _copy_vecnormalize_stats(source_env: Any, target_env: Any) -> None:
     else:
         _copy_running_mean_std(source_obs_rms, target_obs_rms)
     _copy_running_mean_std(getattr(source_env, "ret_rms", None), getattr(target_env, "ret_rms", None))
+
+
+def _constant_lr_schedule(progress_remaining: float, *, learning_rate: float) -> float:
+    del progress_remaining
+    return float(learning_rate)
+
+
+def _iter_model_optimizers(model: Any) -> list[Any]:
+    candidates: list[Any] = []
+    for owner in (
+        model,
+        getattr(model, "policy", None),
+        getattr(model, "actor", None),
+        getattr(model, "critic", None),
+    ):
+        optimizer = getattr(owner, "optimizer", None) if owner is not None else None
+        if optimizer is not None:
+            candidates.append(optimizer)
+    ent_coef_optimizer = getattr(model, "ent_coef_optimizer", None)
+    if ent_coef_optimizer is not None:
+        candidates.append(ent_coef_optimizer)
+    optimizers_attr = getattr(getattr(model, "policy", None), "optimizers", None)
+    if isinstance(optimizers_attr, (list, tuple)):
+        for optimizer in optimizers_attr:
+            if optimizer is not None:
+                candidates.append(optimizer)
+    unique: list[Any] = []
+    seen: set[int] = set()
+    for optimizer in candidates:
+        if optimizer is None or not hasattr(optimizer, "param_groups"):
+            continue
+        optimizer_id = id(optimizer)
+        if optimizer_id in seen:
+            continue
+        seen.add(optimizer_id)
+        unique.append(optimizer)
+    return unique
+
+
+def _get_model_learning_rate(model: Any, *, fallback: float) -> float:
+    for optimizer in _iter_model_optimizers(model):
+        param_groups = getattr(optimizer, "param_groups", None)
+        if not param_groups:
+            continue
+        lr_value = param_groups[0].get("lr")
+        if lr_value is not None:
+            return float(lr_value)
+    learning_rate = getattr(model, "learning_rate", None)
+    if learning_rate is not None:
+        try:
+            return float(learning_rate)
+        except (TypeError, ValueError):
+            pass
+    return float(fallback)
+
+
+def _set_model_learning_rate(model: Any, *, learning_rate: float) -> None:
+    lr_value = float(learning_rate)
+    if lr_value <= 0.0:
+        raise ValueError("learning_rate 必须 > 0。")
+    if hasattr(model, "learning_rate"):
+        model.learning_rate = lr_value
+    if hasattr(model, "lr_schedule"):
+        model.lr_schedule = functools.partial(_constant_lr_schedule, learning_rate=lr_value)
+    for optimizer in _iter_model_optimizers(model):
+        for param_group in getattr(optimizer, "param_groups", []):
+            param_group["lr"] = lr_value
 
 
 def _extract_eval_episode_summary(*, info: Mapping[str, Any] | None, vec_env: Any) -> dict[str, Any]:
@@ -1292,6 +1419,18 @@ def _evaluate_current_policy(
     return aggregated
 
 
+def _load_eval_history_rows(history_path: Path) -> list[dict[str, Any]]:
+    if not history_path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in history_path.read_text(encoding="utf-8").splitlines():
+        text = str(line).strip()
+        if not text:
+            continue
+        rows.append(json.loads(text))
+    return rows
+
+
 def _build_reliability_gate_result(
     *,
     metrics: Mapping[str, Any],
@@ -1309,20 +1448,33 @@ def _build_reliability_gate_result(
             "thresholds": thresholds,
             "actual": dict(metrics.get("reliability_min", {})),
             "failed_metrics": [],
+            "shortfall": {
+                "electric": 0.0,
+                "heat": 0.0,
+                "cooling": 0.0,
+                "total": 0.0,
+                "max": 0.0,
+            },
         }
 
     reliability_min = dict(metrics.get("reliability_min", {}))
     failed_metrics: list[dict[str, float | str]] = []
+    shortfall = {"electric": 0.0, "heat": 0.0, "cooling": 0.0}
     for key, threshold in thresholds.items():
         actual = float(reliability_min.get(key, 0.0))
-        if actual + 1e-9 < float(threshold):
+        delta = max(0.0, float(threshold) - actual)
+        shortfall[str(key)] = float(delta)
+        if delta > 1e-9:
             failed_metrics.append(
                 {
                     "metric": str(key),
                     "actual": float(actual),
                     "threshold": float(threshold),
+                    "shortfall": float(delta),
                 }
             )
+    total_shortfall = float(sum(float(value) for value in shortfall.values()))
+    max_shortfall = float(max((float(value) for value in shortfall.values()), default=0.0))
     return {
         "enabled": True,
         "passed": len(failed_metrics) == 0,
@@ -1331,6 +1483,13 @@ def _build_reliability_gate_result(
             key: float(reliability_min.get(key, 0.0)) for key in ("electric", "heat", "cooling")
         },
         "failed_metrics": failed_metrics,
+        "shortfall": {
+            "electric": float(shortfall["electric"]),
+            "heat": float(shortfall["heat"]),
+            "cooling": float(shortfall["cooling"]),
+            "total": total_shortfall,
+            "max": max_shortfall,
+        },
     }
 
 
@@ -1418,12 +1577,82 @@ def _collect_easy_rule_warm_start_dataset(
     )
 
 
+def _collect_residual_zero_warm_start_dataset(
+    *,
+    train_df: pd.DataFrame,
+    env_config: EnvConfig,
+    config: SB3TrainConfig,
+    observation_keys: tuple[str, ...],
+    train_statistics: Mapping[str, Any] | None,
+    DummyVecEnv: Any,
+    VecNormalize: Any,
+    use_vecnormalize: bool,
+) -> tuple[np.ndarray, np.ndarray, Any | None]:
+    residual_base_policy = _build_residual_expert_policy(
+        policy_name=str(config.residual_policy),
+        env_config=env_config,
+        train_statistics=None if train_statistics is None else dict(train_statistics),
+    )
+
+    warm_factory = make_train_env_factory(
+        train_df=train_df,
+        env_config=env_config,
+        seed=int(config.seed) + 20_000,
+        episode_days=config.episode_days,
+        history_steps=config.history_steps,
+        observation_keys=observation_keys,
+        normalizer=None,
+    )
+    warm_vec_env = DummyVecEnv([warm_factory])
+    if use_vecnormalize:
+        warm_vec_env = VecNormalize(
+            warm_vec_env,
+            training=True,
+            norm_obs=bool(config.vec_norm_obs),
+            norm_reward=bool(config.vec_norm_reward),
+            clip_obs=10.0,
+            clip_reward=10.0,
+            gamma=float(config.gamma),
+        )
+
+    base_env = _get_single_unwrapped_env(warm_vec_env)
+    observation = warm_vec_env.reset()
+    obs_batches: list[np.ndarray] = []
+    target_batches: list[np.ndarray] = []
+    sample_target = int(config.ppo_warm_start_samples)
+
+    try:
+        while len(obs_batches) < sample_target:
+            raw_observation = getattr(base_env, "observation", None)
+            if raw_observation is None:
+                raise RuntimeError("residual warm-start 数据采样失败：底层环境缺少 observation。")
+            action_dict = residual_base_policy.act(raw_observation)
+            obs_batches.append(np.asarray(observation[0], dtype=np.float32).copy())
+            target_batches.append(np.zeros(6, dtype=np.float32))
+            action_vec = _action_dict_to_vector(action_dict).reshape(1, -1)
+            observation, _, dones, _ = warm_vec_env.step(action_vec)
+            if bool(np.asarray(dones).reshape(-1)[0]):
+                observation = warm_vec_env.reset()
+    except Exception:
+        warm_vec_env.close()
+        raise
+
+    return (
+        np.asarray(obs_batches, dtype=np.float32),
+        np.asarray(target_batches, dtype=np.float32),
+        warm_vec_env,
+    )
+
+
 def _warm_start_ppo_from_easy_rule(
     *,
     model: Any,
     observations: np.ndarray,
     targets: np.ndarray,
     config: SB3TrainConfig,
+    target_indices: Sequence[int] = (2, 4),
+    target_action_keys: Sequence[str] = ("u_boiler", "u_ech"),
+    mode: str = "easy_rule_bc_v1",
 ) -> dict[str, Any]:
     _require_torch()
     if torch is None or F is Any:  # pragma: no cover
@@ -1435,6 +1664,8 @@ def _warm_start_ppo_from_easy_rule(
     dataset_size = int(len(observations))
     last_loss = float("nan")
     loss_history: list[float] = []
+    target_index_list = [int(index) for index in target_indices]
+    target_action_key_list = [str(item) for item in target_action_keys]
 
     model.policy.train()
     for _ in range(int(config.ppo_warm_start_epochs)):
@@ -1444,7 +1675,7 @@ def _warm_start_ppo_from_easy_rule(
             batch_obs = torch.as_tensor(observations[batch_indices], dtype=torch.float32, device=device)
             batch_targets = torch.as_tensor(targets[batch_indices], dtype=torch.float32, device=device)
             predicted_actions = _extract_actor_mean_actions(model, batch_obs)
-            loss = F.mse_loss(predicted_actions[:, [2, 4]], batch_targets)
+            loss = F.mse_loss(predicted_actions[:, target_index_list], batch_targets)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.policy.parameters(), max_norm=1.0)
@@ -1454,8 +1685,9 @@ def _warm_start_ppo_from_easy_rule(
 
     return {
         "enabled": True,
-        "mode": "easy_rule_bc_v1",
-        "target_action_keys": ["u_boiler", "u_ech"],
+        "mode": str(mode),
+        "target_action_keys": target_action_key_list,
+        "target_action_indices": target_index_list,
         "samples": int(dataset_size),
         "epochs": int(config.ppo_warm_start_epochs),
         "batch_size": int(batch_size),
@@ -2024,18 +2256,38 @@ def train_sb3_policy(
     if bool(config.ppo_warm_start_enabled):
         if config.algo != "ppo":
             warm_start_summary["status"] = "skipped_non_ppo"
-        elif residual_active:
-            warm_start_summary["status"] = "skipped_residual_mode"
         else:
-            warm_obs, warm_targets, warm_vec_env = _collect_easy_rule_warm_start_dataset(
-                train_df=train_df,
-                env_config=env_config,
-                config=config,
-                observation_keys=observation_keys,
-                DummyVecEnv=DummyVecEnv,
-                VecNormalize=VecNormalize,
-                use_vecnormalize=use_vecnormalize,
-            )
+            if residual_active:
+                warm_obs, warm_targets, warm_vec_env = _collect_residual_zero_warm_start_dataset(
+                    train_df=train_df,
+                    env_config=env_config,
+                    config=config,
+                    observation_keys=observation_keys,
+                    train_statistics=train_statistics,
+                    DummyVecEnv=DummyVecEnv,
+                    VecNormalize=VecNormalize,
+                    use_vecnormalize=use_vecnormalize,
+                )
+                warm_start_kwargs = {
+                    "target_indices": (0, 1, 2, 3, 4, 5),
+                    "target_action_keys": ("du_gt", "du_bes", "du_boiler", "du_abs", "du_ech", "du_tes"),
+                    "mode": "residual_zero_delta_bc_v1",
+                }
+            else:
+                warm_obs, warm_targets, warm_vec_env = _collect_easy_rule_warm_start_dataset(
+                    train_df=train_df,
+                    env_config=env_config,
+                    config=config,
+                    observation_keys=observation_keys,
+                    DummyVecEnv=DummyVecEnv,
+                    VecNormalize=VecNormalize,
+                    use_vecnormalize=use_vecnormalize,
+                )
+                warm_start_kwargs = {
+                    "target_indices": (2, 4),
+                    "target_action_keys": ("u_boiler", "u_ech"),
+                    "mode": "easy_rule_bc_v1",
+                }
             try:
                 if use_vecnormalize and warm_vec_env is not None:
                     _copy_vecnormalize_stats(warm_vec_env, train_env)
@@ -2044,6 +2296,7 @@ def train_sb3_policy(
                     observations=warm_obs,
                     targets=warm_targets,
                     config=config,
+                    **warm_start_kwargs,
                 )
                 warm_start_summary["applied"] = True
             finally:
@@ -2129,7 +2382,7 @@ def train_sb3_policy(
             "scale": float(config.residual_scale),
         },
         "best_model_selection": {
-            "mode": "reliability_gate_then_reward_v1" if bool(config.best_gate_enabled) else "reward_best_v1",
+            "mode": "reliability_shortfall_then_reward_v2" if bool(config.best_gate_enabled) else "reward_best_v1",
             "gate_enabled": bool(config.best_gate_enabled),
             "thresholds": {
                 "electric": float(config.best_gate_electric_min),
@@ -2137,6 +2390,13 @@ def train_sb3_policy(
                 "cooling": float(config.best_gate_cool_min),
             },
             "history_path": str(eval_history_path).replace("\\", "/"),
+        },
+        "plateau_control": {
+            "enabled": bool(config.plateau_control_enabled),
+            "patience_evals": int(config.plateau_patience_evals),
+            "lr_decay_factor": float(config.plateau_lr_decay_factor),
+            "min_lr": float(config.plateau_min_lr),
+            "early_stop_patience_evals": int(config.plateau_early_stop_patience_evals),
         },
         "ppo_hyperparameters": {
             "warm_start_enabled": bool(config.ppo_warm_start_enabled),
@@ -2255,8 +2515,17 @@ def train_sb3_policy(
             self.best_mean_reward = float("-inf")
             self.best_reward_mean = float("-inf")
             self.best_gate_passed = False
+            self.best_gate_shortfall_total = float("inf")
+            self.best_gate_shortfall_max = float("inf")
             self.best_snapshot: dict[str, Any] | None = None
             self.best_reward_snapshot: dict[str, Any] | None = None
+            self.no_improve_evals = 0
+            self.lr_decay_count = 0
+            self.fine_tune_applied = False
+            self.stop_requested = False
+            self.stop_reason = ""
+            self.current_learning_rate = float(config.learning_rate)
+            self.plateau_events: list[dict[str, Any]] = []
 
         def _save_selection_bundle(self, *, path: Path, vecnorm_path: Path | None) -> None:
             self.model.save(str(path))
@@ -2266,6 +2535,13 @@ def train_sb3_policy(
             self.history_path.parent.mkdir(parents=True, exist_ok=True)
             with self.history_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(payload_item, ensure_ascii=False) + "\n")
+
+        def _record_plateau_event(self, event: dict[str, Any]) -> dict[str, Any]:
+            normalized = dict(event)
+            self.plateau_events.append(normalized)
+            if len(self.plateau_events) > 16:
+                self.plateau_events = self.plateau_events[-16:]
+            return normalized
 
         def _on_step(self) -> bool:
             if self.n_calls % self.eval_freq != 0:
@@ -2279,24 +2555,6 @@ def train_sb3_policy(
                 deterministic=self.deterministic,
             )
             gate_result = _build_reliability_gate_result(metrics=metrics, config=config)
-            history_item = {
-                "timesteps": int(self.num_timesteps),
-                "mean_reward": float(metrics["mean_reward"]),
-                "mean_total_cost": float(metrics["mean_total_cost"]),
-                "mean_violation_rate": float(metrics["mean_violation_rate"]),
-                "mean_unmet_heat_mwh": float(metrics["mean_unmet_heat_mwh"]),
-                "mean_unmet_cool_mwh": float(metrics["mean_unmet_cool_mwh"]),
-                "reliability_mean": dict(metrics["reliability_mean"]),
-                "reliability_min": dict(metrics["reliability_min"]),
-                "gate": gate_result,
-            }
-            self._append_history(history_item)
-            self.logger.record("eval/mean_reward", float(metrics["mean_reward"]))
-            self.logger.record("eval/mean_total_cost", float(metrics["mean_total_cost"]))
-            self.logger.record("eval/reliability_heat_min", float(metrics["reliability_min"]["heat"]))
-            self.logger.record("eval/reliability_cooling_min", float(metrics["reliability_min"]["cooling"]))
-            self.logger.record("eval/reliability_electric_min", float(metrics["reliability_min"]["electric"]))
-            self.logger.record("eval/gate_passed", float(1.0 if gate_result["passed"] else 0.0))
 
             if float(metrics["mean_reward"]) > float(self.best_reward_mean):
                 self.best_reward_mean = float(metrics["mean_reward"])
@@ -2310,10 +2568,26 @@ def train_sb3_policy(
                     vecnorm_path=best_reward_vecnormalize_path,
                 )
 
-            current_rank = (1 if bool(gate_result["passed"]) else 0, float(metrics["mean_reward"]))
-            best_rank = (1 if bool(self.best_gate_passed) else 0, float(self.best_mean_reward))
+            shortfall = dict(gate_result.get("shortfall") or {})
+            current_shortfall_total = float(shortfall.get("total", 0.0))
+            current_shortfall_max = float(shortfall.get("max", 0.0))
+            current_rank = (
+                1 if bool(gate_result["passed"]) else 0,
+                -current_shortfall_total,
+                -current_shortfall_max,
+                float(metrics["mean_reward"]),
+            )
+            best_rank = (
+                1 if bool(self.best_gate_passed) else 0,
+                -float(self.best_gate_shortfall_total),
+                -float(self.best_gate_shortfall_max),
+                float(self.best_mean_reward),
+            )
+            improved = bool(current_rank > best_rank)
             if current_rank > best_rank:
                 self.best_gate_passed = bool(gate_result["passed"])
+                self.best_gate_shortfall_total = current_shortfall_total
+                self.best_gate_shortfall_max = current_shortfall_max
                 self.best_mean_reward = float(metrics["mean_reward"])
                 self.best_snapshot = {
                     "timesteps": int(self.num_timesteps),
@@ -2324,7 +2598,89 @@ def train_sb3_policy(
                     path=best_model_path,
                     vecnorm_path=best_vecnormalize_path,
                 )
-            return True
+            if improved:
+                self.no_improve_evals = 0
+            else:
+                self.no_improve_evals = int(self.no_improve_evals + 1)
+
+            plateau_event: dict[str, Any] | None = None
+            current_lr = _get_model_learning_rate(self.model, fallback=self.current_learning_rate)
+            if bool(config.plateau_control_enabled):
+                if (not improved) and (not self.fine_tune_applied) and self.no_improve_evals >= int(config.plateau_patience_evals):
+                    new_lr = max(float(config.plateau_min_lr), current_lr * float(config.plateau_lr_decay_factor))
+                    if new_lr < current_lr - 1e-12:
+                        _set_model_learning_rate(self.model, learning_rate=new_lr)
+                        self.current_learning_rate = float(new_lr)
+                        self.lr_decay_count = int(self.lr_decay_count + 1)
+                        self.fine_tune_applied = True
+                        plateau_event = self._record_plateau_event(
+                            {
+                                "timesteps": int(self.num_timesteps),
+                                "action": "low_lr_fine_tune",
+                                "stale_evals": int(self.no_improve_evals),
+                                "old_lr": float(current_lr),
+                                "new_lr": float(new_lr),
+                            }
+                        )
+                        self.no_improve_evals = 0
+                        current_lr = float(new_lr)
+                    else:
+                        self.fine_tune_applied = True
+                        self.current_learning_rate = float(current_lr)
+                elif self.fine_tune_applied and self.no_improve_evals >= int(config.plateau_early_stop_patience_evals):
+                    self.stop_requested = True
+                    self.stop_reason = "plateau_after_low_lr_fine_tune"
+                    plateau_event = self._record_plateau_event(
+                        {
+                            "timesteps": int(self.num_timesteps),
+                            "action": "early_stop",
+                            "stale_evals": int(self.no_improve_evals),
+                            "learning_rate": float(current_lr),
+                        }
+                    )
+                else:
+                    self.current_learning_rate = float(current_lr)
+            else:
+                self.current_learning_rate = float(current_lr)
+
+            history_item = {
+                "timesteps": int(self.num_timesteps),
+                "mean_reward": float(metrics["mean_reward"]),
+                "mean_total_cost": float(metrics["mean_total_cost"]),
+                "mean_violation_rate": float(metrics["mean_violation_rate"]),
+                "mean_unmet_heat_mwh": float(metrics["mean_unmet_heat_mwh"]),
+                "mean_unmet_cool_mwh": float(metrics["mean_unmet_cool_mwh"]),
+                "reliability_mean": dict(metrics["reliability_mean"]),
+                "reliability_min": dict(metrics["reliability_min"]),
+                "gate": gate_result,
+                "learning_rate": float(self.current_learning_rate),
+                "improved": bool(improved),
+                "plateau": {
+                    "enabled": bool(config.plateau_control_enabled),
+                    "fine_tune_applied": bool(self.fine_tune_applied),
+                    "lr_decay_count": int(self.lr_decay_count),
+                    "no_improve_evals": int(self.no_improve_evals),
+                    "stop_requested": bool(self.stop_requested),
+                    "stop_reason": str(self.stop_reason),
+                },
+            }
+            if plateau_event is not None:
+                history_item["plateau"]["event"] = plateau_event
+            self._append_history(history_item)
+            self.logger.record("eval/mean_reward", float(metrics["mean_reward"]))
+            self.logger.record("eval/mean_total_cost", float(metrics["mean_total_cost"]))
+            self.logger.record("eval/reliability_heat_min", float(metrics["reliability_min"]["heat"]))
+            self.logger.record("eval/reliability_cooling_min", float(metrics["reliability_min"]["cooling"]))
+            self.logger.record("eval/reliability_electric_min", float(metrics["reliability_min"]["electric"]))
+            self.logger.record("eval/gate_passed", float(1.0 if gate_result["passed"] else 0.0))
+            self.logger.record("eval/gate_shortfall_total", float((gate_result.get("shortfall") or {}).get("total", 0.0)))
+            self.logger.record("eval/gate_shortfall_max", float((gate_result.get("shortfall") or {}).get("max", 0.0)))
+            self.logger.record("train/current_learning_rate", float(self.current_learning_rate))
+            self.logger.record("train/plateau_no_improve_evals", float(self.no_improve_evals))
+            self.logger.record("train/plateau_fine_tune_applied", float(1.0 if self.fine_tune_applied else 0.0))
+            self.logger.record("train/plateau_lr_decay_count", float(self.lr_decay_count))
+            self.logger.record("train/early_stop_requested", float(1.0 if self.stop_requested else 0.0))
+            return not self.stop_requested
 
     eval_callback = _ReliabilityAwareEvalCallback(
         eval_env=eval_env,
@@ -2351,6 +2707,9 @@ def train_sb3_policy(
         _save_vecnormalize_bundle(best_reward_vecnormalize_path)
     payload["training_complete"] = True
     payload["training_timesteps_completed"] = int(getattr(model, "num_timesteps", config.total_timesteps))
+    payload["training_early_stopped"] = bool(getattr(eval_callback, "stop_requested", False))
+    payload["training_stop_reason"] = str(getattr(eval_callback, "stop_reason", ""))
+    payload["final_learning_rate"] = float(getattr(eval_callback, "current_learning_rate", config.learning_rate))
     best_reward = float(getattr(eval_callback, "best_mean_reward", float("-inf")))
     reward_leader = float(getattr(eval_callback, "best_reward_mean", float("-inf")))
     payload["best_mean_reward"] = None if not np.isfinite(best_reward) else best_reward
@@ -2364,6 +2723,33 @@ def train_sb3_policy(
         payload["best_model_selection"]["fallback_reason"] = "no_eval_triggered"
     if getattr(eval_callback, "best_reward_snapshot", None) is not None:
         payload["best_model_selection"]["reward_leader"] = eval_callback.best_reward_snapshot
+    payload["plateau_control"].update(
+        {
+            "fine_tune_applied": bool(getattr(eval_callback, "fine_tune_applied", False)),
+            "lr_decay_count": int(getattr(eval_callback, "lr_decay_count", 0)),
+            "current_learning_rate": float(getattr(eval_callback, "current_learning_rate", config.learning_rate)),
+            "stopped_early": bool(getattr(eval_callback, "stop_requested", False)),
+            "stop_reason": str(getattr(eval_callback, "stop_reason", "")),
+            "events": list(getattr(eval_callback, "plateau_events", [])),
+        }
+    )
+    progress_path = run_dir / "train" / "progress.csv"
+    progress_df = None
+    if progress_path.exists():
+        try:
+            progress_df = pd.read_csv(progress_path)
+        except Exception:
+            progress_df = None
+    convergence_artifacts = write_learning_curve_artifacts(
+        run_dir / "train",
+        eval_history_rows=_load_eval_history_rows(eval_history_path),
+        progress_df=progress_df,
+        selected_snapshot=payload["best_model_selection"].get("selected"),
+        reward_leader_snapshot=payload["best_model_selection"].get("reward_leader"),
+        total_timesteps=int(payload["training_timesteps_completed"]),
+    )
+    payload["learning_curve_artifacts"] = convergence_artifacts.get("files", {})
+    payload["convergence_summary"] = convergence_artifacts.get("summary", {})
     _write_payload()
     eval_env.close()
     train_env.close()

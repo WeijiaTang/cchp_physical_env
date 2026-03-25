@@ -29,3 +29,5 @@ kaggle/
 context_portal/*
 ${workspaceFolder}/
 tmp*
+cchp-paper/
+*.bak

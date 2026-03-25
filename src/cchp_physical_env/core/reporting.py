@@ -181,3 +181,115 @@ def write_paper_eval_artifacts(
         json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     return {k: str(v) for k, v in meta["paper_files"].items() if v is not None}
+
+
+def write_learning_curve_artifacts(
+    train_dir: str | Path,
+    *,
+    eval_history_rows: list[dict[str, Any]],
+    progress_df: pd.DataFrame | None = None,
+    selected_snapshot: dict[str, Any] | None = None,
+    reward_leader_snapshot: dict[str, Any] | None = None,
+    total_timesteps: int | None = None,
+) -> dict[str, Any]:
+    """
+    将训练收敛相关数据导出为论文/可视化友好的结构化文件。
+
+    输出：
+    - learning_curve_eval.csv / .json：训练中评估点
+    - learning_curve_train.csv：SB3 progress.csv 的可视化副本（若存在）
+    - convergence_summary.json：first / selected_best / reward_best / last / last5 统计
+    """
+    out_dir = Path(train_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    files: dict[str, str] = {}
+    summary: dict[str, Any] = {
+        "eval_points": int(len(eval_history_rows)),
+        "total_timesteps": None if total_timesteps is None else int(total_timesteps),
+    }
+
+    if eval_history_rows:
+        eval_csv_path = out_dir / "learning_curve_eval.csv"
+        eval_json_path = out_dir / "learning_curve_eval.json"
+        flat_rows = [flatten_mapping(row) for row in eval_history_rows]
+        pd.DataFrame(flat_rows).to_csv(eval_csv_path, index=False)
+        eval_json_path.write_text(
+            json.dumps(eval_history_rows, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        files["learning_curve_eval_csv"] = str(eval_csv_path)
+        files["learning_curve_eval_json"] = str(eval_json_path)
+
+        def _shortfall_total(item: dict[str, Any]) -> float:
+            gate = item.get("gate") or {}
+            shortfall = gate.get("shortfall") or {}
+            return float(shortfall.get("total", 0.0))
+
+        def _mean_reward(item: dict[str, Any]) -> float:
+            return float(item.get("mean_reward", 0.0))
+
+        def _snapshot_brief(item: dict[str, Any] | None) -> dict[str, Any] | None:
+            if not item:
+                return None
+            metrics = item.get("metrics") if isinstance(item.get("metrics"), dict) else item
+            gate = item.get("gate") or {}
+            return {
+                "timesteps": int(item.get("timesteps", metrics.get("timesteps", 0) or 0)),
+                "mean_reward": float(metrics.get("mean_reward", 0.0)),
+                "mean_total_cost": float(metrics.get("mean_total_cost", 0.0)),
+                "reliability_min": dict(metrics.get("reliability_min", {})),
+                "gate_passed": bool(gate.get("passed", False)),
+                "gate_shortfall": dict(gate.get("shortfall", {})),
+            }
+
+        last5 = eval_history_rows[-5:]
+        shortfall_last5 = [_shortfall_total(row) for row in last5]
+        reward_last5 = [_mean_reward(row) for row in last5]
+        best_selected = _snapshot_brief(selected_snapshot)
+        best_reward = _snapshot_brief(reward_leader_snapshot)
+        summary.update(
+            {
+                "first_eval": _snapshot_brief(eval_history_rows[0]),
+                "last_eval": _snapshot_brief(eval_history_rows[-1]),
+                "selected_best": best_selected,
+                "reward_best": best_reward,
+                "last5_shortfall_total_mean": (
+                    float(sum(shortfall_last5) / len(shortfall_last5)) if shortfall_last5 else None
+                ),
+                "last5_shortfall_total_std": (
+                    float(pd.Series(shortfall_last5, dtype="float64").std(ddof=0))
+                    if len(shortfall_last5) >= 1
+                    else None
+                ),
+                "last5_mean_reward_mean": (
+                    float(sum(reward_last5) / len(reward_last5)) if reward_last5 else None
+                ),
+                "last5_mean_reward_std": (
+                    float(pd.Series(reward_last5, dtype="float64").std(ddof=0))
+                    if len(reward_last5) >= 1
+                    else None
+                ),
+                "selected_before_halfway": (
+                    None
+                    if best_selected is None or total_timesteps is None or int(total_timesteps) <= 0
+                    else bool(int(best_selected["timesteps"]) <= int(total_timesteps) // 2)
+                ),
+            }
+        )
+
+    if progress_df is not None and not progress_df.empty:
+        progress_path = out_dir / "learning_curve_train.csv"
+        progress_df.to_csv(progress_path, index=False)
+        files["learning_curve_train_csv"] = str(progress_path)
+
+    summary_path = out_dir / "convergence_summary.json"
+    summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    files["convergence_summary_json"] = str(summary_path)
+
+    manifest = {"files": files, "summary": summary}
+    manifest_path = out_dir / "learning_curve_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    files["learning_curve_manifest_json"] = str(manifest_path)
+
+    return {"files": files, "summary": summary}

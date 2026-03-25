@@ -195,7 +195,7 @@ training:
   sb3_eval_window_pool_size: 12
   sb3_eval_window_count: 4
   sb3_eval_window_seed: 42
-  sb3_ppo_warm_start_enabled: false
+  sb3_ppo_warm_start_enabled: true
   sb3_residual_enabled: true
   sb3_residual_policy: rule
   sb3_residual_scale: 0.25
@@ -254,3 +254,10 @@ training:
   sb3_best_gate_electric_min: 1.0
   sb3_best_gate_heat_min: 0.999
   sb3_best_gate_cool_min: 0.999
+  # plateau 控制：当 best 选择排名长时间不再改善时，先降 LR 做一段低学习率 fine-tune；
+  # 若低 LR 阶段仍持续停滞，则提前结束训练，避免“早峰值后退化”继续扩大。
+  sb3_plateau_control_enabled: true
+  sb3_plateau_patience_evals: 6
+  sb3_plateau_lr_decay_factor: 0.3
+  sb3_plateau_min_lr: 0.00001
+  sb3_plateau_early_stop_patience_evals: 4

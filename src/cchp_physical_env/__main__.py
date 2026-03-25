@@ -119,6 +119,11 @@ TRAINING_OPTION_KEYS = (
     "sb3_best_gate_electric_min",
     "sb3_best_gate_heat_min",
     "sb3_best_gate_cool_min",
+    "sb3_plateau_control_enabled",
+    "sb3_plateau_patience_evals",
+    "sb3_plateau_lr_decay_factor",
+    "sb3_plateau_min_lr",
+    "sb3_plateau_early_stop_patience_evals",
 )
 
 
@@ -291,6 +296,11 @@ def _command_train(args: argparse.Namespace) -> None:
                 "sb3_best_gate_electric_min",
                 "sb3_best_gate_heat_min",
                 "sb3_best_gate_cool_min",
+                "sb3_plateau_control_enabled",
+                "sb3_plateau_patience_evals",
+                "sb3_plateau_lr_decay_factor",
+                "sb3_plateau_min_lr",
+                "sb3_plateau_early_stop_patience_evals",
             }
         )
         eval_df_cache: pd.DataFrame | None = None
@@ -346,6 +356,11 @@ def _command_train(args: argparse.Namespace) -> None:
                 best_gate_electric_min=current_options["sb3_best_gate_electric_min"],
                 best_gate_heat_min=current_options["sb3_best_gate_heat_min"],
                 best_gate_cool_min=current_options["sb3_best_gate_cool_min"],
+                plateau_control_enabled=bool(current_options["sb3_plateau_control_enabled"]),
+                plateau_patience_evals=current_options["sb3_plateau_patience_evals"],
+                plateau_lr_decay_factor=current_options["sb3_plateau_lr_decay_factor"],
+                plateau_min_lr=current_options["sb3_plateau_min_lr"],
+                plateau_early_stop_patience_evals=current_options["sb3_plateau_early_stop_patience_evals"],
                 seed=seed,
                 device=current_options["device"],
             )
@@ -650,6 +665,16 @@ def _command_sb3_train(args: argparse.Namespace) -> None:
             best_gate_electric_min=float(_arg_or_training_default("best_gate_electric_min", "sb3_best_gate_electric_min")),
             best_gate_heat_min=float(_arg_or_training_default("best_gate_heat_min", "sb3_best_gate_heat_min")),
             best_gate_cool_min=float(_arg_or_training_default("best_gate_cool_min", "sb3_best_gate_cool_min")),
+            plateau_control_enabled=bool(_arg_or_training_default("plateau_control_enabled", "sb3_plateau_control_enabled")),
+            plateau_patience_evals=int(_arg_or_training_default("plateau_patience_evals", "sb3_plateau_patience_evals")),
+            plateau_lr_decay_factor=float(_arg_or_training_default("plateau_lr_decay_factor", "sb3_plateau_lr_decay_factor")),
+            plateau_min_lr=float(_arg_or_training_default("plateau_min_lr", "sb3_plateau_min_lr")),
+            plateau_early_stop_patience_evals=int(
+                _arg_or_training_default(
+                    "plateau_early_stop_patience_evals",
+                    "sb3_plateau_early_stop_patience_evals",
+                )
+            ),
             seed=seed,
             device=str(_arg_or_training_default("device", "device")),
         )
@@ -1132,6 +1157,24 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--sb3-best-gate-electric-min", type=float, default=argparse.SUPPRESS)
     train_parser.add_argument("--sb3-best-gate-heat-min", type=float, default=argparse.SUPPRESS)
     train_parser.add_argument("--sb3-best-gate-cool-min", type=float, default=argparse.SUPPRESS)
+    train_parser.add_argument(
+        "--sb3-plateau-control-enabled",
+        dest="sb3_plateau_control_enabled",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="启用 plateau 检测：先降 LR fine-tune，再在持续停滞时提前停止训练。",
+    )
+    train_parser.add_argument(
+        "--no-sb3-plateau-control",
+        dest="sb3_plateau_control_enabled",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="关闭 plateau 低 LR / early-stop 机制。",
+    )
+    train_parser.add_argument("--sb3-plateau-patience-evals", type=int, default=argparse.SUPPRESS)
+    train_parser.add_argument("--sb3-plateau-lr-decay-factor", type=float, default=argparse.SUPPRESS)
+    train_parser.add_argument("--sb3-plateau-min-lr", type=float, default=argparse.SUPPRESS)
+    train_parser.add_argument("--sb3-plateau-early-stop-patience-evals", type=int, default=argparse.SUPPRESS)
 
     eval_parser = subparsers.add_parser("eval", help="运行 baseline 评估（固定 2025）。")
     eval_parser.add_argument("--run-dir", type=Path, default=None)
@@ -1347,6 +1390,24 @@ def build_parser() -> argparse.ArgumentParser:
     sb3_train_parser.add_argument("--best-gate-electric-min", type=float, default=argparse.SUPPRESS)
     sb3_train_parser.add_argument("--best-gate-heat-min", type=float, default=argparse.SUPPRESS)
     sb3_train_parser.add_argument("--best-gate-cool-min", type=float, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument(
+        "--plateau-control-enabled",
+        dest="plateau_control_enabled",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="启用 plateau 检测：先降 LR fine-tune，再在持续停滞时提前停止训练。",
+    )
+    sb3_train_parser.add_argument(
+        "--no-plateau-control",
+        dest="plateau_control_enabled",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="关闭 plateau 低 LR / early-stop 机制。",
+    )
+    sb3_train_parser.add_argument("--plateau-patience-evals", type=int, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--plateau-lr-decay-factor", type=float, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--plateau-min-lr", type=float, default=argparse.SUPPRESS)
+    sb3_train_parser.add_argument("--plateau-early-stop-patience-evals", type=int, default=argparse.SUPPRESS)
     sb3_train_parser.add_argument("--device", type=str, default=argparse.SUPPRESS)
     sb3_train_parser.add_argument("--seed", type=str, default=argparse.SUPPRESS)
     sb3_train_parser.add_argument(
