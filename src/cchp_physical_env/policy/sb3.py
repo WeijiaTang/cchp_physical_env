@@ -79,6 +79,10 @@ OBS_KEYS: tuple[str, ...] = (
     "e_tes_mwh",
     "t_tes_hot_k",
     "abs_drive_margin_k",
+    "q_hrsg_est_now_mw",
+    "q_tes_discharge_feasible_mw",
+    "heat_deficit_if_boiler_off_mw",
+    "heat_backup_min_needed_mw",
     "sin_t",
     "cos_t",
     "sin_week",
@@ -226,6 +230,22 @@ def _build_observation_normalizer(
         elif key == "abs_drive_margin_k":
             offsets.append(0.0)
             scales.append(max(2.0, float(getattr(env_config, "abs_gate_scale_k", 2.0))))
+        elif key == "q_hrsg_est_now_mw":
+            cap = max(
+                float(eps),
+                float(getattr(env_config, "q_boiler_cap_mw", 0.0))
+                + float(getattr(env_config, "q_tes_discharge_cap_mw", 0.0)),
+            )
+            offsets.append(0.5 * cap)
+            scales.append(0.5 * cap)
+        elif key == "q_tes_discharge_feasible_mw":
+            cap = max(float(eps), float(getattr(env_config, "q_tes_discharge_cap_mw", 0.0)))
+            offsets.append(0.5 * cap)
+            scales.append(0.5 * cap)
+        elif key in {"heat_deficit_if_boiler_off_mw", "heat_backup_min_needed_mw"}:
+            cap = max(float(eps), float(getattr(env_config, "q_boiler_cap_mw", 0.0)))
+            offsets.append(0.5 * cap)
+            scales.append(0.5 * cap)
         elif key.startswith("sin_") or key.startswith("cos_"):
             offsets.append(0.0)
             scales.append(1.0)
@@ -451,8 +471,19 @@ class RuleBasedDiscreteActionMapper:
         return float(np.clip(normalized, -1.0, 1.0))
 
     def _boiler_follow(self, observation: Mapping[str, float]) -> float:
-        qh_dem = float(observation.get("qh_dem_mw", 0.0))
-        return float(np.clip(qh_dem / max(1e-6, float(self.env_config.q_boiler_cap_mw)), 0.0, 1.0))
+        q_boiler_need = float(
+            observation.get(
+                "heat_backup_min_needed_mw",
+                observation.get("qh_dem_mw", 0.0),
+            )
+        )
+        return float(
+            np.clip(
+                q_boiler_need / max(1e-6, float(self.env_config.q_boiler_cap_mw)),
+                0.0,
+                1.0,
+            )
+        )
 
     def _ech_follow(self, observation: Mapping[str, float]) -> float:
         qc_dem = float(observation.get("qc_dem_mw", 0.0))
@@ -570,13 +601,13 @@ class SB3TrainConfig:
     optimize_memory_usage: bool = True
     best_gate_enabled: bool = True
     best_gate_electric_min: float = 1.0
-    best_gate_heat_min: float = 0.999
-    best_gate_cool_min: float = 0.999
+    best_gate_heat_min: float = 0.99
+    best_gate_cool_min: float = 0.99
     plateau_control_enabled: bool = True
-    plateau_patience_evals: int = 6
-    plateau_lr_decay_factor: float = 0.3
-    plateau_min_lr: float = 1e-5
-    plateau_early_stop_patience_evals: int = 4
+    plateau_patience_evals: int = 10
+    plateau_lr_decay_factor: float = 0.5
+    plateau_min_lr: float = 5e-5
+    plateau_early_stop_patience_evals: int = 999
     seed: int = 42
     device: str = "auto"
 

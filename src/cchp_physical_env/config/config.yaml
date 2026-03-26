@@ -93,6 +93,8 @@ env:
   cool_backup_idle_th_mw: 0.50
   penalty_idle_heat_backup: 50.0
   penalty_idle_cool_backup: 50.0
+  heat_backup_shield_enabled: true
+  heat_backup_shield_margin_mw: 0.05
 
   # HRSG 边界（建议不改：物理口径）
   hrsg_water_mass_flow_kg_per_s: 45.0
@@ -107,6 +109,28 @@ env:
   e_tes_init_mwh: 10.0
   q_tes_charge_cap_mw: 8.0
   q_tes_discharge_cap_mw: 8.0
+
+  # Oracle/MPC 公平性配置：用于修复 planner 上界口径
+  # - 启用 ABS，使 Oracle 不再退化为 “ECH-only” 冷侧规划
+  # - 使用近似硬保供门槛，避免低成本建立在大量 unmet 上
+  # - 放宽 MILP/GA 求解预算，使 Oracle 更接近“理论上界”
+  oracle_mpc_abs_enabled: true
+  oracle_mpc_hard_reliability: true
+  oracle_mpc_max_unmet_e_mw: 0.0
+  oracle_mpc_max_unmet_h_mw: 0.05
+  oracle_mpc_max_unmet_c_mw: 0.05
+  oracle_mpc_hard_unmet_penalty_per_mwh: 100000.0
+  oracle_mpc_heat_backup_repair_enabled: true
+  oracle_mpc_tes_terminal_reserve_mwh: 2.0
+  oracle_mpc_tes_terminal_reserve_penalty_per_mwh: 500.0
+  oracle_mpc_planning_horizon_steps: 16.0
+  oracle_mpc_replan_interval_steps: 4.0
+  oracle_mpc_time_limit_seconds: 2.0
+  oracle_mpc_mip_relative_gap: 0.01
+  oracle_ga_population_size: 24.0
+  oracle_ga_generations: 8.0
+  oracle_ga_elite_count: 4.0
+  oracle_ga_mutation_scale: 0.10
 
   # pyomo 求解配置
   pyomo_solver: projection
@@ -252,12 +276,13 @@ training:
   # best checkpoint 选择：先过可靠性门槛，再按 reward 选最优。
   sb3_best_gate_enabled: true
   sb3_best_gate_electric_min: 1.0
-  sb3_best_gate_heat_min: 0.999
-  sb3_best_gate_cool_min: 0.999
-  # plateau 控制：当 best 选择排名长时间不再改善时，先降 LR 做一段低学习率 fine-tune；
-  # 若低 LR 阶段仍持续停滞，则提前结束训练，避免“早峰值后退化”继续扩大。
+  sb3_best_gate_heat_min: 0.99
+  sb3_best_gate_cool_min: 0.99
+  # plateau 控制：当 best 选择排名长时间不再改善时，先降 LR 做一段低学习率 fine-tune。
+  # 当前默认值故意偏保守：优先保证“统一 2M 预算、只改算法名”时不容易误伤晚峰值算法（尤其 PPO/DDPG）。
+  # 如需真正提前停止，请在实验里显式收紧 early_stop_patience_evals。
   sb3_plateau_control_enabled: true
-  sb3_plateau_patience_evals: 6
-  sb3_plateau_lr_decay_factor: 0.3
-  sb3_plateau_min_lr: 0.00001
-  sb3_plateau_early_stop_patience_evals: 4
+  sb3_plateau_patience_evals: 10
+  sb3_plateau_lr_decay_factor: 0.5
+  sb3_plateau_min_lr: 0.00005
+  sb3_plateau_early_stop_patience_evals: 999

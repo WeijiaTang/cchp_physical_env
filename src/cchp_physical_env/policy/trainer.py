@@ -573,6 +573,18 @@ def _build_sequence_obs_norm(
         elif key == "abs_drive_margin_k":
             offset = 0.0
             scale = max(2.0, float(env_config.abs_gate_scale_k))
+        elif key == "q_hrsg_est_now_mw":
+            cap = float(env_config.q_boiler_cap_mw) + float(env_config.q_tes_discharge_cap_mw)
+            offset = 0.5 * cap
+            scale = 0.5 * max(_NORM_EPS, cap)
+        elif key == "q_tes_discharge_feasible_mw":
+            cap = float(env_config.q_tes_discharge_cap_mw)
+            offset = 0.5 * cap
+            scale = 0.5 * max(_NORM_EPS, cap)
+        elif key in {"heat_deficit_if_boiler_off_mw", "heat_backup_min_needed_mw"}:
+            cap = float(env_config.q_boiler_cap_mw)
+            offset = 0.5 * cap
+            scale = 0.5 * max(_NORM_EPS, cap)
         elif key in {"sin_t", "cos_t", "sin_week", "cos_week"}:
             offset = 0.0
             scale = 1.0

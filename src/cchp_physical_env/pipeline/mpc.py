@@ -6,7 +6,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from ..env.costs import compute_cost_breakdown
 from ..env.cchp_env import CCHPPhysicalEnv, EnvConfig
+from ..env.physics.pyomo import compute_bes_degradation_cost, update_bes_soc
+from ..env.physics.tespy import ThermalStorageState, apply_gt_startup_fuel_correction
 
 try:  # pragma: no cover - scipy 是可选依赖
     from scipy import optimize, sparse
@@ -17,6 +20,11 @@ except ModuleNotFoundError:  # pragma: no cover
 
 def _clip(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
+
+
+def _sigmoid(value: float) -> float:
+    clipped = float(np.clip(value, -60.0, 60.0))
+    return float(1.0 / (1.0 + np.exp(-clipped)))
 
 
 @dataclass(slots=True)
@@ -49,6 +57,7 @@ class _ActionPlan:
     p_gt_mw: float
     p_bes_mw: float
     q_boiler_mw: float
+    q_abs_drive_mw: float
     q_ech_mw: float
     q_tes_mw: float
 
@@ -60,8 +69,10 @@ class BaseMPCPolicy:
         self.config = config
         self.seed = int(seed)
         requested_horizon = max(1, int(history_steps))
-        self.planning_horizon_steps = int(min(requested_horizon, 12))
-        self.replan_interval_steps = int(min(4, self.planning_horizon_steps))
+        planner_cap = max(1, int(round(float(self.config.oracle_mpc_planning_horizon_steps))))
+        self.planning_horizon_steps = int(min(requested_horizon, planner_cap))
+        replan_interval = max(1, int(round(float(self.config.oracle_mpc_replan_interval_steps))))
+        self.replan_interval_steps = int(min(replan_interval, self.planning_horizon_steps))
         self._env: CCHPPhysicalEnv | None = None
         self._episode_df: pd.DataFrame | None = None
         self._coeffs: _EpisodeCoefficients | None = None
@@ -96,8 +107,76 @@ class BaseMPCPolicy:
             "forecast_mode": "perfect_episode_slice_surrogate_v1",
             "planning_horizon_steps": int(self.planning_horizon_steps),
             "replan_interval_steps": int(self.replan_interval_steps),
-            "abs_used": False,
+            "abs_used": bool(self.config.oracle_mpc_abs_enabled),
+            "hard_reliability": bool(self.config.oracle_mpc_hard_reliability),
+            "hard_unmet_caps_mw": {
+                "electric": float(self.config.oracle_mpc_max_unmet_e_mw),
+                "heat": float(self.config.oracle_mpc_max_unmet_h_mw),
+                "cooling": float(self.config.oracle_mpc_max_unmet_c_mw),
+            },
+            "heat_backup_repair_enabled": bool(self.config.oracle_mpc_heat_backup_repair_enabled),
+            "tes_terminal_reserve_mwh": float(self.config.oracle_mpc_tes_terminal_reserve_mwh),
+            "surrogate_alignment": "cchp_priority_dynamic_om_v3",
         }
+
+    def _planner_abs_enabled(self) -> bool:
+        return bool(self.config.oracle_mpc_abs_enabled)
+
+    def _planner_hard_reliability_enabled(self) -> bool:
+        return bool(self.config.oracle_mpc_hard_reliability)
+
+    def _planner_unmet_caps_mw(self) -> dict[str, float]:
+        return {
+            "electric": float(max(0.0, self.config.oracle_mpc_max_unmet_e_mw)),
+            "heat": float(max(0.0, self.config.oracle_mpc_max_unmet_h_mw)),
+            "cooling": float(max(0.0, self.config.oracle_mpc_max_unmet_c_mw)),
+        }
+
+    def _planner_heat_backup_repair_enabled(self) -> bool:
+        return bool(self.config.oracle_mpc_heat_backup_repair_enabled)
+
+    def _planner_tes_terminal_reserve_mwh(self) -> float:
+        env = self._require_env()
+        tes_cfg = env.thermal_storage.config
+        return float(
+            _clip(
+                float(self.config.oracle_mpc_tes_terminal_reserve_mwh),
+                float(tes_cfg.e_min_mwh),
+                float(tes_cfg.e_max_mwh),
+            )
+        )
+
+    def _tes_hot_k_from_energy(self, energy_mwh: float) -> float:
+        env = self._require_env()
+        tes_cfg = env.thermal_storage.config
+        span = max(1e-6, float(tes_cfg.e_max_mwh) - float(tes_cfg.e_min_mwh))
+        soc = _clip((float(energy_mwh) - float(tes_cfg.e_min_mwh)) / span, 0.0, 1.0)
+        return float(float(tes_cfg.t_return_k) + soc * (float(tes_cfg.t_supply_max_k) - float(tes_cfg.t_return_k)))
+
+    def _tes_energy_required_for_abs(self) -> float:
+        env = self._require_env()
+        tes_cfg = env.thermal_storage.config
+        design = env.abs_chiller.design
+        temperature_span_k = max(1e-6, float(tes_cfg.t_supply_max_k) - float(tes_cfg.t_return_k))
+        threshold_soc = _clip(
+            (float(design.t_drive_min_k) - float(tes_cfg.t_return_k)) / temperature_span_k,
+            0.0,
+            1.0,
+        )
+        return float(float(tes_cfg.e_min_mwh) + threshold_soc * (float(tes_cfg.e_max_mwh) - float(tes_cfg.e_min_mwh)))
+
+    def _gt_om_cost(self, *, p_gt_mw: float, gt_started: int, gt_on_steps: int, dt_h: float) -> float:
+        if bool(getattr(self.config, "gt_dynamic_om_enabled", False)):
+            cycle_hours = max(float(dt_h), float(getattr(self.config, "gt_cycle_hours", dt_h)))
+            cycle_steps = max(1, int(round(cycle_hours / max(1e-9, float(dt_h)))))
+            if float(p_gt_mw) > 1e-9 and int(gt_on_steps) <= cycle_steps:
+                return float(getattr(self.config, "gt_cycle_cost", 0.0)) / float(cycle_steps)
+            if float(p_gt_mw) > 1e-9:
+                return float(p_gt_mw) * float(dt_h) * float(self.config.gt_om_var_cost_per_mwh)
+            return 0.0
+        return float(p_gt_mw) * float(dt_h) * float(self.config.gt_om_var_cost_per_mwh) + int(gt_started) * float(
+            self.config.gt_start_cost
+        )
 
     def act(self, observation: dict[str, float]) -> dict[str, float]:
         env = self._require_env()
@@ -107,17 +186,20 @@ class BaseMPCPolicy:
             and current_step >= self._cached_plan_start
             and current_step < self._cached_plan_start + len(self._cached_actions)
         ):
-            return dict(self._cached_actions[current_step - self._cached_plan_start])
+            return self._apply_online_reliability_repair(
+                dict(self._cached_actions[current_step - self._cached_plan_start]),
+                observation=observation,
+            )
 
         plan = self._solve_plan(current_step=current_step, observation=observation)
         if not plan:
-            return self._fallback_action(observation)
+            return self._apply_online_reliability_repair(self._fallback_action(observation), observation=observation)
 
         self._cached_plan_start = current_step
         self._cached_actions = list(plan[: self.replan_interval_steps])
         if not self._cached_actions:
-            return self._fallback_action(observation)
-        return dict(self._cached_actions[0])
+            return self._apply_online_reliability_repair(self._fallback_action(observation), observation=observation)
+        return self._apply_online_reliability_repair(dict(self._cached_actions[0]), observation=observation)
 
     def _require_env(self) -> CCHPPhysicalEnv:
         if self._env is None or self._episode_df is None or self._coeffs is None:
@@ -134,6 +216,53 @@ class BaseMPCPolicy:
             bes_energy_mwh=float(env.bes_soc) * float(self.config.e_bes_cap_mwh),
             tes_energy_mwh=float(env.thermal_storage.energy_mwh),
         )
+
+    def _apply_online_reliability_repair(
+        self,
+        action: dict[str, float],
+        *,
+        observation: dict[str, float],
+    ) -> dict[str, float]:
+        if not (self._planner_hard_reliability_enabled() and self._planner_heat_backup_repair_enabled()):
+            return action
+
+        env = self._require_env()
+        repaired = dict(action)
+        heat_cap_mw = float(self._planner_unmet_caps_mw()["heat"])
+        qh_dem_mw = float(observation.get("qh_dem_mw", 0.0))
+        if qh_dem_mw <= heat_cap_mw + 1e-9:
+            return repaired
+
+        p_gt_req_mw = ((float(repaired.get("u_gt", -1.0)) + 1.0) * 0.5) * float(self.config.p_gt_cap_mw)
+        t_amb_k = float(observation.get("t_amb_k", 298.15))
+        gt_result = env.gt_network.solve_offdesign(p_gt_request_mw=p_gt_req_mw, t_amb_k=t_amb_k)
+        hrsg_result = env.hrsg_network.solve(
+            m_exh_kg_per_s=float(gt_result.m_exh_kg_per_s),
+            t_exh_in_k=float(gt_result.t_exh_k),
+        )
+
+        if self.config.constraint_mode.strip().lower() == "physics_in_loop":
+            tes_discharge_cap_mw = env.thermal_storage.max_feasible_discharge_mw(float(self.config.dt_hours))
+        else:
+            tes_discharge_cap_mw = float(self.config.q_tes_discharge_cap_mw)
+        u_tes = float(repaired.get("u_tes", 0.0))
+        tes_discharge_req_mw = max(0.0, u_tes) * tes_discharge_cap_mw
+
+        minimum_boiler_mw = max(
+            0.0,
+            qh_dem_mw - heat_cap_mw - float(hrsg_result.q_rec_mw) - float(tes_discharge_req_mw),
+        )
+        minimum_boiler_mw = min(float(self.config.q_boiler_cap_mw), minimum_boiler_mw)
+        current_boiler_mw = float(repaired.get("u_boiler", 0.0)) * float(self.config.q_boiler_cap_mw)
+        if minimum_boiler_mw > current_boiler_mw + 1e-9:
+            repaired["u_boiler"] = float(
+                _clip(
+                    minimum_boiler_mw / max(1e-6, float(self.config.q_boiler_cap_mw)),
+                    0.0,
+                    1.0,
+                )
+            )
+        return repaired
 
     def _build_episode_coefficients(
         self,
@@ -186,6 +315,7 @@ class BaseMPCPolicy:
         qc_dem = float(observation["qc_dem_mw"])
         soc_bes = float(observation["soc_bes"])
         price_e = float(observation["price_e"])
+        t_hot_k = float(observation.get("t_tes_hot_k", 0.0))
         net_load = max(0.0, p_dem - p_re)
 
         if net_load <= 0.50 * float(self.config.p_gt_cap_mw):
@@ -201,15 +331,24 @@ class BaseMPCPolicy:
         else:
             u_bes = 0.0
 
+        u_abs = 0.0
+        q_abs_cool_mw = 0.0
+        if self._planner_abs_enabled():
+            cop_abs = max(0.0, float(self._require_env().abs_chiller.estimate_cop(t_hot_k=t_hot_k)))
+            if cop_abs > 1e-9 and qc_dem > 1e-9:
+                q_abs_drive_req_mw = min(float(self.config.q_abs_drive_cap_mw), qc_dem / cop_abs)
+                u_abs = q_abs_drive_req_mw / max(1e-6, float(self.config.q_abs_drive_cap_mw))
+                q_abs_cool_mw = min(float(self.config.q_abs_cool_cap_mw), q_abs_drive_req_mw * cop_abs)
+
         return {
             "u_gt": float(_clip(u_gt, -1.0, 1.0)),
             "u_bes": float(_clip(u_bes, -1.0, 1.0)),
             "u_boiler": float(
                 _clip(qh_dem / max(1e-6, float(self.config.q_boiler_cap_mw)), 0.0, 1.0)
             ),
-            "u_abs": 0.0,
+            "u_abs": float(_clip(u_abs, 0.0, 1.0)),
             "u_ech": float(
-                _clip(qc_dem / max(1e-6, float(self.config.q_ech_cap_mw)), 0.0, 1.0)
+                _clip(max(0.0, qc_dem - q_abs_cool_mw) / max(1e-6, float(self.config.q_ech_cap_mw)), 0.0, 1.0)
             ),
             "u_tes": 0.0,
         }
@@ -224,6 +363,7 @@ class BaseMPCPolicy:
         p_gt_cap = max(1e-6, float(self.config.p_gt_cap_mw))
         p_bes_cap = max(1e-6, float(self.config.p_bes_cap_mw))
         q_boiler_cap = max(1e-6, float(self.config.q_boiler_cap_mw))
+        q_abs_drive_cap = max(1e-6, float(self.config.q_abs_drive_cap_mw))
         q_ech_cap = max(1e-6, float(self.config.q_ech_cap_mw))
         q_tes_charge_cap = max(1e-6, float(self.config.q_tes_charge_cap_mw))
         q_tes_discharge_cap = max(1e-6, float(self.config.q_tes_discharge_cap_mw))
@@ -234,6 +374,9 @@ class BaseMPCPolicy:
             _clip(action.p_bes_mw, -float(self.config.p_bes_cap_mw), float(self.config.p_bes_cap_mw))
         )
         q_boiler_mw = float(_clip(action.q_boiler_mw, 0.0, float(self.config.q_boiler_cap_mw)))
+        q_abs_drive_mw = float(
+            _clip(action.q_abs_drive_mw, 0.0, float(self.config.q_abs_drive_cap_mw if self._planner_abs_enabled() else 0.0))
+        )
         q_ech_mw = float(_clip(action.q_ech_mw, 0.0, float(self.config.q_ech_cap_mw)))
         q_tes_mw = float(
             _clip(action.q_tes_mw, -float(self.config.q_tes_charge_cap_mw), float(self.config.q_tes_discharge_cap_mw))
@@ -247,7 +390,7 @@ class BaseMPCPolicy:
             "u_gt": float(_clip(u_gt, -1.0, 1.0)),
             "u_bes": float(_clip(p_bes_mw / p_bes_cap, -1.0, 1.0)),
             "u_boiler": float(_clip(q_boiler_mw / q_boiler_cap, 0.0, 1.0)),
-            "u_abs": 0.0,
+            "u_abs": float(_clip(q_abs_drive_mw / q_abs_drive_cap, 0.0, 1.0)),
             "u_ech": float(_clip(q_ech_mw / q_ech_cap, 0.0, 1.0)),
             "u_tes": float(_clip(u_tes, -1.0, 1.0)),
         }
@@ -259,22 +402,19 @@ class BaseMPCPolicy:
         start_idx: int,
         plan: np.ndarray,
     ) -> tuple[float, list[_ActionPlan]]:
+        env = self._require_env()
         coeffs = self._coeffs
-        if coeffs is None:
+        episode_df = self._episode_df
+        if coeffs is None or episode_df is None:
             raise RuntimeError("episode coeffs 未初始化。")
 
         dt_h = float(self.config.dt_hours)
-        bes_eta_charge = float(self.config.bes_eta_charge)
-        bes_eta_discharge = float(self.config.bes_eta_discharge)
-        bes_e_min = float(self.config.bes_soc_min) * float(self.config.e_bes_cap_mwh)
-        bes_e_max = float(self.config.bes_soc_max) * float(self.config.e_bes_cap_mwh)
-        tes_e_min = 0.0
-        tes_e_max = float(self.config.e_tes_cap_mwh)
-        tes_loss = max(0.0, 1.0 - float(self.config.sigma_per_hour) * dt_h)
+        e_bes_cap_mwh = float(self.config.e_bes_cap_mwh)
         p_gt_cap = float(self.config.p_gt_cap_mw)
         gt_min = float(self.config.gt_min_output_mw)
         p_bes_cap = float(self.config.p_bes_cap_mw)
         q_boiler_cap = float(self.config.q_boiler_cap_mw)
+        q_abs_drive_cap = float(self.config.q_abs_drive_cap_mw)
         q_ech_cap = float(self.config.q_ech_cap_mw)
         q_tes_charge_cap = float(self.config.q_tes_charge_cap_mw)
         q_tes_discharge_cap = float(self.config.q_tes_discharge_cap_mw)
@@ -290,10 +430,24 @@ class BaseMPCPolicy:
         tes_e = float(state.tes_energy_mwh)
         total_cost = 0.0
         realized_actions: list[_ActionPlan] = []
-        boiler_eff = max(1e-6, float(self._require_env().boiler.efficiency))
+        hard_unmet_caps = self._planner_unmet_caps_mw()
+        use_hard_reliability = self._planner_hard_reliability_enabled()
+        heat_cap_mw = float(hard_unmet_caps["heat"])
+        abs_enabled = self._planner_abs_enabled() and q_abs_drive_cap > 1e-9
+        is_physics_mode = self.config.constraint_mode.strip().lower() == "physics_in_loop"
+        heat_backup_repair_enabled = use_hard_reliability and self._planner_heat_backup_repair_enabled()
+        terminal_reserve_mwh = self._planner_tes_terminal_reserve_mwh()
+        heat_reliability_breached = False
 
         for offset in range(int(plan.shape[0])):
             idx = int(start_idx + offset)
+            row = episode_df.iloc[idx]
+            t_amb_k = float(row["t_amb_k"])
+            qh_demand_mw = float(coeffs.qh_dem_mw[idx])
+            qc_demand_mw = float(coeffs.qc_dem_mw[idx])
+            p_demand_mw = float(coeffs.p_dem_mw[idx])
+            p_re_mw = float(coeffs.p_re_mw[idx])
+
             p_gt_req = float(_clip(plan[offset, 0], 0.0, p_gt_cap))
             if p_gt_req > 1e-9:
                 p_gt_req = max(gt_min, p_gt_req)
@@ -313,141 +467,315 @@ class BaseMPCPolicy:
             gt_toggled = int(requested_on != gt_prev_on)
             gt_delta = abs(p_gt_req - p_gt_prev)
 
-            p_bes_signed = float(_clip(plan[offset, 1], -p_bes_cap, p_bes_cap))
-            p_bes_charge = max(0.0, -p_bes_signed)
-            p_bes_discharge = max(0.0, p_bes_signed)
-            if dt_h > 0.0:
-                bes_charge_limit = min(
-                    p_bes_cap,
-                    max(0.0, (bes_e_max - bes_e) / max(1e-6, bes_eta_charge * dt_h)),
-                )
-                bes_discharge_limit = min(
-                    p_bes_cap,
-                    max(0.0, (bes_e - bes_e_min) * bes_eta_discharge / max(1e-6, dt_h)),
-                )
-            else:
-                bes_charge_limit = 0.0
-                bes_discharge_limit = 0.0
-            p_bes_charge = min(p_bes_charge, bes_charge_limit)
-            p_bes_discharge = min(p_bes_discharge, bes_discharge_limit)
-            p_bes_mw = p_bes_discharge - p_bes_charge
-            bes_e = float(
-                _clip(
-                    bes_e + (bes_eta_charge * p_bes_charge - p_bes_discharge / max(1e-6, bes_eta_discharge)) * dt_h,
-                    bes_e_min,
-                    bes_e_max,
-                )
+            gt_result = env.gt_network.solve_offdesign(p_gt_request_mw=p_gt_req, t_amb_k=t_amb_k)
+            hrsg_result = env.hrsg_network.solve(
+                m_exh_kg_per_s=float(gt_result.m_exh_kg_per_s),
+                t_exh_in_k=float(gt_result.t_exh_k),
             )
 
             q_boiler_mw = float(_clip(plan[offset, 2], 0.0, q_boiler_cap))
-            q_ech_mw = float(_clip(plan[offset, 3], 0.0, q_ech_cap))
-            q_tes_signed = float(_clip(plan[offset, 4], -q_tes_charge_cap, q_tes_discharge_cap))
-            q_tes_charge = max(0.0, -q_tes_signed)
-            q_tes_discharge = max(0.0, q_tes_signed)
-            tes_charge_limit = min(q_tes_charge_cap, max(0.0, (tes_e_max - tes_e * tes_loss) / max(1e-6, dt_h)))
-            tes_discharge_limit = min(q_tes_discharge_cap, max(0.0, tes_e / max(1e-6, dt_h)))
-            q_tes_charge = min(q_tes_charge, tes_charge_limit)
-            q_tes_discharge = min(q_tes_discharge, tes_discharge_limit)
-            tes_e = float(
+            boiler_result = env.boiler.solve(
+                u_boiler=q_boiler_mw / max(1e-6, q_boiler_cap)
+            )
+
+            t_hot_k = self._tes_hot_k_from_energy(tes_e)
+            abs_gate = 1.0
+            if bool(self.config.abs_gate_enabled):
+                abs_gate = _sigmoid(
+                    (t_hot_k - float(env.abs_chiller.design.t_drive_min_k))
+                    / max(1e-6, float(self.config.abs_gate_scale_k))
+                )
+            q_abs_drive_raw_mw = float(
+                _clip(plan[offset, 3], 0.0, q_abs_drive_cap if abs_enabled else 0.0)
+            )
+            u_abs_raw = q_abs_drive_raw_mw / max(1e-6, q_abs_drive_cap) if abs_enabled else 0.0
+            u_abs_effective = float(_clip(u_abs_raw * abs_gate, 0.0, 1.0))
+            abs_deadzone_active = (
+                abs_gate < float(max(0.0, self.config.abs_deadzone_gate_th))
+                or u_abs_effective < float(max(0.0, self.config.abs_deadzone_u_th))
+            )
+            q_abs_drive_phys_mw = (
+                0.0 if (not abs_enabled) or abs_deadzone_active else u_abs_effective * q_abs_drive_cap
+            )
+            invalid_abs_request_cost = 0.0
+            if (
+                abs_enabled
+                and u_abs_raw > float(max(0.0, self.config.abs_invalid_req_u_th))
+                and abs_gate < float(max(0.0, self.config.abs_invalid_req_gate_th))
+            ):
+                request_excess = (
+                    u_abs_raw - float(self.config.abs_invalid_req_u_th)
+                ) / max(1e-6, 1.0 - float(self.config.abs_invalid_req_u_th))
+                gate_deficit = (
+                    float(self.config.abs_invalid_req_gate_th) - abs_gate
+                ) / max(1e-6, float(self.config.abs_invalid_req_gate_th))
+                invalid_abs_request_cost = float(
+                    max(0.0, request_excess)
+                    * max(0.0, gate_deficit)
+                    * float(self.config.penalty_invalid_abs_request)
+                )
+
+            q_ech_mw = float(_clip(plan[offset, 4], 0.0, q_ech_cap))
+            ech_result = env.electric_chiller.solve(
+                u_ech=q_ech_mw / max(1e-6, q_ech_cap),
+                t_amb_k=t_amb_k,
+            )
+
+            q_tes_signed = float(_clip(plan[offset, 5], -q_tes_charge_cap, q_tes_discharge_cap))
+            tes_shadow = ThermalStorageState(env.thermal_storage.config)
+            tes_shadow.reset(energy_mwh=tes_e)
+            tes_discharge_req = min(max(0.0, q_tes_signed), tes_shadow.max_feasible_discharge_mw(dt_h))
+            tes_charge_req = min(max(0.0, -q_tes_signed), tes_shadow.max_feasible_charge_mw(dt_h))
+
+            q_heat_dump_mw = 0.0
+            heat_overcommit_flag = False
+            if is_physics_mode:
+                q_heat_available = (
+                    float(hrsg_result.q_rec_mw)
+                    + float(boiler_result.q_heat_mw)
+                    + tes_discharge_req
+                )
+                qh_served = min(qh_demand_mw, q_heat_available)
+                qh_unmet = max(0.0, qh_demand_mw - qh_served)
+                if heat_backup_repair_enabled and qh_unmet > heat_cap_mw:
+                    extra_boiler = min(
+                        max(0.0, q_boiler_cap - float(boiler_result.q_heat_mw)),
+                        max(0.0, qh_unmet - heat_cap_mw),
+                    )
+                    if extra_boiler > 1e-9:
+                        repaired_q_boiler_mw = float(boiler_result.q_heat_mw) + extra_boiler
+                        boiler_result = env.boiler.solve(
+                            u_boiler=repaired_q_boiler_mw / max(1e-6, q_boiler_cap)
+                        )
+                        q_heat_available = (
+                            float(hrsg_result.q_rec_mw)
+                            + float(boiler_result.q_heat_mw)
+                            + tes_discharge_req
+                        )
+                        qh_served = min(qh_demand_mw, q_heat_available)
+                        qh_unmet = max(0.0, qh_demand_mw - qh_served)
+                heat_after_heating = q_heat_available - qh_served
+                abs_result = env.abs_chiller.solve(
+                    q_drive_request_mw=min(q_abs_drive_phys_mw, max(0.0, heat_after_heating)),
+                    t_hot_k=t_hot_k,
+                )
+                heat_after_drive = heat_after_heating - float(abs_result.q_drive_used_mw)
+                q_tes_charge_exec = min(tes_charge_req, max(0.0, heat_after_drive))
+                q_heat_dump_mw = max(0.0, heat_after_drive - q_tes_charge_exec)
+                tes_result = tes_shadow.apply(
+                    charge_request_mw=q_tes_charge_exec,
+                    discharge_request_mw=tes_discharge_req,
+                    dt_h=dt_h,
+                )
+            else:
+                abs_result = env.abs_chiller.solve(
+                    q_drive_request_mw=q_abs_drive_phys_mw,
+                    t_hot_k=t_hot_k,
+                )
+                tes_result = tes_shadow.apply(
+                    charge_request_mw=tes_charge_req,
+                    discharge_request_mw=tes_discharge_req,
+                    dt_h=dt_h,
+                )
+                qh_supply = (
+                    float(hrsg_result.q_rec_mw)
+                    + float(boiler_result.q_heat_mw)
+                    + float(tes_result.q_discharge_mw)
+                )
+                qh_usage = (
+                    qh_demand_mw
+                    + float(abs_result.q_drive_used_mw)
+                    + float(tes_result.q_charge_mw)
+                )
+                qh_unmet = max(0.0, qh_usage - qh_supply)
+                if heat_backup_repair_enabled and qh_unmet > heat_cap_mw:
+                    extra_boiler = min(
+                        max(0.0, q_boiler_cap - float(boiler_result.q_heat_mw)),
+                        max(0.0, qh_unmet - heat_cap_mw),
+                    )
+                    if extra_boiler > 1e-9:
+                        repaired_q_boiler_mw = float(boiler_result.q_heat_mw) + extra_boiler
+                        boiler_result = env.boiler.solve(
+                            u_boiler=repaired_q_boiler_mw / max(1e-6, q_boiler_cap)
+                        )
+                        qh_supply = (
+                            float(hrsg_result.q_rec_mw)
+                            + float(boiler_result.q_heat_mw)
+                            + float(tes_result.q_discharge_mw)
+                        )
+                        qh_unmet = max(0.0, qh_usage - qh_supply)
+                q_heat_dump_mw = max(0.0, qh_supply - qh_usage)
+                heat_overcommit_flag = qh_usage > qh_supply + 1e-9
+
+            tes_e = float(tes_result.e_tes_mwh)
+            q_tes_mw = float(tes_result.q_discharge_mw - tes_result.q_charge_mw)
+
+            qc_supply_mw = float(abs_result.q_cool_mw) + float(ech_result.q_cool_mw)
+            qc_unmet = max(0.0, qc_demand_mw - qc_supply_mw)
+
+            bes_soc_before = _clip(bes_e / max(1e-6, e_bes_cap_mwh), 0.0, 1.0)
+            current_bes_energy_mwh = bes_soc_before * e_bes_cap_mwh
+            current_bes_energy_mwh *= max(0.0, 1.0 - float(self.config.bes_self_discharge_per_hour) * dt_h)
+            min_bes_energy_mwh = float(self.config.bes_soc_min) * e_bes_cap_mwh
+            max_bes_energy_mwh = float(self.config.bes_soc_max) * e_bes_cap_mwh
+            max_bes_discharge_mw = min(
+                p_bes_cap,
+                max(
+                    0.0,
+                    (current_bes_energy_mwh - min_bes_energy_mwh)
+                    * float(self.config.bes_eta_discharge)
+                    * float(self.config.bes_aux_equip_eff)
+                    / max(1e-6, dt_h),
+                ),
+            )
+            max_bes_charge_mw = min(
+                p_bes_cap,
+                max(
+                    0.0,
+                    (max_bes_energy_mwh - current_bes_energy_mwh)
+                    / max(
+                        1e-6,
+                        float(self.config.bes_eta_charge)
+                        * float(self.config.bes_aux_equip_eff)
+                        * dt_h,
+                    ),
+                ),
+            )
+            p_bes_mw = float(
                 _clip(
-                    tes_e * tes_loss + (q_tes_charge - q_tes_discharge) * dt_h,
-                    tes_e_min,
-                    tes_e_max,
+                    float(_clip(plan[offset, 1], -p_bes_cap, p_bes_cap)),
+                    -max_bes_charge_mw,
+                    max_bes_discharge_mw,
                 )
             )
-            q_tes_mw = q_tes_discharge - q_tes_charge
+            bes_soc_after, bes_soc_clipped = update_bes_soc(
+                p_bes_mw=p_bes_mw,
+                current_soc=bes_soc_before,
+                dt_hours=dt_h,
+                e_bes_cap_mwh=e_bes_cap_mwh,
+                soc_min=float(self.config.bes_soc_min),
+                soc_max=float(self.config.bes_soc_max),
+                eta_charge=float(self.config.bes_eta_charge),
+                eta_discharge=float(self.config.bes_eta_discharge),
+                self_discharge_per_hour=float(self.config.bes_self_discharge_per_hour),
+                aux_equip_eff=float(self.config.bes_aux_equip_eff),
+            )
+            bes_e = float(bes_soc_after * e_bes_cap_mwh)
+            bes_degradation_cost = compute_bes_degradation_cost(
+                dt_hours=dt_h,
+                soc_before=bes_soc_before,
+                soc_after=float(bes_soc_after),
+                e_bes_cap_mwh=e_bes_cap_mwh,
+                dod_battery_capex_per_mwh=float(self.config.bes_dod_battery_capex_per_mwh),
+                dod_k_p=float(self.config.bes_dod_k_p),
+                dod_n_fail_100=float(self.config.bes_dod_n_fail_100),
+                dod_add_calendar_age=bool(self.config.bes_dod_add_calendar_age),
+                dod_battery_life_years=float(self.config.bes_dod_battery_life_years),
+            )
 
-            q_hrsg_mw = max(0.0, float(coeffs.gt_heat_coeff[idx]) * p_gt_req)
-            qh_need = float(coeffs.qh_dem_mw[idx]) + q_tes_charge
-            qh_supply = q_hrsg_mw + q_boiler_mw + q_tes_discharge
-            qh_unmet = max(0.0, qh_need - qh_supply)
-
-            qc_need = float(coeffs.qc_dem_mw[idx])
-            qc_unmet = max(0.0, qc_need - q_ech_mw)
-
-            p_ech_mw = q_ech_mw * float(coeffs.ech_power_coeff[idx])
-            p_local = p_gt_req + float(coeffs.p_re_mw[idx]) + p_bes_mw - p_ech_mw
-            import_need = max(0.0, float(coeffs.p_dem_mw[idx]) - p_local)
-            export_need = max(0.0, p_local - float(coeffs.p_dem_mw[idx]))
+            p_net_mw = float(gt_result.p_gt_mw) + p_re_mw + p_bes_mw - float(ech_result.p_electric_mw)
+            import_need = max(0.0, p_demand_mw - p_net_mw)
+            export_need = max(0.0, p_net_mw - p_demand_mw)
             grid_import = min(import_need, float(self.config.grid_import_cap_mw))
             grid_export = min(export_need, float(self.config.grid_export_cap_mw))
             p_unmet = max(0.0, import_need - grid_import)
             p_curtail = max(0.0, export_need - grid_export)
-            export_over_soft = max(0.0, grid_export - float(self.config.grid_export_soft_cap_mw))
 
-            cost_grid = (
-                grid_import * dt_h * float(coeffs.price_e[idx])
-                - grid_export * dt_h * float(coeffs.sell_price[idx])
-                + p_curtail * dt_h * float(self.config.penalty_curtail_per_mwh)
-                + grid_export * dt_h * float(self.config.penalty_export_per_mwh)
-                + export_over_soft * dt_h * float(self.config.penalty_export_over_soft_cap_per_mwh)
+            gt_on_steps_effective = gt_on_steps + 1 if float(gt_result.p_gt_mw) > 1e-9 else 0
+            fuel_input_gt_effective_mw, _ = apply_gt_startup_fuel_correction(
+                fuel_input_gt_mw=float(gt_result.fuel_input_mw),
+                gt_started=bool(gt_started),
+                startup_fuel_correction_ratio=float(self.config.gt_startup_fuel_correction_ratio),
             )
-            gt_fuel_input = p_gt_req * float(coeffs.gt_fuel_coeff[idx])
-            startup_extra_fuel = gt_fuel_input * float(self.config.gt_startup_fuel_correction_ratio) * gt_started
-            boiler_fuel_input = q_boiler_mw / boiler_eff
-            cost_gt = (
-                (gt_fuel_input + startup_extra_fuel) * dt_h * float(coeffs.price_gas[idx])
-                + p_gt_req * dt_h * float(self.config.gt_om_var_cost_per_mwh)
-                + gt_started * float(self.config.gt_start_cost)
+
+            violation_flags: dict[str, bool] = {}
+            violation_flags.update(dict(gt_result.violation_flags))
+            violation_flags.update(dict(hrsg_result.violation_flags))
+            violation_flags.update(dict(tes_result.violation_flags))
+            violation_flags.update(dict(abs_result.violation_flags))
+            violation_flags.update(dict(boiler_result.violation_flags))
+            violation_flags.update(dict(ech_result.violation_flags))
+            violation_flags["bes_soc_clipped"] = bool(bes_soc_clipped)
+            violation_flags["heat_overcommit_reward_only"] = (not is_physics_mode) and bool(heat_overcommit_flag)
+            violation_count = sum(1 for flag in violation_flags.values() if flag)
+
+            heat_unmet_step = qh_unmet > float(max(0.0, self.config.heat_unmet_th_mw))
+            cool_unmet_step = qc_unmet > float(max(0.0, self.config.cool_unmet_th_mw))
+            idle_heat_backup = heat_unmet_step and (
+                float(boiler_result.q_heat_mw) < float(max(0.0, self.config.heat_backup_idle_th_mw))
             )
-            cost_carbon = (
-                (gt_fuel_input + startup_extra_fuel)
-                * dt_h
-                * float(self.config.gt_emission_ton_per_mwh_th)
-                * float(coeffs.carbon_tax[idx])
-                + boiler_fuel_input
-                * dt_h
-                * float(self.config.boiler_emission_ton_per_mwh_th)
-                * float(coeffs.carbon_tax[idx])
+            idle_cool_backup = cool_unmet_step and (
+                abs_deadzone_active
+                or abs_gate < float(max(0.0, self.config.abs_deadzone_gate_th))
+            ) and (
+                float(ech_result.q_cool_mw) < float(max(0.0, self.config.cool_backup_idle_th_mw))
             )
-            cost_boiler = boiler_fuel_input * dt_h * float(coeffs.price_gas[idx])
-            cost_unmet = (
-                p_unmet * dt_h * float(self.config.penalty_unmet_e_per_mwh)
-                + qh_unmet * dt_h * float(self.config.penalty_unmet_h_per_mwh)
-                + qc_unmet * dt_h * float(self.config.penalty_unmet_c_per_mwh)
+
+            cost_breakdown = compute_cost_breakdown(
+                dt_h=dt_h,
+                price_e=float(coeffs.price_e[idx]),
+                price_gas=float(coeffs.price_gas[idx]),
+                carbon_tax=float(coeffs.carbon_tax[idx]),
+                grid_import_mw=grid_import,
+                grid_export_mw=grid_export,
+                p_curtail_mw=p_curtail,
+                fuel_input_gt_effective_mw=float(fuel_input_gt_effective_mw),
+                p_gt_mw=float(gt_result.p_gt_mw),
+                gt_started=gt_started,
+                gt_on_steps=gt_on_steps_effective,
+                bes_degradation_cost=float(bes_degradation_cost),
+                boiler_fuel_input_mw=float(boiler_result.fuel_input_mw),
+                p_unmet_e_mw=p_unmet,
+                qh_unmet_mw=qh_unmet,
+                qc_unmet_mw=qc_unmet,
+                violation_count=violation_count,
+                invalid_abs_request_penalty=float(invalid_abs_request_cost),
+                gt_toggle_penalty=float(self.config.penalty_gt_toggle) if gt_toggled else 0.0,
+                gt_delta_penalty=float(gt_delta) * float(self.config.penalty_gt_delta_mw),
+                idle_heat_backup_penalty=float(self.config.penalty_idle_heat_backup) if idle_heat_backup else 0.0,
+                idle_cool_backup_penalty=float(self.config.penalty_idle_cool_backup) if idle_cool_backup else 0.0,
+                config=self.config,
             )
-            cost_bes_degr = (p_bes_charge + p_bes_discharge) * dt_h * 2.0
-            cost_toggle = gt_toggled * float(self.config.penalty_gt_toggle)
-            cost_delta = gt_delta * float(self.config.penalty_gt_delta_mw)
-            idle_heat_backup = (
-                qh_unmet > float(self.config.heat_unmet_th_mw)
-                and q_boiler_mw < float(self.config.heat_backup_idle_th_mw)
-            )
-            idle_cool_backup = (
-                qc_unmet > float(self.config.cool_unmet_th_mw)
-                and q_ech_mw < float(self.config.cool_backup_idle_th_mw)
-            )
-            total_cost += (
-                cost_grid
-                + cost_gt
-                + cost_carbon
-                + cost_boiler
-                + cost_unmet
-                + cost_bes_degr
-                + cost_toggle
-                + cost_delta
-                + (float(self.config.penalty_idle_heat_backup) if idle_heat_backup else 0.0)
-                + (float(self.config.penalty_idle_cool_backup) if idle_cool_backup else 0.0)
-            )
+            total_cost += float(cost_breakdown.cost_total)
+            if use_hard_reliability:
+                unmet_excess_mw = (
+                    max(0.0, p_unmet - float(hard_unmet_caps["electric"]))
+                    + max(0.0, qh_unmet - float(hard_unmet_caps["heat"]))
+                    + max(0.0, qc_unmet - float(hard_unmet_caps["cooling"]))
+                )
+                heat_reliability_breached = heat_reliability_breached or (qh_unmet > heat_cap_mw + 1e-9)
+                total_cost += (
+                    unmet_excess_mw
+                    * dt_h
+                    * float(self.config.oracle_mpc_hard_unmet_penalty_per_mwh)
+                )
 
             realized_actions.append(
                 _ActionPlan(
-                    p_gt_mw=float(p_gt_req),
+                    p_gt_mw=float(gt_result.p_gt_mw),
                     p_bes_mw=float(p_bes_mw),
-                    q_boiler_mw=float(q_boiler_mw),
-                    q_ech_mw=float(q_ech_mw),
+                    q_boiler_mw=float(boiler_result.q_heat_mw),
+                    q_abs_drive_mw=float(q_abs_drive_raw_mw),
+                    q_ech_mw=float(ech_result.q_cool_mw),
                     q_tes_mw=float(q_tes_mw),
                 )
             )
 
-            p_gt_prev = float(p_gt_req)
-            if requested_on:
+            p_gt_prev = float(gt_result.p_gt_mw)
+            if float(gt_result.p_gt_mw) > 1e-9:
                 gt_on_steps = gt_on_steps + 1 if gt_prev_on else 1
                 gt_off_steps = 0
             else:
                 gt_off_steps = gt_off_steps + 1 if not gt_prev_on else 1
                 gt_on_steps = 0
-            gt_prev_on = requested_on
+            gt_prev_on = float(gt_result.p_gt_mw) > 1e-9
+
+        terminal_reserve_shortfall_mwh = max(0.0, terminal_reserve_mwh - tes_e)
+        if terminal_reserve_shortfall_mwh > 0.0 and not heat_reliability_breached:
+            total_cost += (
+                terminal_reserve_shortfall_mwh
+                * float(self.config.oracle_mpc_tes_terminal_reserve_penalty_per_mwh)
+            )
 
         return float(total_cost), realized_actions
 
@@ -463,6 +791,8 @@ class _MILPIndex:
     p_bes_charge: slice
     p_bes_discharge: slice
     q_boiler: slice
+    q_abs_drive: slice
+    q_abs_cool: slice
     q_ech: slice
     q_tes_charge: slice
     q_tes_discharge: slice
@@ -477,6 +807,7 @@ class _MILPIndex:
     gt_delta: slice
     e_bes: slice
     e_tes: slice
+    tes_terminal_shortfall: int
     n_vars: int
 
     @classmethod
@@ -489,6 +820,12 @@ class _MILPIndex:
             cursor += int(horizon)
             return slice(start, cursor)
 
+        def _next_scalar() -> int:
+            nonlocal cursor
+            start = cursor
+            cursor += 1
+            return int(start)
+
         return cls(
             p_gt=_next(),
             y_gt=_next(),
@@ -496,6 +833,8 @@ class _MILPIndex:
             p_bes_charge=_next(),
             p_bes_discharge=_next(),
             q_boiler=_next(),
+            q_abs_drive=_next(),
+            q_abs_cool=_next(),
             q_ech=_next(),
             q_tes_charge=_next(),
             q_tes_discharge=_next(),
@@ -510,6 +849,7 @@ class _MILPIndex:
             gt_delta=_next(),
             e_bes=_next(),
             e_tes=_next(),
+            tes_terminal_shortfall=_next_scalar(),
             n_vars=cursor,
         )
 
@@ -517,8 +857,8 @@ class _MILPIndex:
 class MILPMPCPolicy(BaseMPCPolicy):
     def __init__(self, *, config: EnvConfig, history_steps: int, seed: int) -> None:
         super().__init__(config=config, history_steps=history_steps, seed=seed)
-        self.time_limit_seconds = 0.15
-        self.relative_gap = 0.05
+        self.time_limit_seconds = float(self.config.oracle_mpc_time_limit_seconds)
+        self.relative_gap = float(self.config.oracle_mpc_mip_relative_gap)
 
     def policy_metadata(self) -> dict[str, Any]:
         payload = super().policy_metadata()
@@ -555,6 +895,8 @@ class MILPMPCPolicy(BaseMPCPolicy):
         p_gt_cap = float(self.config.p_gt_cap_mw)
         p_bes_cap = float(self.config.p_bes_cap_mw)
         q_boiler_cap = float(self.config.q_boiler_cap_mw)
+        q_abs_drive_cap = float(self.config.q_abs_drive_cap_mw if self._planner_abs_enabled() else 0.0)
+        q_abs_cool_cap = float(self.config.q_abs_cool_cap_mw if self._planner_abs_enabled() else 0.0)
         q_ech_cap = float(self.config.q_ech_cap_mw)
         q_tes_charge_cap = float(self.config.q_tes_charge_cap_mw)
         q_tes_discharge_cap = float(self.config.q_tes_discharge_cap_mw)
@@ -564,7 +906,19 @@ class MILPMPCPolicy(BaseMPCPolicy):
         tes_loss = max(0.0, 1.0 - float(self.config.sigma_per_hour) * dt_h)
         ramp = max(0.0, float(self.config.gt_ramp_mw_per_step))
         gt_min = float(self.config.gt_min_output_mw)
-        boiler_eff = max(1e-6, float(self._require_env().boiler.efficiency))
+        env = self._require_env()
+        boiler_eff = max(1e-6, float(env.boiler.efficiency))
+        current_t_hot_k = self._tes_hot_k_from_energy(state.tes_energy_mwh)
+        abs_cop_est = (
+            max(0.0, float(env.abs_chiller.estimate_cop(t_hot_k=current_t_hot_k)))
+            if self._planner_abs_enabled()
+            else 0.0
+        )
+        if abs_cop_est <= 1e-9:
+            q_abs_drive_cap = 0.0
+            q_abs_cool_cap = 0.0
+        hard_unmet_caps = self._planner_unmet_caps_mw()
+        terminal_reserve_mwh = self._planner_tes_terminal_reserve_mwh()
 
         def _set_bounds(slice_obj: slice, lb: float, ub: float, *, binary: bool = False) -> None:
             lower[slice_obj] = lb
@@ -578,20 +932,36 @@ class MILPMPCPolicy(BaseMPCPolicy):
         _set_bounds(idx.p_bes_charge, 0.0, p_bes_cap)
         _set_bounds(idx.p_bes_discharge, 0.0, p_bes_cap)
         _set_bounds(idx.q_boiler, 0.0, q_boiler_cap)
+        _set_bounds(idx.q_abs_drive, 0.0, q_abs_drive_cap)
+        _set_bounds(idx.q_abs_cool, 0.0, q_abs_cool_cap)
         _set_bounds(idx.q_ech, 0.0, q_ech_cap)
         _set_bounds(idx.q_tes_charge, 0.0, q_tes_charge_cap)
         _set_bounds(idx.q_tes_discharge, 0.0, q_tes_discharge_cap)
         _set_bounds(idx.grid_import, 0.0, float(self.config.grid_import_cap_mw))
         _set_bounds(idx.grid_export, 0.0, float(self.config.grid_export_cap_mw))
         _set_bounds(idx.p_curtail, 0.0, np.inf)
-        _set_bounds(idx.p_unmet_e, 0.0, np.inf)
-        _set_bounds(idx.qh_unmet, 0.0, np.inf)
-        _set_bounds(idx.qc_unmet, 0.0, np.inf)
+        _set_bounds(
+            idx.p_unmet_e,
+            0.0,
+            float(hard_unmet_caps["electric"]) if self._planner_hard_reliability_enabled() else np.inf,
+        )
+        _set_bounds(
+            idx.qh_unmet,
+            0.0,
+            float(hard_unmet_caps["heat"]) if self._planner_hard_reliability_enabled() else np.inf,
+        )
+        _set_bounds(
+            idx.qc_unmet,
+            0.0,
+            float(hard_unmet_caps["cooling"]) if self._planner_hard_reliability_enabled() else np.inf,
+        )
         _set_bounds(idx.export_over_soft, 0.0, np.inf)
         _set_bounds(idx.gt_toggle, 0.0, 1.0, binary=True)
         _set_bounds(idx.gt_delta, 0.0, np.inf)
         _set_bounds(idx.e_bes, bes_e_min, bes_e_max)
         _set_bounds(idx.e_tes, 0.0, tes_e_max)
+        lower[idx.tes_terminal_shortfall] = 0.0
+        upper[idx.tes_terminal_shortfall] = np.inf
 
         for offset in range(horizon):
             data_idx = int(current_step + offset)
@@ -610,7 +980,11 @@ class MILPMPCPolicy(BaseMPCPolicy):
                 + dt_h * gt_fuel_coeff * float(self.config.gt_emission_ton_per_mwh_th) * carbon_tax
             )
             c[idx.z_start.start + offset] = (
-                float(self.config.gt_start_cost)
+                (
+                    float(self.config.gt_cycle_cost)
+                    if bool(getattr(self.config, "gt_dynamic_om_enabled", False))
+                    else float(self.config.gt_start_cost)
+                )
                 + dt_h
                 * gt_fuel_coeff
                 * float(self.config.gt_startup_fuel_correction_ratio)
@@ -630,6 +1004,7 @@ class MILPMPCPolicy(BaseMPCPolicy):
             c[idx.qc_unmet.start + offset] = dt_h * float(self.config.penalty_unmet_c_per_mwh)
             c[idx.gt_toggle.start + offset] = float(self.config.penalty_gt_toggle)
             c[idx.gt_delta.start + offset] = float(self.config.penalty_gt_delta_mw)
+        c[idx.tes_terminal_shortfall] = float(self.config.oracle_mpc_tes_terminal_reserve_penalty_per_mwh)
 
         row_values: list[float] = []
         row_indices: list[int] = []
@@ -655,6 +1030,8 @@ class MILPMPCPolicy(BaseMPCPolicy):
             p_bes_ch_col = idx.p_bes_charge.start + offset
             p_bes_dis_col = idx.p_bes_discharge.start + offset
             q_boiler_col = idx.q_boiler.start + offset
+            q_abs_drive_col = idx.q_abs_drive.start + offset
+            q_abs_cool_col = idx.q_abs_cool.start + offset
             q_ech_col = idx.q_ech.start + offset
             q_tes_ch_col = idx.q_tes_charge.start + offset
             q_tes_dis_col = idx.q_tes_discharge.start + offset
@@ -753,14 +1130,20 @@ class MILPMPCPolicy(BaseMPCPolicy):
                     p_gt_col: float(coeffs.gt_heat_coeff[data_idx]),
                     q_boiler_col: 1.0,
                     q_tes_dis_col: 1.0,
+                    q_abs_drive_col: -1.0,
                     q_tes_ch_col: -1.0,
                     qh_unmet_col: 1.0,
                 },
                 float(coeffs.qh_dem_mw[data_idx]),
                 np.inf,
             )
-            _append_row({q_ech_col: 1.0, qc_unmet_col: 1.0}, float(coeffs.qc_dem_mw[data_idx]), np.inf)
+            _append_row(
+                {q_abs_cool_col: 1.0, q_ech_col: 1.0, qc_unmet_col: 1.0},
+                float(coeffs.qc_dem_mw[data_idx]),
+                np.inf,
+            )
             _append_row({q_ech_col: 1.0}, -np.inf, float(coeffs.qc_dem_mw[data_idx]))
+            _append_row({q_abs_cool_col: 1.0, q_abs_drive_col: -abs_cop_est}, -np.inf, 0.0)
             _append_row(
                 {
                     export_over_col: 1.0,
@@ -784,6 +1167,15 @@ class MILPMPCPolicy(BaseMPCPolicy):
             _append_row({idx.y_gt.start + offset: 1.0}, 1.0, 1.0)
         for offset in range(min(horizon, remaining_off_lock)):
             _append_row({idx.y_gt.start + offset: 1.0}, 0.0, 0.0)
+        if horizon > 0 and terminal_reserve_mwh > 0.0:
+            _append_row(
+                {
+                    idx.e_tes.start + horizon - 1: 1.0,
+                    idx.tes_terminal_shortfall: 1.0,
+                },
+                float(terminal_reserve_mwh),
+                np.inf,
+            )
 
         matrix = sparse.csr_matrix((row_values, row_indices, row_indptr), shape=(len(lb_rows), n))
         constraints = optimize.LinearConstraint(matrix, np.asarray(lb_rows), np.asarray(ub_rows))
@@ -814,6 +1206,7 @@ class MILPMPCPolicy(BaseMPCPolicy):
                 x[idx.p_gt],
                 x[idx.p_bes_discharge] - x[idx.p_bes_charge],
                 x[idx.q_boiler],
+                x[idx.q_abs_drive],
                 x[idx.q_ech],
                 x[idx.q_tes_discharge] - x[idx.q_tes_charge],
             ]
@@ -825,10 +1218,13 @@ class MILPMPCPolicy(BaseMPCPolicy):
 class GAMPCPolicy(BaseMPCPolicy):
     def __init__(self, *, config: EnvConfig, history_steps: int, seed: int) -> None:
         super().__init__(config=config, history_steps=history_steps, seed=seed)
-        self.population_size = 18
-        self.generations = 6
-        self.elite_count = 4
-        self.mutation_scale = 0.12
+        self.population_size = max(4, int(round(float(self.config.oracle_ga_population_size))))
+        self.generations = max(1, int(round(float(self.config.oracle_ga_generations))))
+        self.elite_count = min(
+            self.population_size,
+            max(1, int(round(float(self.config.oracle_ga_elite_count)))),
+        )
+        self.mutation_scale = float(max(1e-6, float(self.config.oracle_ga_mutation_scale)))
         self._previous_plan: np.ndarray | None = None
 
     def policy_metadata(self) -> dict[str, Any]:
@@ -861,6 +1257,7 @@ class GAMPCPolicy(BaseMPCPolicy):
                     -float(self.config.p_bes_cap_mw),
                     0.0,
                     0.0,
+                    0.0,
                     -float(self.config.q_tes_charge_cap_mw),
                 ],
                 dtype=float,
@@ -873,6 +1270,7 @@ class GAMPCPolicy(BaseMPCPolicy):
                     float(self.config.p_gt_cap_mw),
                     float(self.config.p_bes_cap_mw),
                     float(self.config.q_boiler_cap_mw),
+                    float(self.config.q_abs_drive_cap_mw if self._planner_abs_enabled() else 0.0),
                     float(self.config.q_ech_cap_mw),
                     float(self.config.q_tes_discharge_cap_mw),
                 ],
@@ -938,6 +1336,7 @@ class GAMPCPolicy(BaseMPCPolicy):
                     ((float(fallback_action["u_gt"]) + 1.0) * 0.5) * float(self.config.p_gt_cap_mw),
                     float(fallback_action["u_bes"]) * float(self.config.p_bes_cap_mw),
                     float(fallback_action["u_boiler"]) * float(self.config.q_boiler_cap_mw),
+                    float(fallback_action["u_abs"]) * float(self.config.q_abs_drive_cap_mw),
                     float(fallback_action["u_ech"]) * float(self.config.q_ech_cap_mw),
                     float(fallback_action["u_tes"])
                     * (
@@ -980,6 +1379,7 @@ class GAMPCPolicy(BaseMPCPolicy):
                             ((float(action_dict["u_gt"]) + 1.0) * 0.5) * float(self.config.p_gt_cap_mw),
                             float(action_dict["u_bes"]) * float(self.config.p_bes_cap_mw),
                             float(action_dict["u_boiler"]) * float(self.config.q_boiler_cap_mw),
+                            float(action_dict["u_abs"]) * float(self.config.q_abs_drive_cap_mw),
                             float(action_dict["u_ech"]) * float(self.config.q_ech_cap_mw),
                             q_tes_mw,
                         ]

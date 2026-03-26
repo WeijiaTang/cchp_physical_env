@@ -80,13 +80,13 @@ TRAINING_DEFAULTS: dict[str, Any] = {
     "sb3_optimize_memory_usage": True,
     "sb3_best_gate_enabled": True,
     "sb3_best_gate_electric_min": 1.0,
-    "sb3_best_gate_heat_min": 0.999,
-    "sb3_best_gate_cool_min": 0.999,
+    "sb3_best_gate_heat_min": 0.99,
+    "sb3_best_gate_cool_min": 0.99,
     "sb3_plateau_control_enabled": True,
-    "sb3_plateau_patience_evals": 6,
-    "sb3_plateau_lr_decay_factor": 0.3,
-    "sb3_plateau_min_lr": 1e-5,
-    "sb3_plateau_early_stop_patience_evals": 4,
+    "sb3_plateau_patience_evals": 10,
+    "sb3_plateau_lr_decay_factor": 0.5,
+    "sb3_plateau_min_lr": 5e-5,
+    "sb3_plateau_early_stop_patience_evals": 999,
 }
 
 # env 参数校验规则表：
@@ -108,6 +108,10 @@ ENV_BOOL_KEYS = {
     "abs_gate_enabled",
     "gt_action_smoothing_enabled",
     "gt_dynamic_om_enabled",
+    "heat_backup_shield_enabled",
+    "oracle_mpc_abs_enabled",
+    "oracle_mpc_hard_reliability",
+    "oracle_mpc_heat_backup_repair_enabled",
 }
 # 数值范围规则：仅对需要额外范围约束的字段登记，其余数值字段只做“类型 + finite”校验。
 ENV_NUMERIC_RULES: dict[str, tuple[Callable[[float], bool], str]] = {
@@ -226,6 +230,66 @@ ENV_NUMERIC_RULES: dict[str, tuple[Callable[[float], bool], str]] = {
     "penalty_idle_cool_backup": (
         lambda value: value >= 0.0,
         "penalty_idle_cool_backup 必须 >= 0。",
+    ),
+    "heat_backup_shield_margin_mw": (
+        lambda value: value >= 0.0,
+        "heat_backup_shield_margin_mw 必须 >= 0。",
+    ),
+    "oracle_mpc_max_unmet_e_mw": (
+        lambda value: value >= 0.0,
+        "oracle_mpc_max_unmet_e_mw 必须 >= 0。",
+    ),
+    "oracle_mpc_max_unmet_h_mw": (
+        lambda value: value >= 0.0,
+        "oracle_mpc_max_unmet_h_mw 必须 >= 0。",
+    ),
+    "oracle_mpc_max_unmet_c_mw": (
+        lambda value: value >= 0.0,
+        "oracle_mpc_max_unmet_c_mw 必须 >= 0。",
+    ),
+    "oracle_mpc_hard_unmet_penalty_per_mwh": (
+        lambda value: value >= 0.0,
+        "oracle_mpc_hard_unmet_penalty_per_mwh 必须 >= 0。",
+    ),
+    "oracle_mpc_tes_terminal_reserve_mwh": (
+        lambda value: value >= 0.0,
+        "oracle_mpc_tes_terminal_reserve_mwh 必须 >= 0。",
+    ),
+    "oracle_mpc_tes_terminal_reserve_penalty_per_mwh": (
+        lambda value: value >= 0.0,
+        "oracle_mpc_tes_terminal_reserve_penalty_per_mwh 必须 >= 0。",
+    ),
+    "oracle_mpc_planning_horizon_steps": (
+        lambda value: value > 0.0,
+        "oracle_mpc_planning_horizon_steps 必须 > 0。",
+    ),
+    "oracle_mpc_replan_interval_steps": (
+        lambda value: value > 0.0,
+        "oracle_mpc_replan_interval_steps 必须 > 0。",
+    ),
+    "oracle_mpc_time_limit_seconds": (
+        lambda value: value > 0.0,
+        "oracle_mpc_time_limit_seconds 必须 > 0。",
+    ),
+    "oracle_mpc_mip_relative_gap": (
+        lambda value: 0.0 <= value <= 1.0,
+        "oracle_mpc_mip_relative_gap 必须在 [0,1]。",
+    ),
+    "oracle_ga_population_size": (
+        lambda value: value >= 2.0,
+        "oracle_ga_population_size 必须 >= 2。",
+    ),
+    "oracle_ga_generations": (
+        lambda value: value >= 1.0,
+        "oracle_ga_generations 必须 >= 1。",
+    ),
+    "oracle_ga_elite_count": (
+        lambda value: value >= 1.0,
+        "oracle_ga_elite_count 必须 >= 1。",
+    ),
+    "oracle_ga_mutation_scale": (
+        lambda value: value > 0.0,
+        "oracle_ga_mutation_scale 必须 > 0。",
     ),
 }
 ENV_LOWERCASE_STRING_KEYS = set(ENV_ENUM_OPTIONS.keys())

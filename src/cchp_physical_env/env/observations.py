@@ -22,6 +22,10 @@ def build_observation(
     tes_energy_mwh: float,
     tes_hot_k: float,
     abs_drive_margin_k: float,
+    q_hrsg_est_now_mw: float,
+    q_tes_discharge_feasible_mw: float,
+    heat_deficit_if_boiler_off_mw: float,
+    heat_backup_min_needed_mw: float,
 ) -> dict[str, float]:
     timestamp = pd.to_datetime(row["timestamp"])
     minute_of_day = timestamp.hour * 60 + timestamp.minute
@@ -59,6 +63,10 @@ def build_observation(
         "e_tes_mwh": float(tes_energy_mwh),
         "t_tes_hot_k": float(tes_hot_k),
         "abs_drive_margin_k": float(abs_drive_margin_k),
+        "q_hrsg_est_now_mw": float(q_hrsg_est_now_mw),
+        "q_tes_discharge_feasible_mw": float(q_tes_discharge_feasible_mw),
+        "heat_deficit_if_boiler_off_mw": float(heat_deficit_if_boiler_off_mw),
+        "heat_backup_min_needed_mw": float(heat_backup_min_needed_mw),
         "sin_t": float(math.sin(day_angle)),
         "cos_t": float(math.cos(day_angle)),
         "sin_week": float(math.sin(week_angle)),

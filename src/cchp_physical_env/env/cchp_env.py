@@ -169,6 +169,8 @@ class EnvConfig:
     cool_backup_idle_th_mw: float
     penalty_idle_heat_backup: float
     penalty_idle_cool_backup: float
+    heat_backup_shield_enabled: bool
+    heat_backup_shield_margin_mw: float
 
     hrsg_water_mass_flow_kg_per_s: float
     hrsg_water_inlet_k: float
@@ -181,6 +183,24 @@ class EnvConfig:
     q_tes_discharge_cap_mw: float
     q_abs_drive_cap_mw: float
     q_abs_cool_cap_mw: float
+
+    oracle_mpc_abs_enabled: bool
+    oracle_mpc_hard_reliability: bool
+    oracle_mpc_max_unmet_e_mw: float
+    oracle_mpc_max_unmet_h_mw: float
+    oracle_mpc_max_unmet_c_mw: float
+    oracle_mpc_hard_unmet_penalty_per_mwh: float
+    oracle_mpc_heat_backup_repair_enabled: bool
+    oracle_mpc_tes_terminal_reserve_mwh: float
+    oracle_mpc_tes_terminal_reserve_penalty_per_mwh: float
+    oracle_mpc_planning_horizon_steps: float
+    oracle_mpc_replan_interval_steps: float
+    oracle_mpc_time_limit_seconds: float
+    oracle_mpc_mip_relative_gap: float
+    oracle_ga_population_size: float
+    oracle_ga_generations: float
+    oracle_ga_elite_count: float
+    oracle_ga_mutation_scale: float
 
     pyomo_solver: str
     pyomo_tracking_weight: float
@@ -342,6 +362,64 @@ class CCHPPhysicalEnv:
 
     def _abs_drive_margin_k(self, *, tes_hot_k: float) -> float:
         return float(tes_hot_k - float(self.abs_chiller.design.t_drive_min_k))
+
+    def _estimate_hrsg_recoverable_heat_mw(self, *, p_gt_mw: float, t_amb_k: float) -> float:
+        gt_est = self.gt_network.solve_offdesign(
+            p_gt_request_mw=max(0.0, float(p_gt_mw)),
+            t_amb_k=float(t_amb_k),
+        )
+        hrsg_est = self.hrsg_network.solve(
+            m_exh_kg_per_s=gt_est.m_exh_kg_per_s,
+            t_exh_in_k=gt_est.t_exh_k,
+        )
+        return float(hrsg_est.q_rec_mw)
+
+    def _build_heat_reliability_observation_features(self, *, row: pd.Series) -> dict[str, float]:
+        q_hrsg_est_now_mw = self._estimate_hrsg_recoverable_heat_mw(
+            p_gt_mw=float(self.gt_prev_p_mw),
+            t_amb_k=float(row["t_amb_k"]),
+        )
+        q_tes_discharge_feasible_mw = float(
+            self.thermal_storage.max_feasible_discharge_mw(self.config.dt_hours)
+        )
+        heat_deficit_if_boiler_off_mw = max(
+            0.0,
+            float(row["qh_dem_mw"]) - q_hrsg_est_now_mw - q_tes_discharge_feasible_mw,
+        )
+        heat_backup_min_needed_mw = min(
+            float(self.config.q_boiler_cap_mw),
+            heat_deficit_if_boiler_off_mw,
+        )
+        return {
+            "q_hrsg_est_now_mw": float(q_hrsg_est_now_mw),
+            "q_tes_discharge_feasible_mw": float(q_tes_discharge_feasible_mw),
+            "heat_deficit_if_boiler_off_mw": float(heat_deficit_if_boiler_off_mw),
+            "heat_backup_min_needed_mw": float(heat_backup_min_needed_mw),
+        }
+
+    def _compute_boiler_heat_lower_bound(
+        self,
+        *,
+        qh_demand_mw: float,
+        q_hrsg_available_mw: float,
+        tes_discharge_support_mw: float,
+    ) -> dict[str, float]:
+        heat_deficit_if_boiler_off_mw = max(
+            0.0,
+            float(qh_demand_mw) - float(q_hrsg_available_mw) - float(tes_discharge_support_mw),
+        )
+        heat_backup_min_needed_mw = min(
+            float(self.config.q_boiler_cap_mw),
+            heat_deficit_if_boiler_off_mw + max(0.0, float(self.config.heat_backup_shield_margin_mw)),
+        )
+        q_boiler_cap = max(1e-6, float(self.config.q_boiler_cap_mw))
+        return {
+            "heat_deficit_if_boiler_off_mw": float(heat_deficit_if_boiler_off_mw),
+            "heat_backup_min_needed_mw": float(heat_backup_min_needed_mw),
+            "u_boiler_lower_bound": float(
+                _clip(heat_backup_min_needed_mw / q_boiler_cap, 0.0, 1.0)
+            ),
+        }
 
     def _gt_ramp_headroom(self) -> tuple[float, float]:
         prev = float(max(0.0, self.gt_prev_p_mw))
@@ -599,9 +677,6 @@ class CCHPPhysicalEnv:
             t_exh_in_k=gt_result.t_exh_k,
         )
 
-        boiler_result = self.boiler.solve(u_boiler=float(solver_result["u_boiler"]))
-        ech_result = self.electric_chiller.solve(u_ech=float(solver_result["u_ech"]), t_amb_k=t_amb_k)
-
         dt_h = self.config.dt_hours
         qh_demand_mw = float(row["qh_dem_mw"])
         qc_demand_mw = float(row["qc_dem_mw"])
@@ -622,6 +697,23 @@ class CCHPPhysicalEnv:
         tes_discharge_req = max(0.0, u_tes) * tes_discharge_limit
         tes_charge_req = max(0.0, -u_tes) * tes_charge_limit
         heat_overcommit_flag = False
+
+        u_boiler_solver = float(_clip(float(solver_result["u_boiler"]), 0.0, 1.0))
+        boiler_lower_bound = self._compute_boiler_heat_lower_bound(
+            qh_demand_mw=qh_demand_mw,
+            q_hrsg_available_mw=float(hrsg_result.q_rec_mw),
+            tes_discharge_support_mw=float(tes_discharge_req),
+        )
+        u_boiler_final = u_boiler_solver
+        heat_backup_shield_applied = False
+        if bool(self.config.heat_backup_shield_enabled) and is_physics_mode:
+            shield_lower_bound = float(boiler_lower_bound["u_boiler_lower_bound"])
+            if shield_lower_bound > u_boiler_final + 1e-9:
+                u_boiler_final = shield_lower_bound
+                heat_backup_shield_applied = True
+
+        boiler_result = self.boiler.solve(u_boiler=u_boiler_final)
+        ech_result = self.electric_chiller.solve(u_ech=float(solver_result["u_ech"]), t_amb_k=t_amb_k)
 
         if is_physics_mode:
             # physics_in_loop 口径：遵循“供热优先级”。
@@ -731,6 +823,7 @@ class CCHPPhysicalEnv:
             "gt_min_off_enforced": bool(action_debug["gt_min_off_enforced"]),
             "gt_toggled": bool(gt_toggled),
             "p_gt_target_below_min": bool(action_debug["p_gt_target_below_min"]),
+            "heat_backup_shield_applied": bool(heat_backup_shield_applied),
         }
 
         heat_unmet_step = qh_unmet_mw > float(max(0.0, self.config.heat_unmet_th_mw))
@@ -843,6 +936,13 @@ class CCHPPhysicalEnv:
             "price_e_buy": float(row["price_e"]),
             "price_e_sell": float(sell_price),
             "u_gt_raw": float(action_debug["u_gt_raw"]),
+            "u_boiler_policy": float(_clip(float(processed_action.get("u_boiler", 0.0)), 0.0, 1.0)),
+            "u_boiler_solver": float(u_boiler_solver),
+            "u_boiler_final": float(u_boiler_final),
+            "u_boiler_lower_bound": float(boiler_lower_bound["u_boiler_lower_bound"]),
+            "heat_backup_min_needed_mw": float(boiler_lower_bound["heat_backup_min_needed_mw"]),
+            "heat_deficit_if_boiler_off_mw": float(boiler_lower_bound["heat_deficit_if_boiler_off_mw"]),
+            "heat_backup_shield_applied": bool(heat_backup_shield_applied),
             "p_gt_request_mw_raw": float(action_debug["p_gt_requested_mw_raw"]),
             "p_gt_request_mw_effective": float(action_debug["p_gt_requested_mw_effective"]),
             "gt_requested_delta_mw": float(action_debug["gt_requested_delta_mw"]),
@@ -867,6 +967,7 @@ class CCHPPhysicalEnv:
             "abs_drive_margin_k": float(action_debug["abs_drive_margin_k"]),
             "q_abs_cool_mw": float(abs_result.q_cool_mw),
             "q_ech_cool_mw": float(ech_result.q_cool_mw),
+            "q_tes_discharge_feasible_mw": float(tes_discharge_limit),
             "q_tes_charge_mw": float(tes_result.q_charge_mw),
             "q_tes_discharge_mw": float(tes_result.q_discharge_mw),
             "q_heat_dump_mw": float(q_heat_dump_mw),
@@ -927,6 +1028,7 @@ class CCHPPhysicalEnv:
         gt_off_steps = int(self.gt_off_steps)
         gt_min_on_remaining_steps = max(0, min_on_steps - gt_on_steps) if self.gt_prev_on else 0
         gt_min_off_remaining_steps = max(0, min_off_steps - gt_off_steps) if (not self.gt_prev_on) else 0
+        heat_obs = self._build_heat_reliability_observation_features(row=row)
         return build_observation(
             row=row,
             bes_soc=self.bes_soc,
@@ -942,4 +1044,8 @@ class CCHPPhysicalEnv:
             tes_energy_mwh=self.thermal_storage.energy_mwh,
             tes_hot_k=tes_hot_k,
             abs_drive_margin_k=float(self._abs_drive_margin_k(tes_hot_k=tes_hot_k)),
+            q_hrsg_est_now_mw=float(heat_obs["q_hrsg_est_now_mw"]),
+            q_tes_discharge_feasible_mw=float(heat_obs["q_tes_discharge_feasible_mw"]),
+            heat_deficit_if_boiler_off_mw=float(heat_obs["heat_deficit_if_boiler_off_mw"]),
+            heat_backup_min_needed_mw=float(heat_obs["heat_backup_min_needed_mw"]),
         )

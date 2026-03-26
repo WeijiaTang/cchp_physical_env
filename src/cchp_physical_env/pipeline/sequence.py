@@ -38,6 +38,10 @@ DEFAULT_SEQUENCE_OBSERVATION_FEATURE_KEYS = (
     "e_tes_mwh",  # TES 能量（MWh）
     "t_tes_hot_k",  # TES 热端温度（K）
     "abs_drive_margin_k",  # 吸收式制冷可用驱动温差（K）
+    "q_hrsg_est_now_mw",  # 当前 GT 状态下可回收余热估计（MW）
+    "q_tes_discharge_feasible_mw",  # 当前 TES 最大可放热功率（MW）
+    "heat_deficit_if_boiler_off_mw",  # 不开锅炉时的热缺口估计（MW）
+    "heat_backup_min_needed_mw",  # 当前步最小锅炉补热需求估计（MW）
     "sin_t",  # 日周期 sin
     "cos_t",  # 日周期 cos
     "sin_week",  # 周周期 sin
