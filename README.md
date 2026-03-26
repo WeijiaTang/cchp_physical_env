@@ -843,6 +843,21 @@ python -m cchp_physical_env eval \
   --seed 40
 ```
 
+Oracle
+```bash
+uv run python -m cchp_physical_env eval `
+  --policy milp_mpc `
+  --history-steps 32 `
+  --env-config src\cchp_physical_env\config\config.yaml `
+  --run-dir runs\oracle_milp_full
+```
+```bash
+python -m cchp_physical_env eval `
+  --policy ga_mpc `
+  --history-steps 32 `
+  --env-config src\cchp_physical_env\config\config.yaml `
+  --run-dir runs\oracle_ga_full
+```
 ## Experiment Utilities
 
 ### Constraint Ablation

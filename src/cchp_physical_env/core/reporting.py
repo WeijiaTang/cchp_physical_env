@@ -212,7 +212,27 @@ def write_learning_curve_artifacts(
     if eval_history_rows:
         eval_csv_path = out_dir / "learning_curve_eval.csv"
         eval_json_path = out_dir / "learning_curve_eval.json"
-        flat_rows = [flatten_mapping(row) for row in eval_history_rows]
+        flat_rows: list[dict[str, Any]] = []
+        for eval_index, row in enumerate(eval_history_rows):
+            flat = flatten_mapping(row)
+            gate = row.get("gate") or {}
+            reliability_mean = row.get("reliability_mean") or {}
+            reliability_min = row.get("reliability_min") or {}
+            plateau = row.get("plateau") or {}
+            flat["eval_index"] = int(eval_index)
+            flat["reliability_mean_heat"] = float(reliability_mean.get("heat", 0.0))
+            flat["reliability_mean_cooling"] = float(reliability_mean.get("cooling", 0.0))
+            flat["reliability_mean_electric"] = float(reliability_mean.get("electric", 0.0))
+            flat["reliability_min_heat"] = float(reliability_min.get("heat", 0.0))
+            flat["reliability_min_cooling"] = float(reliability_min.get("cooling", 0.0))
+            flat["reliability_min_electric"] = float(reliability_min.get("electric", 0.0))
+            flat["best_gate_passed"] = bool(gate.get("passed", False))
+            flat["best_gate_shortfall_total"] = float((gate.get("shortfall") or {}).get("total", 0.0))
+            flat["best_gate_shortfall_max"] = float((gate.get("shortfall") or {}).get("max", 0.0))
+            flat["current_learning_rate"] = float(row.get("learning_rate", 0.0))
+            flat["plateau_no_improve_evals"] = int(plateau.get("no_improve_evals", 0))
+            flat["plateau_stop_requested"] = bool(plateau.get("stop_requested", False))
+            flat_rows.append(flat)
         pd.DataFrame(flat_rows).to_csv(eval_csv_path, index=False)
         eval_json_path.write_text(
             json.dumps(eval_history_rows, indent=2, ensure_ascii=False),

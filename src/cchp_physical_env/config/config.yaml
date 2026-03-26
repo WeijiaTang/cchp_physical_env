@@ -117,16 +117,16 @@ env:
   oracle_mpc_abs_enabled: true
   oracle_mpc_hard_reliability: true
   oracle_mpc_max_unmet_e_mw: 0.0
-  oracle_mpc_max_unmet_h_mw: 0.05
+  oracle_mpc_max_unmet_h_mw: 0.01
   oracle_mpc_max_unmet_c_mw: 0.05
-  oracle_mpc_hard_unmet_penalty_per_mwh: 100000.0
+  oracle_mpc_hard_unmet_penalty_per_mwh: 250000.0
   oracle_mpc_heat_backup_repair_enabled: true
-  oracle_mpc_tes_terminal_reserve_mwh: 2.0
-  oracle_mpc_tes_terminal_reserve_penalty_per_mwh: 500.0
-  oracle_mpc_planning_horizon_steps: 16.0
+  oracle_mpc_tes_terminal_reserve_mwh: 4.0
+  oracle_mpc_tes_terminal_reserve_penalty_per_mwh: 2000.0
+  oracle_mpc_planning_horizon_steps: 24.0
   oracle_mpc_replan_interval_steps: 4.0
-  oracle_mpc_time_limit_seconds: 2.0
-  oracle_mpc_mip_relative_gap: 0.01
+  oracle_mpc_time_limit_seconds: 4.0
+  oracle_mpc_mip_relative_gap: 0.005
   oracle_ga_population_size: 24.0
   oracle_ga_generations: 8.0
   oracle_ga_elite_count: 4.0

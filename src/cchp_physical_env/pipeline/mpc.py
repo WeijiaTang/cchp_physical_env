@@ -217,6 +217,129 @@ class BaseMPCPolicy:
             tes_energy_mwh=float(env.thermal_storage.energy_mwh),
         )
 
+    def _gt_upper_feasible_mw(
+        self,
+        *,
+        p_gt_prev_mw: float,
+        gt_prev_on: bool,
+        gt_on_steps: int,
+        gt_off_steps: int,
+    ) -> float:
+        cap = float(self.config.p_gt_cap_mw)
+        ramp = max(0.0, float(self.config.gt_ramp_mw_per_step))
+        gt_min = float(self.config.gt_min_output_mw)
+        min_off = max(0, int(round(float(self.config.gt_min_off_steps))))
+        upper = min(cap, max(0.0, float(p_gt_prev_mw)) + ramp)
+        if (not bool(gt_prev_on)) and int(gt_off_steps) < min_off:
+            return 0.0
+        if 0.0 < upper < gt_min:
+            upper = gt_min
+        return float(_clip(upper, 0.0, cap))
+
+    def _repair_heat_dispatch_step(
+        self,
+        *,
+        qh_demand_mw: float,
+        heat_cap_mw: float,
+        t_amb_k: float,
+        p_gt_req_mw: float,
+        p_gt_upper_feasible_mw: float,
+        q_boiler_mw: float,
+        tes_discharge_req_mw: float,
+        tes_discharge_feasible_mw: float,
+    ) -> dict[str, Any]:
+        env = self._require_env()
+        gt_min = float(self.config.gt_min_output_mw)
+        q_boiler_cap = float(self.config.q_boiler_cap_mw)
+
+        p_gt_req_mw = float(_clip(p_gt_req_mw, 0.0, max(0.0, float(p_gt_upper_feasible_mw))))
+        if p_gt_req_mw > 1e-9:
+            p_gt_req_mw = max(gt_min, p_gt_req_mw)
+        q_boiler_mw = float(_clip(q_boiler_mw, 0.0, q_boiler_cap))
+        tes_discharge_req_mw = float(
+            _clip(tes_discharge_req_mw, 0.0, max(0.0, float(tes_discharge_feasible_mw)))
+        )
+
+        def _solve_gt_and_hrsg(p_gt_mw: float) -> tuple[Any, Any]:
+            gt_result_local = env.gt_network.solve_offdesign(
+                p_gt_request_mw=float(p_gt_mw),
+                t_amb_k=float(t_amb_k),
+            )
+            hrsg_result_local = env.hrsg_network.solve(
+                m_exh_kg_per_s=float(gt_result_local.m_exh_kg_per_s),
+                t_exh_in_k=float(gt_result_local.t_exh_k),
+            )
+            return gt_result_local, hrsg_result_local
+
+        def _solve_boiler(q_boiler_heat_mw: float) -> Any:
+            return env.boiler.solve(u_boiler=float(q_boiler_heat_mw) / max(1e-6, q_boiler_cap))
+
+        def _heat_unmet_mw(hrsg_mw: float, boiler_mw: float, tes_mw: float) -> float:
+            return max(0.0, float(qh_demand_mw) - float(hrsg_mw) - float(boiler_mw) - float(tes_mw))
+
+        gt_result, hrsg_result = _solve_gt_and_hrsg(p_gt_req_mw)
+        boiler_result = _solve_boiler(q_boiler_mw)
+
+        if _heat_unmet_mw(float(hrsg_result.q_rec_mw), float(boiler_result.q_heat_mw), tes_discharge_req_mw) <= heat_cap_mw:
+            return {
+                "p_gt_req_mw": float(p_gt_req_mw),
+                "q_boiler_mw": float(boiler_result.q_heat_mw),
+                "tes_discharge_req_mw": float(tes_discharge_req_mw),
+                "gt_result": gt_result,
+                "hrsg_result": hrsg_result,
+                "boiler_result": boiler_result,
+            }
+
+        boiler_lower_bound = env._compute_boiler_heat_lower_bound(
+            qh_demand_mw=float(qh_demand_mw),
+            q_hrsg_available_mw=float(hrsg_result.q_rec_mw),
+            tes_discharge_support_mw=float(tes_discharge_req_mw),
+        )
+        repaired_boiler_mw = max(float(boiler_result.q_heat_mw), float(boiler_lower_bound["heat_backup_min_needed_mw"]))
+        if repaired_boiler_mw > float(boiler_result.q_heat_mw) + 1e-9:
+            boiler_result = _solve_boiler(repaired_boiler_mw)
+
+        heat_unmet_mw = _heat_unmet_mw(
+            float(hrsg_result.q_rec_mw),
+            float(boiler_result.q_heat_mw),
+            tes_discharge_req_mw,
+        )
+        if heat_unmet_mw > heat_cap_mw + 1e-9 and float(p_gt_upper_feasible_mw) > p_gt_req_mw + 1e-9:
+            repaired_p_gt_mw = max(p_gt_req_mw, float(p_gt_upper_feasible_mw))
+            if repaired_p_gt_mw > 1e-9:
+                repaired_p_gt_mw = max(gt_min, repaired_p_gt_mw)
+            if repaired_p_gt_mw > p_gt_req_mw + 1e-9:
+                p_gt_req_mw = float(repaired_p_gt_mw)
+                gt_result, hrsg_result = _solve_gt_and_hrsg(p_gt_req_mw)
+
+        heat_unmet_mw = _heat_unmet_mw(
+            float(hrsg_result.q_rec_mw),
+            float(boiler_result.q_heat_mw),
+            tes_discharge_req_mw,
+        )
+        if heat_unmet_mw > heat_cap_mw + 1e-9 and float(boiler_result.q_heat_mw) < q_boiler_cap - 1e-9:
+            boiler_result = _solve_boiler(q_boiler_cap)
+
+        heat_unmet_mw = _heat_unmet_mw(
+            float(hrsg_result.q_rec_mw),
+            float(boiler_result.q_heat_mw),
+            tes_discharge_req_mw,
+        )
+        if heat_unmet_mw > heat_cap_mw + 1e-9 and float(tes_discharge_feasible_mw) > tes_discharge_req_mw + 1e-9:
+            tes_discharge_req_mw = min(
+                float(tes_discharge_feasible_mw),
+                float(tes_discharge_req_mw) + max(0.0, heat_unmet_mw - float(heat_cap_mw)),
+            )
+
+        return {
+            "p_gt_req_mw": float(p_gt_req_mw),
+            "q_boiler_mw": float(boiler_result.q_heat_mw),
+            "tes_discharge_req_mw": float(tes_discharge_req_mw),
+            "gt_result": gt_result,
+            "hrsg_result": hrsg_result,
+            "boiler_result": boiler_result,
+        }
+
     def _apply_online_reliability_repair(
         self,
         action: dict[str, float],
@@ -235,33 +358,43 @@ class BaseMPCPolicy:
 
         p_gt_req_mw = ((float(repaired.get("u_gt", -1.0)) + 1.0) * 0.5) * float(self.config.p_gt_cap_mw)
         t_amb_k = float(observation.get("t_amb_k", 298.15))
-        gt_result = env.gt_network.solve_offdesign(p_gt_request_mw=p_gt_req_mw, t_amb_k=t_amb_k)
-        hrsg_result = env.hrsg_network.solve(
-            m_exh_kg_per_s=float(gt_result.m_exh_kg_per_s),
-            t_exh_in_k=float(gt_result.t_exh_k),
+        tes_discharge_feasible_mw = (
+            float(env.thermal_storage.max_feasible_discharge_mw(float(self.config.dt_hours)))
+            if self.config.constraint_mode.strip().lower() == "physics_in_loop"
+            else float(self.config.q_tes_discharge_cap_mw)
         )
-
-        if self.config.constraint_mode.strip().lower() == "physics_in_loop":
-            tes_discharge_cap_mw = env.thermal_storage.max_feasible_discharge_mw(float(self.config.dt_hours))
-        else:
-            tes_discharge_cap_mw = float(self.config.q_tes_discharge_cap_mw)
-        u_tes = float(repaired.get("u_tes", 0.0))
-        tes_discharge_req_mw = max(0.0, u_tes) * tes_discharge_cap_mw
-
-        minimum_boiler_mw = max(
-            0.0,
-            qh_dem_mw - heat_cap_mw - float(hrsg_result.q_rec_mw) - float(tes_discharge_req_mw),
+        q_tes_discharge_cap = max(1e-6, float(self.config.q_tes_discharge_cap_mw))
+        tes_discharge_req_mw = min(
+            tes_discharge_feasible_mw,
+            max(0.0, float(repaired.get("u_tes", 0.0))) * float(self.config.q_tes_discharge_cap_mw),
         )
-        minimum_boiler_mw = min(float(self.config.q_boiler_cap_mw), minimum_boiler_mw)
-        current_boiler_mw = float(repaired.get("u_boiler", 0.0)) * float(self.config.q_boiler_cap_mw)
-        if minimum_boiler_mw > current_boiler_mw + 1e-9:
-            repaired["u_boiler"] = float(
-                _clip(
-                    minimum_boiler_mw / max(1e-6, float(self.config.q_boiler_cap_mw)),
-                    0.0,
-                    1.0,
-                )
+        p_gt_upper_feasible_mw = self._gt_upper_feasible_mw(
+            p_gt_prev_mw=float(env.gt_prev_p_mw),
+            gt_prev_on=bool(env.gt_prev_on),
+            gt_on_steps=int(env.gt_on_steps),
+            gt_off_steps=int(env.gt_off_steps),
+        )
+        repaired_step = self._repair_heat_dispatch_step(
+            qh_demand_mw=qh_dem_mw,
+            heat_cap_mw=heat_cap_mw,
+            t_amb_k=t_amb_k,
+            p_gt_req_mw=float(p_gt_req_mw),
+            p_gt_upper_feasible_mw=float(p_gt_upper_feasible_mw),
+            q_boiler_mw=float(repaired.get("u_boiler", 0.0)) * float(self.config.q_boiler_cap_mw),
+            tes_discharge_req_mw=float(tes_discharge_req_mw),
+            tes_discharge_feasible_mw=float(tes_discharge_feasible_mw),
+        )
+        repaired["u_gt"] = float(env._gt_target_mw_to_action(float(repaired_step["p_gt_req_mw"])))
+        repaired["u_boiler"] = float(
+            _clip(
+                float(repaired_step["q_boiler_mw"]) / max(1e-6, float(self.config.q_boiler_cap_mw)),
+                0.0,
+                1.0,
             )
+        )
+        repaired["u_tes"] = float(
+            _clip(float(repaired_step["tes_discharge_req_mw"]) / q_tes_discharge_cap, -1.0, 1.0)
+        )
         return repaired
 
     def _build_episode_coefficients(
@@ -463,20 +596,49 @@ class BaseMPCPolicy:
             if requested_on and 0.0 < p_gt_req < gt_min:
                 p_gt_req = gt_min
 
-            gt_started = int(requested_on and not gt_prev_on)
-            gt_toggled = int(requested_on != gt_prev_on)
-            gt_delta = abs(p_gt_req - p_gt_prev)
-
-            gt_result = env.gt_network.solve_offdesign(p_gt_request_mw=p_gt_req, t_amb_k=t_amb_k)
-            hrsg_result = env.hrsg_network.solve(
-                m_exh_kg_per_s=float(gt_result.m_exh_kg_per_s),
-                t_exh_in_k=float(gt_result.t_exh_k),
-            )
-
             q_boiler_mw = float(_clip(plan[offset, 2], 0.0, q_boiler_cap))
-            boiler_result = env.boiler.solve(
-                u_boiler=q_boiler_mw / max(1e-6, q_boiler_cap)
+            q_tes_signed = float(_clip(plan[offset, 5], -q_tes_charge_cap, q_tes_discharge_cap))
+            tes_shadow = ThermalStorageState(env.thermal_storage.config)
+            tes_shadow.reset(energy_mwh=tes_e)
+            tes_discharge_req = min(max(0.0, q_tes_signed), tes_shadow.max_feasible_discharge_mw(dt_h))
+            tes_charge_req = min(max(0.0, -q_tes_signed), tes_shadow.max_feasible_charge_mw(dt_h))
+            p_gt_upper_feasible = self._gt_upper_feasible_mw(
+                p_gt_prev_mw=float(p_gt_prev),
+                gt_prev_on=bool(gt_prev_on),
+                gt_on_steps=int(gt_on_steps),
+                gt_off_steps=int(gt_off_steps),
             )
+            if heat_backup_repair_enabled:
+                repaired_step = self._repair_heat_dispatch_step(
+                    qh_demand_mw=float(qh_demand_mw),
+                    heat_cap_mw=float(heat_cap_mw),
+                    t_amb_k=float(t_amb_k),
+                    p_gt_req_mw=float(p_gt_req),
+                    p_gt_upper_feasible_mw=float(p_gt_upper_feasible),
+                    q_boiler_mw=float(q_boiler_mw),
+                    tes_discharge_req_mw=float(tes_discharge_req),
+                    tes_discharge_feasible_mw=float(tes_shadow.max_feasible_discharge_mw(dt_h)),
+                )
+                p_gt_req = float(repaired_step["p_gt_req_mw"])
+                q_boiler_mw = float(repaired_step["q_boiler_mw"])
+                tes_discharge_req = float(repaired_step["tes_discharge_req_mw"])
+                gt_result = repaired_step["gt_result"]
+                hrsg_result = repaired_step["hrsg_result"]
+                boiler_result = repaired_step["boiler_result"]
+            else:
+                gt_result = env.gt_network.solve_offdesign(p_gt_request_mw=p_gt_req, t_amb_k=t_amb_k)
+                hrsg_result = env.hrsg_network.solve(
+                    m_exh_kg_per_s=float(gt_result.m_exh_kg_per_s),
+                    t_exh_in_k=float(gt_result.t_exh_k),
+                )
+                boiler_result = env.boiler.solve(
+                    u_boiler=q_boiler_mw / max(1e-6, q_boiler_cap)
+                )
+
+            actual_gt_on = float(gt_result.p_gt_mw) > 1e-9
+            gt_started = int(actual_gt_on and not gt_prev_on)
+            gt_toggled = int(actual_gt_on != gt_prev_on)
+            gt_delta = abs(float(gt_result.p_gt_mw) - p_gt_prev)
 
             t_hot_k = self._tes_hot_k_from_energy(tes_e)
             abs_gate = 1.0
@@ -521,12 +683,6 @@ class BaseMPCPolicy:
                 t_amb_k=t_amb_k,
             )
 
-            q_tes_signed = float(_clip(plan[offset, 5], -q_tes_charge_cap, q_tes_discharge_cap))
-            tes_shadow = ThermalStorageState(env.thermal_storage.config)
-            tes_shadow.reset(energy_mwh=tes_e)
-            tes_discharge_req = min(max(0.0, q_tes_signed), tes_shadow.max_feasible_discharge_mw(dt_h))
-            tes_charge_req = min(max(0.0, -q_tes_signed), tes_shadow.max_feasible_charge_mw(dt_h))
-
             q_heat_dump_mw = 0.0
             heat_overcommit_flag = False
             if is_physics_mode:
@@ -537,23 +693,6 @@ class BaseMPCPolicy:
                 )
                 qh_served = min(qh_demand_mw, q_heat_available)
                 qh_unmet = max(0.0, qh_demand_mw - qh_served)
-                if heat_backup_repair_enabled and qh_unmet > heat_cap_mw:
-                    extra_boiler = min(
-                        max(0.0, q_boiler_cap - float(boiler_result.q_heat_mw)),
-                        max(0.0, qh_unmet - heat_cap_mw),
-                    )
-                    if extra_boiler > 1e-9:
-                        repaired_q_boiler_mw = float(boiler_result.q_heat_mw) + extra_boiler
-                        boiler_result = env.boiler.solve(
-                            u_boiler=repaired_q_boiler_mw / max(1e-6, q_boiler_cap)
-                        )
-                        q_heat_available = (
-                            float(hrsg_result.q_rec_mw)
-                            + float(boiler_result.q_heat_mw)
-                            + tes_discharge_req
-                        )
-                        qh_served = min(qh_demand_mw, q_heat_available)
-                        qh_unmet = max(0.0, qh_demand_mw - qh_served)
                 heat_after_heating = q_heat_available - qh_served
                 abs_result = env.abs_chiller.solve(
                     q_drive_request_mw=min(q_abs_drive_phys_mw, max(0.0, heat_after_heating)),
@@ -588,22 +727,6 @@ class BaseMPCPolicy:
                     + float(tes_result.q_charge_mw)
                 )
                 qh_unmet = max(0.0, qh_usage - qh_supply)
-                if heat_backup_repair_enabled and qh_unmet > heat_cap_mw:
-                    extra_boiler = min(
-                        max(0.0, q_boiler_cap - float(boiler_result.q_heat_mw)),
-                        max(0.0, qh_unmet - heat_cap_mw),
-                    )
-                    if extra_boiler > 1e-9:
-                        repaired_q_boiler_mw = float(boiler_result.q_heat_mw) + extra_boiler
-                        boiler_result = env.boiler.solve(
-                            u_boiler=repaired_q_boiler_mw / max(1e-6, q_boiler_cap)
-                        )
-                        qh_supply = (
-                            float(hrsg_result.q_rec_mw)
-                            + float(boiler_result.q_heat_mw)
-                            + float(tes_result.q_discharge_mw)
-                        )
-                        qh_unmet = max(0.0, qh_usage - qh_supply)
                 q_heat_dump_mw = max(0.0, qh_supply - qh_usage)
                 heat_overcommit_flag = qh_usage > qh_supply + 1e-9
 

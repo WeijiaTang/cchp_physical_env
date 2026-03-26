@@ -657,6 +657,22 @@ python -m cchp_physical_env eval \
   --device auto
 ```
 
+Oracle
+```bash
+uv run python -m cchp_physical_env eval `
+  --policy milp_mpc `
+  --history-steps 32 `
+  --env-config src\cchp_physical_env\config\config.yaml `
+  --run-dir runs\oracle_milp_full
+```
+```bash
+python -m cchp_physical_env eval `
+  --policy ga_mpc `
+  --history-steps 32 `
+  --env-config src\cchp_physical_env\config\config.yaml `
+  --run-dir runs\oracle_ga_full
+```
+
 ## 实验辅助命令
 
 ### 约束模式消融

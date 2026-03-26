@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import json
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -2057,6 +2058,7 @@ def train_sb3_policy(
     config: SB3TrainConfig,
     run_root: str | Path = "runs",
 ) -> dict[str, Any]:
+    train_start_time = time.perf_counter()
     gym, _, PPO, SAC, TD3, DDPG, DQN, DummyVecEnv, VecNormalize = _require_sb3_modules()
     del gym
 
@@ -2738,6 +2740,10 @@ def train_sb3_policy(
         _save_vecnormalize_bundle(best_reward_vecnormalize_path)
     payload["training_complete"] = True
     payload["training_timesteps_completed"] = int(getattr(model, "num_timesteps", config.total_timesteps))
+    payload["training_wall_time_s"] = float(time.perf_counter() - train_start_time)
+    payload["training_steps_per_second"] = float(
+        float(payload["training_timesteps_completed"]) / max(1e-9, float(payload["training_wall_time_s"]))
+    )
     payload["training_early_stopped"] = bool(getattr(eval_callback, "stop_requested", False))
     payload["training_stop_reason"] = str(getattr(eval_callback, "stop_reason", ""))
     payload["final_learning_rate"] = float(getattr(eval_callback, "current_learning_rate", config.learning_rate))
@@ -2972,6 +2978,7 @@ def evaluate_sb3_policy(
     model_source: str = "best",
     device: str = "auto",
 ) -> dict[str, Any]:
+    eval_start_time = time.perf_counter()
     _, _, PPO, SAC, TD3, DDPG, DQN, DummyVecEnv, VecNormalize = _require_sb3_modules()
 
     year = _extract_year(eval_df)
@@ -3113,6 +3120,10 @@ def evaluate_sb3_policy(
     summary["backbone"] = str(ckpt.get("backbone", ""))
     summary["history_steps"] = int(history_steps)
     summary["seed"] = int(seed)
+    summary["eval_wall_time_s"] = float(time.perf_counter() - eval_start_time)
+    summary["eval_steps_per_second"] = float(
+        len(step_rows) / max(1e-9, float(summary["eval_wall_time_s"]))
+    )
     summary["checkpoint_json"] = str(checkpoint_json_path).replace("\\", "/")
     summary["model_source"] = str(resolved_model_source)
     summary["resolved_model_path"] = str(resolved_model_path).replace("\\", "/")

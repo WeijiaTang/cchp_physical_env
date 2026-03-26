@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -305,6 +306,7 @@ def train_baseline(
     run_root: str | Path,
     config: EnvConfig,
 ) -> Path:
+    start_time = time.perf_counter()
     year = _extract_year(train_df)
     if year != TRAIN_YEAR:
         raise ValueError(f"训练必须使用 {TRAIN_YEAR}，当前年份 {year}")
@@ -373,6 +375,7 @@ def train_baseline(
         "mean_unmet_e_mwh": float(episodes_df["unmet_e_mwh"].mean()),
         "mean_unmet_h_mwh": float(episodes_df["unmet_h_mwh"].mean()),
         "mean_unmet_c_mwh": float(episodes_df["unmet_c_mwh"].mean()),
+        "training_wall_time_s": float(time.perf_counter() - start_time),
         "policy_details": policy_metadata,
     }
     (run_dir / "train" / "summary.json").write_text(
@@ -410,6 +413,7 @@ def evaluate_baseline(
     device: str = "auto",
     config: EnvConfig,
 ) -> dict:
+    start_time = time.perf_counter()
     year = _extract_year(eval_df)
     if year != EVAL_YEAR:
         raise ValueError(f"评估必须使用 {EVAL_YEAR}，当前年份 {year}")
@@ -475,6 +479,10 @@ def evaluate_baseline(
     summary["history_steps"] = int(history_steps)
     summary["seed"] = seed
     summary["total_reward"] = float(total_reward)
+    summary["eval_wall_time_s"] = float(time.perf_counter() - start_time)
+    summary["eval_steps_per_second"] = float(
+        len(step_rows) / max(1e-9, float(summary["eval_wall_time_s"]))
+    )
     policy_metadata_fn = getattr(policy, "policy_metadata", None)
     if callable(policy_metadata_fn):
         summary["policy_details"] = policy_metadata_fn()
