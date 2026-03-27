@@ -16,6 +16,7 @@ class AbsChillerDesignPoint:
     t_drive_min_k: float = 358.15
     t_drive_ref_k: float = 378.15
     cop_nominal: float = 0.75
+    cop_min_fraction: float = 0.50
 
 
 @dataclass(slots=True)
@@ -35,11 +36,14 @@ class AbsChillerNetwork:
     def estimate_cop(self, t_hot_k: float) -> float:
         if t_hot_k < self.design.t_drive_min_k:
             return 0.0
+        if self.design.t_drive_ref_k <= self.design.t_drive_min_k + 1e-9:
+            return max(0.0, self.design.cop_nominal)
         scale = (t_hot_k - self.design.t_drive_min_k) / max(
             1e-6, self.design.t_drive_ref_k - self.design.t_drive_min_k
         )
         scale = _clip(scale, 0.0, 1.0)
-        return self.design.cop_nominal * scale
+        cop_floor = max(0.0, self.design.cop_nominal * self.design.cop_min_fraction)
+        return cop_floor + (self.design.cop_nominal - cop_floor) * scale
 
     def solve(self, *, q_drive_request_mw: float, t_hot_k: float) -> AbsChillerResult:
         requested = max(0.0, q_drive_request_mw)

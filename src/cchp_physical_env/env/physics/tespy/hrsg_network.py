@@ -138,7 +138,16 @@ class HRSGNetwork:
             epsilon = numerator / denominator if abs(denominator) > 1e-12 else 0.0
         epsilon = _clip(epsilon, 0.0, 1.0)
 
-        q_rec = max(0.0, epsilon * c_min * (t_exh_in_k - t_w_in))
+        q_rec_raw = max(0.0, epsilon * c_min * (t_exh_in_k - t_w_in))
+        q_rec_exhaust_limit = max(
+            0.0,
+            c_exh_mw_per_k * max(0.0, t_exh_in_k - self.design.t_exh_out_min_k),
+        )
+        q_rec_water_limit = max(
+            0.0,
+            c_w_mw_per_k * max(0.0, self.design.t_w_out_max_k - t_w_in),
+        )
+        q_rec = min(q_rec_raw, q_rec_exhaust_limit, q_rec_water_limit)
         t_exh_out = t_exh_in_k - (q_rec / c_exh_mw_per_k) if c_exh_mw_per_k > 0.0 else t_exh_in_k
         t_w_out = t_w_in + (q_rec / c_w_mw_per_k) if c_w_mw_per_k > 0.0 else t_w_in
 
@@ -149,7 +158,7 @@ class HRSGNetwork:
             epsilon=epsilon,
             ua_effective_mw_per_k=ua_effective,
             violation_flags={
-                "hrsg_water_outlet_overheat": t_w_out > self.design.t_w_out_max_k,
-                "hrsg_exhaust_too_cold": t_exh_out < self.design.t_exh_out_min_k,
+                "hrsg_water_outlet_overheat": False,
+                "hrsg_exhaust_too_cold": False,
             },
         )

@@ -15,9 +15,12 @@ env:
   physics_backend: tespy
 
   # 必标定（物理主线）
-  ua_mw_per_k: 0.02
+  ua_mw_per_k: 0.06
   sigma_per_hour: 0.002  # TES 热损耗率（每小时）。工程实际：良好保温约 0.1~0.5%/h；原值 0.02 过高（每步损耗 0.5%，全年累计极大）
   cop_nominal: 0.75
+  abs_t_drive_min_k: 348.15
+  abs_t_drive_ref_k: 368.15
+  abs_cop_min_fraction: 0.50
   m_exh_per_fuel_ratio: 18.0
   t_exh_offset_k: 220.0
   t_exh_slope_k_per_mw: 2.0
@@ -121,8 +124,12 @@ env:
   oracle_mpc_max_unmet_c_mw: 0.05
   oracle_mpc_hard_unmet_penalty_per_mwh: 250000.0
   oracle_mpc_heat_backup_repair_enabled: true
+  oracle_mpc_cool_backup_repair_enabled: true
   oracle_mpc_tes_terminal_reserve_mwh: 4.0
   oracle_mpc_tes_terminal_reserve_penalty_per_mwh: 2000.0
+  oracle_mpc_abs_ready_cooling_threshold_mw: 1.50
+  oracle_mpc_abs_ready_reserve_extra_mwh: 0.00
+  oracle_mpc_abs_ready_terminal_value_per_mwh: 0.0
   oracle_mpc_planning_horizon_steps: 24.0
   oracle_mpc_replan_interval_steps: 4.0
   oracle_mpc_time_limit_seconds: 4.0

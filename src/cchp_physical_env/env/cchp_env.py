@@ -102,6 +102,9 @@ class EnvConfig:
     ua_mw_per_k: float
     sigma_per_hour: float
     cop_nominal: float
+    abs_t_drive_min_k: float
+    abs_t_drive_ref_k: float
+    abs_cop_min_fraction: float
     m_exh_per_fuel_ratio: float
     t_exh_offset_k: float
     t_exh_slope_k_per_mw: float
@@ -191,8 +194,12 @@ class EnvConfig:
     oracle_mpc_max_unmet_c_mw: float
     oracle_mpc_hard_unmet_penalty_per_mwh: float
     oracle_mpc_heat_backup_repair_enabled: bool
+    oracle_mpc_cool_backup_repair_enabled: bool
     oracle_mpc_tes_terminal_reserve_mwh: float
     oracle_mpc_tes_terminal_reserve_penalty_per_mwh: float
+    oracle_mpc_abs_ready_cooling_threshold_mw: float
+    oracle_mpc_abs_ready_reserve_extra_mwh: float
+    oracle_mpc_abs_ready_terminal_value_per_mwh: float
     oracle_mpc_planning_horizon_steps: float
     oracle_mpc_replan_interval_steps: float
     oracle_mpc_time_limit_seconds: float
@@ -303,7 +310,10 @@ class CCHPPhysicalEnv:
             AbsChillerDesignPoint(
                 q_drive_cap_mw=self.config.q_abs_drive_cap_mw,
                 q_cool_cap_mw=self.config.q_abs_cool_cap_mw,
+                t_drive_min_k=self.config.abs_t_drive_min_k,
+                t_drive_ref_k=self.config.abs_t_drive_ref_k,
                 cop_nominal=self.config.cop_nominal,
+                cop_min_fraction=self.config.abs_cop_min_fraction,
             )
         )
         self.thermal_storage = ThermalStorageState(

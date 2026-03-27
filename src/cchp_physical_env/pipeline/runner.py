@@ -60,6 +60,7 @@ class RulePolicy:
     train_statistics: dict
     p_gt_cap_mw: float = 12.0
     q_ech_cap_mw: float = 6.0
+    abs_drive_threshold_k: float = 348.15
     price_low: float = 0.0
     price_high: float = 1.0
     load_med: float = 0.0
@@ -117,8 +118,7 @@ class RulePolicy:
                 boiler_base = max(boiler_base, 0.3)
             u_boiler = min(1.0, boiler_base)
 
-        ABS_DRIVE_THRESHOLD_K = 358.15
-        u_abs = 0.9 if (qc_dem > self.cool_med * 0.5 and t_hot_k >= ABS_DRIVE_THRESHOLD_K) else 0.0
+        u_abs = 0.9 if (qc_dem > self.cool_med * 0.5 and t_hot_k >= self.abs_drive_threshold_k) else 0.0
 
         u_ech = min(1.0, max(0.0, qc_dem / max(1e-6, self.q_ech_cap_mw)))
 
@@ -209,7 +209,12 @@ def _build_policy(
     if normalized == "easy_rule":
         return EasyRulePolicy()
     if normalized == "rule":
-        return RulePolicy(train_statistics=train_statistics)
+        return RulePolicy(
+            train_statistics=train_statistics,
+            p_gt_cap_mw=float(config.p_gt_cap_mw),
+            q_ech_cap_mw=float(config.q_ech_cap_mw),
+            abs_drive_threshold_k=float(config.abs_t_drive_min_k),
+        )
     if normalized == "milp_mpc":
         return MILPMPCPolicy(config=config, history_steps=history_steps, seed=seed)
     if normalized == "ga_mpc":

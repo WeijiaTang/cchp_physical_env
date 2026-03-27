@@ -112,6 +112,7 @@ ENV_BOOL_KEYS = {
     "oracle_mpc_abs_enabled",
     "oracle_mpc_hard_reliability",
     "oracle_mpc_heat_backup_repair_enabled",
+    "oracle_mpc_cool_backup_repair_enabled",
 }
 # 数值范围规则：仅对需要额外范围约束的字段登记，其余数值字段只做“类型 + finite”校验。
 ENV_NUMERIC_RULES: dict[str, tuple[Callable[[float], bool], str]] = {
@@ -170,6 +171,18 @@ ENV_NUMERIC_RULES: dict[str, tuple[Callable[[float], bool], str]] = {
     "abs_gate_scale_k": (
         lambda value: value > 0.0,
         "abs_gate_scale_k 必须 > 0。",
+    ),
+    "abs_t_drive_min_k": (
+        lambda value: value > 273.15,
+        "abs_t_drive_min_k 必须 > 273.15K。",
+    ),
+    "abs_t_drive_ref_k": (
+        lambda value: value > 273.15,
+        "abs_t_drive_ref_k 必须 > 273.15K。",
+    ),
+    "abs_cop_min_fraction": (
+        lambda value: 0.0 <= value <= 1.0,
+        "abs_cop_min_fraction 必须在 [0,1]。",
     ),
     "abs_deadzone_gate_th": (
         lambda value: 0.0 <= value <= 1.0,
@@ -258,6 +271,18 @@ ENV_NUMERIC_RULES: dict[str, tuple[Callable[[float], bool], str]] = {
     "oracle_mpc_tes_terminal_reserve_penalty_per_mwh": (
         lambda value: value >= 0.0,
         "oracle_mpc_tes_terminal_reserve_penalty_per_mwh 必须 >= 0。",
+    ),
+    "oracle_mpc_abs_ready_cooling_threshold_mw": (
+        lambda value: value >= 0.0,
+        "oracle_mpc_abs_ready_cooling_threshold_mw 必须 >= 0。",
+    ),
+    "oracle_mpc_abs_ready_reserve_extra_mwh": (
+        lambda value: value >= 0.0,
+        "oracle_mpc_abs_ready_reserve_extra_mwh 必须 >= 0。",
+    ),
+    "oracle_mpc_abs_ready_terminal_value_per_mwh": (
+        lambda value: value >= 0.0,
+        "oracle_mpc_abs_ready_terminal_value_per_mwh 必须 >= 0。",
     ),
     "oracle_mpc_planning_horizon_steps": (
         lambda value: value > 0.0,
@@ -412,6 +437,9 @@ def build_env_config_from_overrides(
         if mode not in ENV_ENUM_OPTIONS["constraint_mode"]:
             raise ValueError(f"不支持的 constraint_mode: {force_constraint_mode}")
         values["constraint_mode"] = mode
+
+    if float(values["abs_t_drive_ref_k"]) <= float(values["abs_t_drive_min_k"]):
+        raise ValueError("abs_t_drive_ref_k 必须大于 abs_t_drive_min_k。")
 
     return EnvConfig(**values)
 
