@@ -31,3 +31,4 @@ ${workspaceFolder}/
 tmp*
 cchp-paper/
 *.bak
+scripts/plot/tiff/
