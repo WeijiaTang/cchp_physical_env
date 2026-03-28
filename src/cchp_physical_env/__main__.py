@@ -87,7 +87,6 @@ TRAINING_OPTION_KEYS = (
     "sb3_eval_episode_days",
     "sb3_eval_window_pool_size",
     "sb3_eval_window_count",
-    "sb3_eval_window_seed",
     "sb3_ppo_warm_start_enabled",
     "sb3_residual_enabled",
     "sb3_residual_policy",
@@ -265,7 +264,6 @@ def _command_train(args: argparse.Namespace) -> None:
                 "sb3_eval_episode_days",
                 "sb3_eval_window_pool_size",
                 "sb3_eval_window_count",
-                "sb3_eval_window_seed",
                 "sb3_ppo_warm_start_enabled",
                 "sb3_residual_enabled",
                 "sb3_residual_policy",
@@ -324,7 +322,7 @@ def _command_train(args: argparse.Namespace) -> None:
                 eval_episode_days=current_options["sb3_eval_episode_days"],
                 eval_window_pool_size=current_options["sb3_eval_window_pool_size"],
                 eval_window_count=current_options["sb3_eval_window_count"],
-                eval_window_seed=current_options["sb3_eval_window_seed"],
+                eval_window_seed=seed,
                 ppo_warm_start_enabled=bool(current_options["sb3_ppo_warm_start_enabled"]),
                 residual_enabled=bool(current_options["sb3_residual_enabled"]),
                 residual_policy=current_options["sb3_residual_policy"],
@@ -587,7 +585,7 @@ def _command_eval(args: argparse.Namespace) -> None:
         )
 
     if multi_seed:
-        _write_multi_seed_eval_summary(base_run_dir, outputs, preferred_seed=42)
+        _write_multi_seed_eval_summary(base_run_dir, outputs, preferred_seed=seed_values[0])
     print(json.dumps(outputs[0] if not multi_seed else outputs, indent=2, ensure_ascii=False))
 
 
@@ -633,7 +631,7 @@ def _command_sb3_train(args: argparse.Namespace) -> None:
             eval_episode_days=int(_arg_or_training_default("eval_episode_days", "sb3_eval_episode_days")),
             eval_window_pool_size=int(_arg_or_training_default("eval_window_pool_size", "sb3_eval_window_pool_size")),
             eval_window_count=int(_arg_or_training_default("eval_window_count", "sb3_eval_window_count")),
-            eval_window_seed=int(_arg_or_training_default("eval_window_seed", "sb3_eval_window_seed")),
+            eval_window_seed=seed,
             ppo_warm_start_enabled=bool(_arg_or_training_default("ppo_warm_start_enabled", "sb3_ppo_warm_start_enabled")),
             residual_enabled=bool(_arg_or_training_default("residual_enabled", "sb3_residual_enabled")),
             residual_policy=str(_arg_or_training_default("residual_policy", "sb3_residual_policy")),
@@ -742,7 +740,7 @@ def _command_sb3_eval(args: argparse.Namespace) -> None:
         )
 
     if multi_seed:
-        _write_multi_seed_eval_summary(base_run_dir, outputs, preferred_seed=42)
+        _write_multi_seed_eval_summary(base_run_dir, outputs, preferred_seed=seed_values[0])
     print(json.dumps(outputs[0] if not multi_seed else outputs, indent=2, ensure_ascii=False))
 
 
@@ -757,7 +755,7 @@ def _write_multi_seed_eval_summary(
 
     约定：
     - 每个 seed 的详细 summary 仍写在 seed_x/eval/summary.json（原行为）
-    - base summary 默认选择 seed=preferred_seed（若存在），否则选择第一个 seed
+    - base summary 默认选择“本次传入 seeds 中的第一个 seed”（若存在），否则选择排序后的第一个 seed
     - 同时写入 eval/summary_seeds.json，记录所有 seed 的摘要
     """
     if not outputs:
@@ -1049,7 +1047,6 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--sb3-eval-episode-days", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument("--sb3-eval-window-pool-size", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument("--sb3-eval-window-count", type=int, default=argparse.SUPPRESS)
-    train_parser.add_argument("--sb3-eval-window-seed", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument(
         "--sb3-ppo-warm-start-enabled",
         dest="sb3_ppo_warm_start_enabled",
@@ -1277,7 +1274,6 @@ def build_parser() -> argparse.ArgumentParser:
     sb3_train_parser.add_argument("--eval-episode-days", type=int, default=argparse.SUPPRESS)
     sb3_train_parser.add_argument("--eval-window-pool-size", type=int, default=argparse.SUPPRESS)
     sb3_train_parser.add_argument("--eval-window-count", type=int, default=argparse.SUPPRESS)
-    sb3_train_parser.add_argument("--eval-window-seed", type=int, default=argparse.SUPPRESS)
     sb3_train_parser.add_argument(
         "--ppo-warm-start-enabled",
         dest="ppo_warm_start_enabled",

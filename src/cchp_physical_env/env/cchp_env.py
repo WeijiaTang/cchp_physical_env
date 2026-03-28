@@ -188,6 +188,7 @@ class EnvConfig:
     q_abs_cool_cap_mw: float
 
     oracle_mpc_abs_enabled: bool
+    oracle_mpc_mode: str
     oracle_mpc_hard_reliability: bool
     oracle_mpc_max_unmet_e_mw: float
     oracle_mpc_max_unmet_h_mw: float
@@ -347,6 +348,8 @@ class CCHPPhysicalEnv:
                 q_abs_cool_cap_mw=self.config.q_abs_cool_cap_mw,
                 q_tes_charge_cap_mw=self.config.q_tes_charge_cap_mw,
                 q_tes_discharge_cap_mw=self.config.q_tes_discharge_cap_mw,
+                heat_backup_shield_enabled=self.config.heat_backup_shield_enabled,
+                heat_backup_shield_margin_mw=self.config.heat_backup_shield_margin_mw,
                 solver_name=self.config.pyomo_solver,
                 tracking_weight=self.config.pyomo_tracking_weight,
                 unmet_penalty_weight=self.config.pyomo_unmet_penalty_weight,

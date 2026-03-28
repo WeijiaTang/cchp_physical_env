@@ -80,6 +80,12 @@ class BaseMPCPolicy:
         self._cached_plan_start: int | None = None
         self._cached_actions: list[dict[str, float]] = []
         self._rng = np.random.default_rng(self.seed)
+        self._fallback_dispatch_count = 0
+        self._online_repair_steps = 0
+        self._online_heat_repair_count = 0
+        self._online_cool_repair_count = 0
+        self._planner_heat_shield_alignment_steps = 0
+        self._shared_heat_projection_steps = 0
 
     def bind_episode_context(
         self,
@@ -96,11 +102,29 @@ class BaseMPCPolicy:
         self._cached_plan_start = None
         self._cached_actions = []
         self._rng = np.random.default_rng(self.seed + int(seed))
+        self._fallback_dispatch_count = 0
+        self._online_repair_steps = 0
+        self._online_heat_repair_count = 0
+        self._online_cool_repair_count = 0
+        self._planner_heat_shield_alignment_steps = 0
+        self._shared_heat_projection_steps = 0
 
     def reset_episode(self, observation: dict[str, float]) -> None:
         del observation
         self._cached_plan_start = None
         self._cached_actions = []
+        self._fallback_dispatch_count = 0
+        self._online_repair_steps = 0
+        self._online_heat_repair_count = 0
+        self._online_cool_repair_count = 0
+        self._planner_heat_shield_alignment_steps = 0
+        self._shared_heat_projection_steps = 0
+
+    def _oracle_mode(self) -> str:
+        return str(getattr(self.config, "oracle_mpc_mode", "debug")).strip().lower()
+
+    def _planner_strict_mode_enabled(self) -> bool:
+        return self._oracle_mode() == "strict"
 
     def policy_metadata(self) -> dict[str, Any]:
         env = self._require_env()
@@ -111,29 +135,44 @@ class BaseMPCPolicy:
         return {
             "planner": self.__class__.__name__,
             "forecast_mode": "perfect_episode_slice_surrogate_v1",
+            "oracle_mode": str(self._oracle_mode()),
+            "strict_no_repair": bool(self._planner_strict_mode_enabled()),
             "planning_horizon_steps": int(self.planning_horizon_steps),
             "replan_interval_steps": int(self.replan_interval_steps),
             "abs_used": bool(self.config.oracle_mpc_abs_enabled),
-            "hard_reliability": bool(self.config.oracle_mpc_hard_reliability),
+            "hard_reliability_requested": bool(self.config.oracle_mpc_hard_reliability),
+            "hard_reliability": bool(self._planner_hard_reliability_enabled()),
             "hard_unmet_caps_mw": {
                 "electric": float(self.config.oracle_mpc_max_unmet_e_mw),
                 "heat": float(self.config.oracle_mpc_max_unmet_h_mw),
                 "cooling": float(self.config.oracle_mpc_max_unmet_c_mw),
             },
-            "heat_backup_repair_enabled": bool(self.config.oracle_mpc_heat_backup_repair_enabled),
-            "cool_backup_repair_enabled": bool(self.config.oracle_mpc_cool_backup_repair_enabled),
+            "heat_backup_repair_requested": bool(self.config.oracle_mpc_heat_backup_repair_enabled),
+            "cool_backup_repair_requested": bool(self.config.oracle_mpc_cool_backup_repair_enabled),
+            "heat_backup_repair_enabled": bool(self._planner_heat_backup_repair_enabled()),
+            "cool_backup_repair_enabled": bool(self._planner_cool_backup_repair_enabled()),
             "tes_terminal_reserve_mwh": float(preview_reserve_mwh),
             "planner_abs_ready_temperature_k": float(self._planner_abs_ready_temperature_k()),
             "abs_ready_cooling_threshold_mw": float(self.config.oracle_mpc_abs_ready_cooling_threshold_mw),
             "abs_ready_reserve_extra_mwh": float(self.config.oracle_mpc_abs_ready_reserve_extra_mwh),
             "abs_ready_terminal_value_per_mwh": float(self.config.oracle_mpc_abs_ready_terminal_value_per_mwh),
             "surrogate_alignment": "cchp_priority_dynamic_om_v3",
+            "runtime_counters": {
+                "fallback_dispatch_count": int(self._fallback_dispatch_count),
+                "online_repair_steps": int(self._online_repair_steps),
+                "online_heat_repair_count": int(self._online_heat_repair_count),
+                "online_cool_repair_count": int(self._online_cool_repair_count),
+                "planner_heat_shield_alignment_steps": int(self._planner_heat_shield_alignment_steps),
+                "shared_heat_projection_steps": int(self._shared_heat_projection_steps),
+            },
         }
 
     def _planner_abs_enabled(self) -> bool:
         return bool(self.config.oracle_mpc_abs_enabled)
 
     def _planner_hard_reliability_enabled(self) -> bool:
+        if self._planner_strict_mode_enabled():
+            return True
         return bool(self.config.oracle_mpc_hard_reliability)
 
     def _planner_unmet_caps_mw(self) -> dict[str, float]:
@@ -144,9 +183,13 @@ class BaseMPCPolicy:
         }
 
     def _planner_heat_backup_repair_enabled(self) -> bool:
+        if self._planner_strict_mode_enabled():
+            return False
         return bool(self.config.oracle_mpc_heat_backup_repair_enabled)
 
     def _planner_cool_backup_repair_enabled(self) -> bool:
+        if self._planner_strict_mode_enabled():
+            return False
         return bool(self.config.oracle_mpc_cool_backup_repair_enabled)
 
     def _planner_abs_ready_activation(
@@ -295,20 +338,24 @@ class BaseMPCPolicy:
             and current_step >= self._cached_plan_start
             and current_step < self._cached_plan_start + len(self._cached_actions)
         ):
-            return self._apply_online_reliability_repair(
+            action = self._align_action_with_shared_heat_shield(
                 dict(self._cached_actions[current_step - self._cached_plan_start]),
                 observation=observation,
             )
+            return self._apply_online_reliability_repair(action, observation=observation)
 
         plan = self._solve_plan(current_step=current_step, observation=observation)
         if not plan:
+            self._fallback_dispatch_count += 1
             return self._apply_online_reliability_repair(self._fallback_action(observation), observation=observation)
 
         self._cached_plan_start = current_step
         self._cached_actions = list(plan[: self.replan_interval_steps])
         if not self._cached_actions:
+            self._fallback_dispatch_count += 1
             return self._apply_online_reliability_repair(self._fallback_action(observation), observation=observation)
-        return self._apply_online_reliability_repair(dict(self._cached_actions[0]), observation=observation)
+        action = self._align_action_with_shared_heat_shield(dict(self._cached_actions[0]), observation=observation)
+        return self._apply_online_reliability_repair(action, observation=observation)
 
     def _require_env(self) -> CCHPPhysicalEnv:
         if self._env is None or self._episode_df is None or self._coeffs is None:
@@ -344,6 +391,44 @@ class BaseMPCPolicy:
         if 0.0 < upper < gt_min:
             upper = gt_min
         return float(_clip(upper, 0.0, cap))
+
+    def _align_action_with_shared_heat_shield(
+        self,
+        action: dict[str, float],
+        *,
+        observation: dict[str, float],
+    ) -> dict[str, float]:
+        if (not bool(self.config.heat_backup_shield_enabled)) or self.config.constraint_mode.strip().lower() != "physics_in_loop":
+            return action
+        env = self._require_env()
+        aligned = dict(action)
+        t_amb_k = float(observation.get("t_amb_k", 298.15))
+        qh_dem_mw = float(observation.get("qh_dem_mw", 0.0))
+        u_gt = float(_clip(float(aligned.get("u_gt", -1.0)), -1.0, 1.0))
+        p_gt_req_mw = ((u_gt + 1.0) * 0.5) * float(self.config.p_gt_cap_mw)
+        gt_result = env.gt_network.solve_offdesign(
+            p_gt_request_mw=float(p_gt_req_mw),
+            t_amb_k=float(t_amb_k),
+        )
+        hrsg_result = env.hrsg_network.solve(
+            m_exh_kg_per_s=float(gt_result.m_exh_kg_per_s),
+            t_exh_in_k=float(gt_result.t_exh_k),
+        )
+        tes_discharge_support_mw = min(
+            max(0.0, float(aligned.get("u_tes", 0.0))) * float(self.config.q_tes_discharge_cap_mw),
+            float(env.thermal_storage.max_feasible_discharge_mw(float(self.config.dt_hours))),
+        )
+        lower_bound = env._compute_boiler_heat_lower_bound(
+            qh_demand_mw=float(qh_dem_mw),
+            q_hrsg_available_mw=float(hrsg_result.q_rec_mw),
+            tes_discharge_support_mw=float(tes_discharge_support_mw),
+        )
+        u_boiler_lb = float(lower_bound["u_boiler_lower_bound"])
+        u_boiler_now = float(_clip(float(aligned.get("u_boiler", 0.0)), 0.0, 1.0))
+        if u_boiler_lb > u_boiler_now + 1e-9:
+            aligned["u_boiler"] = float(u_boiler_lb)
+            self._shared_heat_projection_steps += 1
+        return aligned
 
     def _repair_heat_dispatch_step(
         self,
@@ -495,11 +580,15 @@ class BaseMPCPolicy:
         *,
         observation: dict[str, float],
     ) -> dict[str, float]:
-        if not (self._planner_hard_reliability_enabled() and self._planner_heat_backup_repair_enabled()):
+        use_heat_repair = self._planner_hard_reliability_enabled() and self._planner_heat_backup_repair_enabled()
+        use_cool_repair = self._planner_hard_reliability_enabled() and self._planner_cool_backup_repair_enabled()
+        if not (use_heat_repair or use_cool_repair):
             return action
 
         env = self._require_env()
         repaired = dict(action)
+        heat_repaired = False
+        cool_repaired = False
         heat_cap_mw = float(self._planner_unmet_caps_mw()["heat"])
         cool_cap_mw = float(self._planner_unmet_caps_mw()["cooling"])
         qh_dem_mw = float(observation.get("qh_dem_mw", 0.0))
@@ -523,7 +612,10 @@ class BaseMPCPolicy:
             gt_on_steps=int(env.gt_on_steps),
             gt_off_steps=int(env.gt_off_steps),
         )
-        if qh_dem_mw > heat_cap_mw + 1e-9:
+        if use_heat_repair and qh_dem_mw > heat_cap_mw + 1e-9:
+            original_u_gt = float(repaired.get("u_gt", -1.0))
+            original_u_boiler = float(repaired.get("u_boiler", 0.0))
+            original_u_tes = float(repaired.get("u_tes", 0.0))
             repaired_step = self._repair_heat_dispatch_step(
                 qh_demand_mw=qh_dem_mw,
                 heat_cap_mw=heat_cap_mw,
@@ -577,13 +669,19 @@ class BaseMPCPolicy:
             repaired["u_tes"] = float(
                 _clip(float(tes_discharge_req_mw) / q_tes_discharge_cap, -1.0, 1.0)
             )
+        if use_heat_repair and qh_dem_mw > heat_cap_mw + 1e-9:
+            heat_repaired = (
+                abs(float(repaired.get("u_gt", -1.0)) - original_u_gt) > 1e-9
+                or abs(float(repaired.get("u_boiler", 0.0)) - original_u_boiler) > 1e-9
+                or abs(float(repaired.get("u_tes", 0.0)) - original_u_tes) > 1e-9
+            )
         effective_tes_discharge_req_mw = min(
             float(tes_discharge_feasible_mw),
             max(0.0, float(repaired.get("u_tes", 0.0))) * float(self.config.q_tes_discharge_cap_mw),
         )
 
-        use_cool_repair = self._planner_hard_reliability_enabled() and self._planner_cool_backup_repair_enabled()
         if use_cool_repair and qc_dem_mw > cool_cap_mw + 1e-9:
+            original_u_ech = float(repaired.get("u_ech", 0.0))
             t_hot_k = self._tes_hot_k_from_energy(float(env.thermal_storage.energy_mwh))
             abs_gate = 1.0
             if bool(self.config.abs_gate_enabled):
@@ -625,6 +723,13 @@ class BaseMPCPolicy:
                     1.0,
                 )
             )
+            cool_repaired = abs(float(repaired.get("u_ech", 0.0)) - original_u_ech) > 1e-9
+        if heat_repaired:
+            self._online_heat_repair_count += 1
+        if cool_repaired:
+            self._online_cool_repair_count += 1
+        if heat_repaired or cool_repaired:
+            self._online_repair_steps += 1
         return repaired
 
     def _build_episode_coefficients(
@@ -883,6 +988,16 @@ class BaseMPCPolicy:
                     m_exh_kg_per_s=float(gt_result.m_exh_kg_per_s),
                     t_exh_in_k=float(gt_result.t_exh_k),
                 )
+                if bool(self.config.heat_backup_shield_enabled) and is_physics_mode:
+                    boiler_lower_bound = env._compute_boiler_heat_lower_bound(
+                        qh_demand_mw=float(qh_demand_mw),
+                        q_hrsg_available_mw=float(hrsg_result.q_rec_mw),
+                        tes_discharge_support_mw=float(tes_discharge_req),
+                    )
+                    q_boiler_lower_bound = float(boiler_lower_bound["heat_backup_min_needed_mw"])
+                    if q_boiler_mw + 1e-9 < q_boiler_lower_bound:
+                        q_boiler_mw = float(q_boiler_lower_bound)
+                        self._planner_heat_shield_alignment_steps += 1
                 boiler_result = env.boiler.solve(
                     u_boiler=q_boiler_mw / max(1e-6, q_boiler_cap)
                 )
@@ -1191,6 +1306,7 @@ class _MILPIndex:
     p_gt: slice
     y_gt: slice
     z_start: slice
+    z_stop: slice
     p_bes_charge: slice
     p_bes_discharge: slice
     q_boiler: slice
@@ -1235,6 +1351,7 @@ class _MILPIndex:
             p_gt=_next(),
             y_gt=_next(),
             z_start=_next(),
+            z_stop=_next(),
             p_bes_charge=_next(),
             p_bes_discharge=_next(),
             q_boiler=_next(),
@@ -1315,6 +1432,7 @@ class MILPMPCPolicy(BaseMPCPolicy):
         ramp = max(0.0, float(self.config.gt_ramp_mw_per_step))
         gt_min = float(self.config.gt_min_output_mw)
         env = self._require_env()
+        is_physics_mode = self.config.constraint_mode.strip().lower() == "physics_in_loop"
         boiler_eff = max(1e-6, float(env.boiler.efficiency))
         terminal_reserve_mwh = self._planner_tes_terminal_reserve_mwh(
             current_step=current_step,
@@ -1338,6 +1456,7 @@ class MILPMPCPolicy(BaseMPCPolicy):
         _set_bounds(idx.p_gt, 0.0, p_gt_cap)
         _set_bounds(idx.y_gt, 0.0, 1.0, binary=True)
         _set_bounds(idx.z_start, 0.0, 1.0, binary=True)
+        _set_bounds(idx.z_stop, 0.0, 1.0, binary=True)
         _set_bounds(idx.p_bes_charge, 0.0, p_bes_cap)
         _set_bounds(idx.p_bes_discharge, 0.0, p_bes_cap)
         _set_bounds(idx.q_boiler, 0.0, q_boiler_cap)
@@ -1442,6 +1561,7 @@ class MILPMPCPolicy(BaseMPCPolicy):
             p_gt_col = idx.p_gt.start + offset
             y_gt_col = idx.y_gt.start + offset
             z_start_col = idx.z_start.start + offset
+            z_stop_col = idx.z_stop.start + offset
             p_bes_ch_col = idx.p_bes_charge.start + offset
             p_bes_dis_col = idx.p_bes_discharge.start + offset
             q_boiler_col = idx.q_boiler.start + offset
@@ -1476,9 +1596,25 @@ class MILPMPCPolicy(BaseMPCPolicy):
             startup_coeffs = {z_start_col: 1.0, y_gt_col: -1.0}
             if prev_y_col is None:
                 _append_row(startup_coeffs, -startup_rhs, np.inf)
+                _append_row({z_start_col: 1.0, y_gt_col: -1.0}, -np.inf, 0.0)
+                _append_row({z_start_col: 1.0}, -np.inf, 1.0 - startup_rhs)
             else:
                 startup_coeffs[prev_y_col] = 1.0
                 _append_row(startup_coeffs, 0.0, np.inf)
+                _append_row({z_start_col: 1.0, y_gt_col: -1.0}, -np.inf, 0.0)
+                _append_row({z_start_col: 1.0, prev_y_col: 1.0}, -np.inf, 1.0)
+
+            stop_rhs = float(state.gt_prev_on) if offset == 0 else 0.0
+            stop_coeffs = {z_stop_col: 1.0, y_gt_col: 1.0}
+            if prev_y_col is None:
+                _append_row(stop_coeffs, stop_rhs, np.inf)
+                _append_row({z_stop_col: 1.0}, -np.inf, stop_rhs)
+                _append_row({z_stop_col: 1.0, y_gt_col: 1.0}, -np.inf, 1.0)
+            else:
+                stop_coeffs[prev_y_col] = -1.0
+                _append_row(stop_coeffs, 0.0, np.inf)
+                _append_row({z_stop_col: 1.0, prev_y_col: -1.0}, -np.inf, 0.0)
+                _append_row({z_stop_col: 1.0, y_gt_col: 1.0}, -np.inf, 1.0)
 
             toggle_rhs = float(state.gt_prev_on) if offset == 0 else 0.0
             toggle_up = {gt_toggle_col: 1.0, y_gt_col: -1.0}
@@ -1556,6 +1692,17 @@ class MILPMPCPolicy(BaseMPCPolicy):
                 float(coeffs.qh_dem_mw[data_idx]),
                 float(coeffs.qh_dem_mw[data_idx]),
             )
+            if bool(self.config.heat_backup_shield_enabled) and is_physics_mode:
+                _append_row(
+                    {
+                        p_gt_col: float(coeffs.gt_heat_slope_coeff[data_idx]),
+                        y_gt_col: float(coeffs.gt_heat_intercept_mw[data_idx]),
+                        q_boiler_col: 1.0,
+                        q_tes_dis_col: 1.0,
+                    },
+                    float(coeffs.qh_dem_mw[data_idx]) + float(self.config.heat_backup_shield_margin_mw),
+                    np.inf,
+                )
             if self._planner_abs_enabled() and q_abs_drive_cap > 1e-9 and abs_cop_ready > 1e-9:
                 if prev_e_tes_col is None:
                     _append_row(
@@ -1610,6 +1757,26 @@ class MILPMPCPolicy(BaseMPCPolicy):
             _append_row({idx.y_gt.start + offset: 1.0}, 1.0, 1.0)
         for offset in range(min(horizon, remaining_off_lock)):
             _append_row({idx.y_gt.start + offset: 1.0}, 0.0, 0.0)
+        min_on_steps = max(0, int(round(float(self.config.gt_min_on_steps))))
+        min_off_steps = max(0, int(round(float(self.config.gt_min_off_steps))))
+        if min_on_steps > 0:
+            for offset in range(horizon):
+                window = min(horizon - offset, min_on_steps)
+                if window <= 0:
+                    continue
+                coeff_map = {idx.z_start.start + offset: -float(window)}
+                for future_offset in range(offset, offset + window):
+                    coeff_map[idx.y_gt.start + future_offset] = 1.0
+                _append_row(coeff_map, 0.0, np.inf)
+        if min_off_steps > 0:
+            for offset in range(horizon):
+                window = min(horizon - offset, min_off_steps)
+                if window <= 0:
+                    continue
+                coeff_map = {idx.z_stop.start + offset: float(window)}
+                for future_offset in range(offset, offset + window):
+                    coeff_map[idx.y_gt.start + future_offset] = 1.0
+                _append_row(coeff_map, -np.inf, float(window))
         if horizon > 0 and terminal_reserve_mwh > 0.0:
             _append_row(
                 {

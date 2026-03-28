@@ -48,7 +48,6 @@ TRAINING_DEFAULTS: dict[str, Any] = {
     "sb3_eval_episode_days": 14,
     "sb3_eval_window_pool_size": 12,
     "sb3_eval_window_count": 4,
-    "sb3_eval_window_seed": 42,
     "sb3_ppo_warm_start_enabled": True,
     "sb3_residual_enabled": True,
     "sb3_residual_policy": "rule",
@@ -96,11 +95,13 @@ ENV_ENUM_OPTIONS: dict[str, set[str]] = {
     "constraint_mode": {"physics_in_loop", "reward_only"},
     "physics_backend": {"tespy"},
     "bes_init_strategy": {"fixed", "min", "max", "half", "random"},
+    "oracle_mpc_mode": {"strict", "debug"},
 }
 ENV_ENUM_ERROR_MESSAGES: dict[str, str] = {
     "constraint_mode": "constraint_mode 仅支持 physics_in_loop/reward_only。",
     "physics_backend": "physics_backend 仅支持 tespy。",
     "bes_init_strategy": "bes_init_strategy 仅支持 fixed/min/max/half/random。",
+    "oracle_mpc_mode": "oracle_mpc_mode 仅支持 strict/debug。",
 }
 ENV_STRIP_STRING_KEYS = {"pyomo_solver"}
 ENV_BOOL_KEYS = {
@@ -445,6 +446,11 @@ def build_env_config_from_overrides(
 
 
 def validate_training_overrides(overrides: dict[str, Any]) -> None:
+    overrides = dict(overrides)
+    # Backward compatibility: old configs may still carry sb3_eval_window_seed.
+    # Under the single-entry seed protocol, we ignore this field and always derive
+    # the validation-window seed from training.seed.
+    overrides.pop("sb3_eval_window_seed", None)
     allowed = set(TRAINING_DEFAULTS.keys())
     unknown = sorted(set(overrides.keys()) - allowed)
     if unknown:
@@ -556,10 +562,6 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
                 raise ValueError(f"{key} 必须是整数类型。")
             if int(value) < 0:
                 raise ValueError(f"{key} 必须 >= 0。")
-            continue
-        if key in {"sb3_eval_window_seed"}:
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise ValueError(f"{key} 必须是整数类型。")
             continue
         if key in {"sb3_eval_window_pool_size", "sb3_eval_window_count"}:
             if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -712,7 +714,9 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
 def build_training_options(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     merged = dict(TRAINING_DEFAULTS)
     if overrides is not None:
-        merged.update(dict(overrides))
+        incoming = dict(overrides)
+        incoming.pop("sb3_eval_window_seed", None)
+        merged.update(incoming)
     validate_training_overrides(merged)
 
     normalized = dict(merged)
@@ -748,7 +752,6 @@ def build_training_options(overrides: dict[str, Any] | None = None) -> dict[str,
     normalized["sb3_eval_episode_days"] = int(normalized["sb3_eval_episode_days"])
     normalized["sb3_eval_window_pool_size"] = int(normalized["sb3_eval_window_pool_size"])
     normalized["sb3_eval_window_count"] = int(normalized["sb3_eval_window_count"])
-    normalized["sb3_eval_window_seed"] = int(normalized["sb3_eval_window_seed"])
     normalized["sb3_ppo_warm_start_enabled"] = bool(normalized["sb3_ppo_warm_start_enabled"])
     normalized["sb3_residual_enabled"] = bool(normalized["sb3_residual_enabled"])
     normalized["sb3_residual_policy"] = (

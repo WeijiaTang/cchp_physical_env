@@ -114,17 +114,20 @@ env:
   q_tes_discharge_cap_mw: 8.0
 
   # Oracle/MPC 公平性配置：用于修复 planner 上界口径
+  # - strict：论文主线的公平 Oracle。允许 perfect forecast，但不允许在线 repair 兜底。
+  # - debug：用于排查 surrogate/repair 逻辑，可重新打开 repair 开关。
   # - 启用 ABS，使 Oracle 不再退化为 “ECH-only” 冷侧规划
   # - 使用近似硬保供门槛，避免低成本建立在大量 unmet 上
   # - 放宽 MILP/GA 求解预算，使 Oracle 更接近“理论上界”
   oracle_mpc_abs_enabled: true
+  oracle_mpc_mode: strict
   oracle_mpc_hard_reliability: true
   oracle_mpc_max_unmet_e_mw: 0.0
   oracle_mpc_max_unmet_h_mw: 0.01
   oracle_mpc_max_unmet_c_mw: 0.05
   oracle_mpc_hard_unmet_penalty_per_mwh: 250000.0
-  oracle_mpc_heat_backup_repair_enabled: true
-  oracle_mpc_cool_backup_repair_enabled: true
+  oracle_mpc_heat_backup_repair_enabled: false
+  oracle_mpc_cool_backup_repair_enabled: false
   oracle_mpc_tes_terminal_reserve_mwh: 4.0
   oracle_mpc_tes_terminal_reserve_penalty_per_mwh: 2000.0
   oracle_mpc_abs_ready_cooling_threshold_mw: 1.50
@@ -223,9 +226,9 @@ training:
   sb3_eval_episode_days: 14
   # 固定多窗口验证池：预生成 N 个全年覆盖窗口，每次评估用固定 M 个窗口求均值。
   # - 设为 0 可回退到旧的固定年末 tail 窗口
+  # - 单入口 seed 协议：评估窗口的随机种子直接跟随 training.seed，不再单独配置
   sb3_eval_window_pool_size: 12
   sb3_eval_window_count: 4
-  sb3_eval_window_seed: 42
   sb3_ppo_warm_start_enabled: true
   sb3_residual_enabled: true
   sb3_residual_policy: rule

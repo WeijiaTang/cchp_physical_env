@@ -88,6 +88,8 @@ class ConstraintConfig:
     q_abs_cool_cap_mw: float = 4.5
     q_tes_charge_cap_mw: float = 8.0
     q_tes_discharge_cap_mw: float = 8.0
+    heat_backup_shield_enabled: bool = False
+    heat_backup_shield_margin_mw: float = 0.0
 
     solver_name: str = "glpk"
     tracking_weight: float = 1.0
@@ -230,6 +232,13 @@ class ConstraintSolver:
             ),
             enabled=inputs.is_physics_mode,
         )
+        if bool(self.config.heat_backup_shield_enabled) and inputs.is_physics_mode:
+            m.heat_backup_lower_bound = pyo.Constraint(
+                expr=(
+                    m.q_boiler_mw + inputs.q_hrsg_available_mw + m.q_tes_discharge_mw
+                    >= inputs.qh_dem_mw + float(self.config.heat_backup_shield_margin_mw)
+                )
+            )
 
         # L1 动作跟踪（GLPK 可解）+ 缺供/弃供惩罚。
         m.dev_p_gt_pos = pyo.Var(bounds=(0.0, None))
@@ -329,9 +338,11 @@ class ConstraintSolver:
         u_boiler = q_boiler_mw / max(1e-6, self.config.q_boiler_cap_mw)
         u_abs = q_abs_drive_mw / max(1e-6, self.config.q_abs_drive_cap_mw)
         u_ech = q_ech_cool_mw / max(1e-6, self.config.q_ech_cap_mw)
+        tes_charge_cap = min(self.config.q_tes_charge_cap_mw, max(0.0, inputs.tes_charge_feasible_mw))
+        tes_discharge_cap = min(self.config.q_tes_discharge_cap_mw, max(0.0, inputs.tes_discharge_feasible_mw))
         u_tes = (
-            q_tes_discharge_mw / max(1e-6, self.config.q_tes_discharge_cap_mw)
-            - q_tes_charge_mw / max(1e-6, self.config.q_tes_charge_cap_mw)
+            q_tes_discharge_mw / max(1e-6, tes_discharge_cap)
+            - q_tes_charge_mw / max(1e-6, tes_charge_cap)
         )
 
         p_gt_target = float(targets["p_gt_target_mw_raw"])
@@ -409,6 +420,15 @@ class ConstraintSolver:
         u_tes = float(targets["u_tes_target"])
         q_tes_charge = max(0.0, -u_tes) * min(self.config.q_tes_charge_cap_mw, inputs.tes_charge_feasible_mw)
         q_tes_discharge = max(0.0, u_tes) * min(self.config.q_tes_discharge_cap_mw, inputs.tes_discharge_feasible_mw)
+        if bool(self.config.heat_backup_shield_enabled) and inputs.is_physics_mode:
+            q_boiler_lower_bound = max(
+                0.0,
+                min(
+                    self.config.q_boiler_cap_mw,
+                    inputs.qh_dem_mw - inputs.q_hrsg_available_mw - q_tes_discharge + float(self.config.heat_backup_shield_margin_mw),
+                ),
+            )
+            q_boiler = max(q_boiler, q_boiler_lower_bound)
 
         p_grid_need = (inputs.p_dem_mw + p_ech) - (p_gt_target + p_bes_target + inputs.p_re_mw)
         p_grid = _clip(p_grid_need, -self.config.grid_export_cap_mw, self.config.grid_import_cap_mw)
