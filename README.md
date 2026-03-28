@@ -5,8 +5,12 @@ A Python research codebase for a CCHP physical environment, reproducible trainin
 
 This project supports:
 - rule-based baselines
+- planner / oracle baselines (`milp_mpc` / `ga_mpc`)
 - deep sequence policy training (`mlp` / `transformer` / `mamba`)
-- SB3 multi-algorithm training (`ppo` / `sac` / `td3` / `ddpg`) with sequence backbones
+- SB3 multi-algorithm training (`ppo` / `sac` / `td3` / `ddpg` / `dqn`) with `mlp` / `transformer` / `mamba` extractors
+- rule-assisted DRL training via residual policies, PPO warm-start, and off-policy replay prefill
+- strict Oracle benchmarking with perfect forecast but no online repair in the paper-facing setting
+- paper-ready exports such as `summary_flat.csv`, `daily_agg.csv`, `step_log_light.csv`, and learning-curve files
 - unified CLI for `summary`, `train`, `eval`, `sb3-train`, `sb3-eval`, `ablation`, `calibrate`, and `collect`
 
 - Notebook entry: `main.ipynb`
@@ -18,7 +22,9 @@ Core modules:
 - `src/cchp_physical_env/__main__.py`: unified CLI entry
 - `src/cchp_physical_env/core/data.py`: frozen-schema loading, validation, repair, sampling
 - `src/cchp_physical_env/core/config_loader.py`: config loading and CLI override merge
+- `src/cchp_physical_env/core/reporting.py`: paper-oriented CSV / JSON export helpers
 - `src/cchp_physical_env/pipeline/runner.py`: baseline train/eval runner
+- `src/cchp_physical_env/pipeline/mpc.py`: Oracle-style MILP / GA planners
 - `src/cchp_physical_env/pipeline/sequence.py`: sequence policy utilities and adapters
 - `src/cchp_physical_env/policy/trainer.py`: PPO-style deep sequence trainer
 - `src/cchp_physical_env/policy/sb3.py`: SB3 training/evaluation integration
@@ -72,6 +78,32 @@ Optional dependencies:
 PyTorch is intentionally not pinned in `pyproject.toml`. Install the correct CPU/CUDA build for your machine before long deep-learning runs.
 
 The `mamba` backbone used by both `sequence_rule` and SB3 now comes from `transformers`, so there is no separate `mamba-ssm` package or extra in this repo.
+
+## Current Benchmark Semantics
+
+This repo now separates two benchmark families on purpose:
+
+- `rule` / `easy_rule` / deep sequence / SB3 DRL:
+  same-information controllers that act from current observations and history only
+- `milp_mpc` / `ga_mpc`:
+  Oracle-style planners that can use perfect forecast for upper-bound-style benchmarking
+
+For Oracle runs, the recommended paper-facing mode is the default strict setting in `config.yaml`:
+
+- `oracle_mpc_mode: strict`
+- online heat / cool repair disabled
+- hard reliability caps enforced inside the planning semantics
+
+This is meant to keep Oracle strong but interpretable: high scores should come from the planner itself, not from hidden online repair.
+
+The current plant semantics also encode a more industrial cooling interpretation:
+
+- `ABS` preferentially consumes high-grade residual heat from `HRSG + TES`
+- boiler heat is not treated as a fully mixed default ABS driving pool
+- limited boiler-assisted ABS is allowed through capped support only
+  - `abs_boiler_assist_max_mw`
+  - `abs_boiler_assist_boiler_fraction`
+- `ECH` includes part-load COP degradation instead of behaving like an ideal frictionless peaker
 
 ## CLI Quick Start
 
@@ -155,7 +187,7 @@ Main arguments:
 Use these arguments with either explicit `sb3-train` or unified `train --sb3-enabled`.
 
 Algorithm / agent arguments:
-- `--algo` or `--sb3-algo`: RL algorithm, one of `ppo`, `sac`, `td3`, `ddpg`.
+- `--algo` or `--sb3-algo`: RL algorithm, one of `ppo`, `sac`, `td3`, `ddpg`, `dqn`.
 - `--backbone` or `--sb3-backbone`: feature extractor backbone, one of `mlp`, `transformer`, `mamba`.
 - `--history-steps` or `--sb3-history-steps`: sequence window length for the SB3 observation tensor.
 - `--total-timesteps` or `--sb3-total-timesteps`: total environment interaction steps.
@@ -165,6 +197,10 @@ Algorithm / agent arguments:
 - `--gamma` or `--sb3-gamma`: reward discount factor.
 - `--vec-norm-obs` / `--vec-norm-reward` (or `--sb3-vec-norm-obs` / `--sb3-vec-norm-reward`): enable VecNormalize for observations / rewards.
 - `--eval-freq` / `--eval-episode-days` (or `--sb3-eval-freq` / `--sb3-eval-episode-days`): evaluation frequency and horizon during training for best-checkpoint selection.
+- `--residual-enabled` / `--residual-policy` / `--residual-scale` (or `--sb3-residual-*`): enable rule residual learning for continuous-action SB3 agents.
+- `--offpolicy-prefill-enabled` / `--offpolicy-prefill-steps` / `--offpolicy-prefill-policy` (or `--sb3-offpolicy-prefill-*`): prefill replay buffers with rule / easy-rule rollouts for off-policy algorithms.
+- `--best-gate-heat-min` / `--best-gate-cool-min` (or `--sb3-best-gate-*`): reliability gate for selecting the best checkpoint. The current default is `heat>=0.99` and `cool>=0.99`.
+- `--plateau-control-enabled` (or `--sb3-plateau-control-enabled`): enable conservative low-LR fine-tuning / plateau control during SB3 training.
 - PPO-only (`ppo`): `--ppo-n-steps`, `--ppo-gae-lambda`, `--ppo-ent-coef`, `--ppo-clip-range` (or `--sb3-ppo-*`).
 - Off-policy-only (`sac`/`td3`/`ddpg`): `--learning-starts`, `--train-freq`, `--gradient-steps`, `--tau`, `--action-noise-std`, `--buffer-size`, `--optimize-memory-usage` (or `--sb3-*`).
 - `--device`: `auto`, `cpu`, `cuda`, or `cuda:<index>`.
@@ -173,6 +209,7 @@ Algorithm / agent arguments:
 Practical interpretation:
 - `ppo` is usually the safest starting point
 - `sac` is often a strong continuous-control baseline
+- `dqn` is available for rule-based discrete-action studies
 - `transformer` / `mamba` backbones are heavier and slower than `mlp`
 - `--n-envs` speeds up collection but increases CPU / RAM load
 - `--total-timesteps` is the first knob to increase for longer runs
@@ -180,6 +217,16 @@ Practical interpretation:
 ## Recommended Benchmark Recipes
 
 Global options such as `--train-path`, `--eval-path`, and `--env-config` must appear **before** the subcommand. The CLI accepts comma-separated seeds (e.g., `--seed 0,42,123`) and fans out runs sequentially; aggregate the outputs with `scripts/debug/_diag_run.py` if you need consolidated tables.
+
+Every full evaluation writes paper-friendly artifacts under `runs/.../eval/`, including:
+
+- `summary.json` and `summary_flat.csv`
+- `cost_breakdown.csv`
+- `diagnostic_counts.csv` and `state_diagnostic_counts.csv`
+- `step_log.csv` and `step_log_light.csv`
+- `daily_agg.csv`
+
+SB3 training runs also export learning-curve and convergence files under `runs/.../train/`.
 
 ### Rule baseline (long horizon)
 
@@ -248,6 +295,20 @@ python -m cchp_physical_env \
   --seed 42 \
   --run-root runs/sb3_sac_transformer_long
 ```
+
+### Oracle-style yearly evaluation
+
+```bash
+python -m cchp_physical_env \
+  --eval-path data/processed/cchp_main_15min_2025.csv \
+  --env-config src/cchp_physical_env/config/config.yaml \
+  eval \
+  --policy milp_mpc \
+  --history-steps 32 \
+  --run-dir runs/oracle_milp_strict_full
+```
+
+This uses the current default strict Oracle mode from `config.yaml`.
 
 ### Constraint ablation
 

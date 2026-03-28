@@ -85,6 +85,14 @@ env:
   abs_invalid_req_u_th: 0.10
   abs_invalid_req_gate_th: 0.20
   penalty_invalid_abs_request: 10.0
+  # 工业语义下允许“有限锅炉辅助 ABS”，而不是完全混热池：
+  # - 供热优先后，锅炉只允许拿一小部分余量给 ABS
+  # - 这更接近 supplementary firing / auxiliary boiler assisted ABS
+  abs_boiler_drive_enabled: true
+  abs_boiler_assist_max_mw: 1.50
+  abs_boiler_assist_boiler_fraction: 0.35
+  ech_cop_partload_min_fraction: 0.72
+  ech_cop_partload_curve_exp: 1.15
   gt_action_smoothing_enabled: true
   gt_min_on_steps: 8.0
   gt_min_off_steps: 8.0

@@ -161,6 +161,11 @@ class EnvConfig:
     abs_invalid_req_u_th: float
     abs_invalid_req_gate_th: float
     penalty_invalid_abs_request: float
+    abs_boiler_drive_enabled: bool
+    abs_boiler_assist_max_mw: float
+    abs_boiler_assist_boiler_fraction: float
+    ech_cop_partload_min_fraction: float
+    ech_cop_partload_curve_exp: float
     gt_action_smoothing_enabled: bool
     gt_min_on_steps: float
     gt_min_off_steps: float
@@ -327,7 +332,11 @@ class CCHPPhysicalEnv:
             )
         )
         self.boiler = BackupBoiler(q_boiler_cap_mw=self.config.q_boiler_cap_mw)
-        self.electric_chiller = ElectricChillerNetwork(q_ech_cap_mw=self.config.q_ech_cap_mw)
+        self.electric_chiller = ElectricChillerNetwork(
+            q_ech_cap_mw=self.config.q_ech_cap_mw,
+            cop_partload_min_fraction=self.config.ech_cop_partload_min_fraction,
+            cop_partload_curve_exp=self.config.ech_cop_partload_curve_exp,
+        )
         self.constraint_solver = ConstraintSolver(
             ConstraintConfig(
                 p_gt_cap_mw=self.config.p_gt_cap_mw,
@@ -348,6 +357,9 @@ class CCHPPhysicalEnv:
                 q_abs_cool_cap_mw=self.config.q_abs_cool_cap_mw,
                 q_tes_charge_cap_mw=self.config.q_tes_charge_cap_mw,
                 q_tes_discharge_cap_mw=self.config.q_tes_discharge_cap_mw,
+                abs_boiler_drive_enabled=self.config.abs_boiler_drive_enabled,
+                abs_boiler_assist_max_mw=self.config.abs_boiler_assist_max_mw,
+                abs_boiler_assist_boiler_fraction=self.config.abs_boiler_assist_boiler_fraction,
                 heat_backup_shield_enabled=self.config.heat_backup_shield_enabled,
                 heat_backup_shield_margin_mw=self.config.heat_backup_shield_margin_mw,
                 solver_name=self.config.pyomo_solver,
@@ -386,6 +398,63 @@ class CCHPPhysicalEnv:
             t_exh_in_k=gt_est.t_exh_k,
         )
         return float(hrsg_est.q_rec_mw)
+
+    def _allocate_industrial_heat_flows(
+        self,
+        *,
+        qh_demand_mw: float,
+        q_hrsg_available_mw: float,
+        q_boiler_available_mw: float,
+        q_tes_discharge_mw: float,
+        q_abs_drive_request_mw: float,
+        q_tes_charge_request_mw: float,
+    ) -> dict[str, float]:
+        high_grade_supply_mw = max(0.0, float(q_hrsg_available_mw)) + max(0.0, float(q_tes_discharge_mw))
+        boiler_supply_mw = max(0.0, float(q_boiler_available_mw))
+        qh_demand_mw = max(0.0, float(qh_demand_mw))
+
+        qh_from_high_grade_mw = min(qh_demand_mw, high_grade_supply_mw)
+        qh_remaining_after_high_grade_mw = max(0.0, qh_demand_mw - qh_from_high_grade_mw)
+        qh_from_boiler_mw = min(qh_remaining_after_high_grade_mw, boiler_supply_mw)
+        qh_unmet_mw = max(0.0, qh_remaining_after_high_grade_mw - qh_from_boiler_mw)
+
+        high_grade_after_heat_mw = max(0.0, high_grade_supply_mw - qh_from_high_grade_mw)
+        boiler_after_heat_mw = max(0.0, boiler_supply_mw - qh_from_boiler_mw)
+        q_abs_boiler_assist_cap_mw = 0.0
+        if bool(self.config.abs_boiler_drive_enabled):
+            q_abs_boiler_assist_cap_mw = min(
+                boiler_after_heat_mw,
+                max(0.0, float(self.config.abs_boiler_assist_max_mw)),
+                max(0.0, float(self.config.abs_boiler_assist_boiler_fraction)) * boiler_supply_mw,
+            )
+        q_abs_drive_eligible_mw = high_grade_after_heat_mw + q_abs_boiler_assist_cap_mw
+        q_abs_drive_alloc_mw = min(max(0.0, float(q_abs_drive_request_mw)), q_abs_drive_eligible_mw)
+        q_abs_drive_from_high_grade_mw = min(q_abs_drive_alloc_mw, high_grade_after_heat_mw)
+        q_abs_drive_from_boiler_mw = max(0.0, q_abs_drive_alloc_mw - q_abs_drive_from_high_grade_mw)
+
+        high_grade_after_abs_mw = max(0.0, high_grade_after_heat_mw - q_abs_drive_from_high_grade_mw)
+        boiler_after_abs_mw = max(0.0, boiler_after_heat_mw - q_abs_drive_from_boiler_mw)
+        q_tes_charge_available_mw = high_grade_after_abs_mw + boiler_after_abs_mw
+        q_tes_charge_alloc_mw = min(max(0.0, float(q_tes_charge_request_mw)), q_tes_charge_available_mw)
+        q_heat_dump_mw = max(0.0, q_tes_charge_available_mw - q_tes_charge_alloc_mw)
+
+        return {
+            "q_high_grade_supply_mw": float(high_grade_supply_mw),
+            "q_boiler_supply_mw": float(boiler_supply_mw),
+            "qh_from_high_grade_mw": float(qh_from_high_grade_mw),
+            "qh_from_boiler_mw": float(qh_from_boiler_mw),
+            "qh_unmet_mw": float(qh_unmet_mw),
+            "q_high_grade_after_heat_mw": float(high_grade_after_heat_mw),
+            "q_boiler_after_heat_mw": float(boiler_after_heat_mw),
+            "q_abs_drive_eligible_mw": float(q_abs_drive_eligible_mw),
+            "q_abs_boiler_assist_cap_mw": float(q_abs_boiler_assist_cap_mw),
+            "q_abs_drive_alloc_mw": float(q_abs_drive_alloc_mw),
+            "q_abs_drive_from_high_grade_mw": float(q_abs_drive_from_high_grade_mw),
+            "q_abs_drive_from_boiler_mw": float(q_abs_drive_from_boiler_mw),
+            "q_tes_charge_available_mw": float(q_tes_charge_available_mw),
+            "q_tes_charge_alloc_mw": float(q_tes_charge_alloc_mw),
+            "q_heat_dump_mw": float(q_heat_dump_mw),
+        }
 
     def _build_heat_reliability_observation_features(self, *, row: pd.Series) -> dict[str, float]:
         q_hrsg_est_now_mw = self._estimate_hrsg_recoverable_heat_mw(
@@ -649,6 +718,11 @@ class CCHPPhysicalEnv:
         is_physics_mode = self._is_physics_in_loop()
         t_hot_k = float(self.thermal_storage.hot_water_temperature_k())
         e_tes_mwh = float(self.thermal_storage.energy_mwh)
+        planner_debug = {
+            str(key): value
+            for key, value in action.items()
+            if str(key).startswith("planner_")
+        }
         processed_action, action_debug = self._preprocess_action(action, tes_hot_k=t_hot_k)
 
         # 说明：约束求解器需要一个“线性化的可用热量输入”（HRSG 回收热量）。
@@ -674,7 +748,10 @@ class CCHPPhysicalEnv:
                 action=processed_action,
                 q_hrsg_available_mw=hrsg_guess.q_rec_mw,
                 cop_abs_est=self.abs_chiller.estimate_cop(self.thermal_storage.hot_water_temperature_k()),
-                cop_electric_est=self.electric_chiller.estimate_cop(t_amb_k=t_amb_k),
+                cop_electric_est=self.electric_chiller.estimate_cop(
+                    t_amb_k=t_amb_k,
+                    plr=float(_clip(float(processed_action.get("u_ech", 0.0)), 0.0, 1.0)),
+                ),
                 tes_charge_feasible_mw=self.thermal_storage.max_feasible_charge_mw(self.config.dt_hours),
                 tes_discharge_feasible_mw=self.thermal_storage.max_feasible_discharge_mw(self.config.dt_hours),
                 is_physics_mode=is_physics_mode,
@@ -727,49 +804,43 @@ class CCHPPhysicalEnv:
 
         boiler_result = self.boiler.solve(u_boiler=u_boiler_final)
         ech_result = self.electric_chiller.solve(u_ech=float(solver_result["u_ech"]), t_amb_k=t_amb_k)
+        heat_allocation = self._allocate_industrial_heat_flows(
+            qh_demand_mw=qh_demand_mw,
+            q_hrsg_available_mw=float(hrsg_result.q_rec_mw),
+            q_boiler_available_mw=float(boiler_result.q_heat_mw),
+            q_tes_discharge_mw=float(tes_discharge_req),
+            q_abs_drive_request_mw=float(q_drive_req),
+            q_tes_charge_request_mw=float(tes_charge_req),
+        )
 
         if is_physics_mode:
-            # physics_in_loop 口径：遵循“供热优先级”。
-            # 先满足供暖负荷，再把剩余热量分配给吸收式制冷的驱动热，最后再尝试给 TES 充热。
-            # 这样可保证热量分配不会出现“先给 TES/制冷导致供暖缺供”的非物理现象。
-            q_heat_available = hrsg_result.q_rec_mw + boiler_result.q_heat_mw + tes_discharge_req
-            qh_served = min(qh_demand_mw, q_heat_available)
-            qh_unmet_mw = max(0.0, qh_demand_mw - qh_served)
-            heat_after_heating = q_heat_available - qh_served
-
-            q_drive_alloc = min(q_drive_req, max(0.0, heat_after_heating))
+            qh_unmet_mw = float(heat_allocation["qh_unmet_mw"])
             abs_result = self.abs_chiller.solve(
-                q_drive_request_mw=q_drive_alloc,
+                q_drive_request_mw=float(heat_allocation["q_abs_drive_alloc_mw"]),
                 t_hot_k=t_hot_k,
             )
-            heat_after_drive = heat_after_heating - abs_result.q_drive_used_mw
-
-            q_tes_charge = min(tes_charge_req, max(0.0, heat_after_drive))
-            q_heat_dump_mw = max(0.0, heat_after_drive - q_tes_charge)
             tes_result = self.thermal_storage.apply(
-                charge_request_mw=q_tes_charge,
+                charge_request_mw=float(heat_allocation["q_tes_charge_alloc_mw"]),
                 discharge_request_mw=tes_discharge_req,
                 dt_h=dt_h,
             )
+            q_heat_dump_mw = float(heat_allocation["q_heat_dump_mw"])
         else:
             # reward_only 口径：按动作直接驱动各设备，然后再做供需结算。
             # 该模式下不强制“供暖优先级”，因此可能出现热量使用总需求超过供给的情况。
             # heat_overcommit_flag 用于标记这种“热侧超配”，供奖励/诊断使用。
             abs_result = self.abs_chiller.solve(
-                q_drive_request_mw=q_drive_req,
+                q_drive_request_mw=float(heat_allocation["q_abs_drive_alloc_mw"]),
                 t_hot_k=t_hot_k,
             )
             tes_result = self.thermal_storage.apply(
-                charge_request_mw=tes_charge_req,
+                charge_request_mw=float(heat_allocation["q_tes_charge_alloc_mw"]),
                 discharge_request_mw=tes_discharge_req,
                 dt_h=dt_h,
             )
-
-            qh_supply = hrsg_result.q_rec_mw + boiler_result.q_heat_mw + tes_result.q_discharge_mw
-            qh_usage = qh_demand_mw + abs_result.q_drive_used_mw + tes_result.q_charge_mw
-            qh_unmet_mw = max(0.0, qh_usage - qh_supply)
-            q_heat_dump_mw = max(0.0, qh_supply - qh_usage)
-            heat_overcommit_flag = qh_usage > qh_supply + 1e-9
+            qh_unmet_mw = float(heat_allocation["qh_unmet_mw"])
+            q_heat_dump_mw = float(heat_allocation["q_heat_dump_mw"])
+            heat_overcommit_flag = bool(q_drive_req > float(heat_allocation["q_abs_drive_alloc_mw"]) + 1e-9)
 
         qc_supply_mw = abs_result.q_cool_mw + ech_result.q_cool_mw
         qc_unmet_mw = max(0.0, qc_demand_mw - qc_supply_mw)
@@ -980,6 +1051,13 @@ class CCHPPhysicalEnv:
             "abs_drive_margin_k": float(action_debug["abs_drive_margin_k"]),
             "q_abs_cool_mw": float(abs_result.q_cool_mw),
             "q_ech_cool_mw": float(ech_result.q_cool_mw),
+            "q_high_grade_supply_mw": float(heat_allocation["q_high_grade_supply_mw"]),
+            "q_high_grade_after_heat_mw": float(heat_allocation["q_high_grade_after_heat_mw"]),
+            "q_boiler_after_heat_mw": float(heat_allocation["q_boiler_after_heat_mw"]),
+            "q_abs_drive_eligible_mw": float(heat_allocation["q_abs_drive_eligible_mw"]),
+            "q_abs_boiler_assist_cap_mw": float(heat_allocation["q_abs_boiler_assist_cap_mw"]),
+            "q_abs_drive_from_high_grade_mw": float(heat_allocation["q_abs_drive_from_high_grade_mw"]),
+            "q_abs_drive_from_boiler_mw": float(heat_allocation["q_abs_drive_from_boiler_mw"]),
             "q_tes_discharge_feasible_mw": float(tes_discharge_limit),
             "q_tes_charge_mw": float(tes_result.q_charge_mw),
             "q_tes_discharge_mw": float(tes_result.q_discharge_mw),
@@ -997,6 +1075,11 @@ class CCHPPhysicalEnv:
             "boiler_started": boiler_started,
             "ech_started": ech_started,
         }
+        for key, value in planner_debug.items():
+            if isinstance(value, (bool, np.bool_)):
+                step_info[key] = bool(value)
+            elif isinstance(value, (int, float, np.integer, np.floating)):
+                step_info[key] = float(value)
 
         self.kpi.record(reward=cost_breakdown.reward, step_info=step_info)
 

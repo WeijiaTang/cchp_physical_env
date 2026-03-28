@@ -107,6 +107,7 @@ ENV_STRIP_STRING_KEYS = {"pyomo_solver"}
 ENV_BOOL_KEYS = {
     "bes_dod_add_calendar_age",
     "abs_gate_enabled",
+    "abs_boiler_drive_enabled",
     "gt_action_smoothing_enabled",
     "gt_dynamic_om_enabled",
     "heat_backup_shield_enabled",
@@ -204,6 +205,22 @@ ENV_NUMERIC_RULES: dict[str, tuple[Callable[[float], bool], str]] = {
     "penalty_invalid_abs_request": (
         lambda value: value >= 0.0,
         "penalty_invalid_abs_request 必须 >= 0。",
+    ),
+    "ech_cop_partload_min_fraction": (
+        lambda value: 0.0 < value <= 1.0,
+        "ech_cop_partload_min_fraction 必须在 (0,1]。",
+    ),
+    "ech_cop_partload_curve_exp": (
+        lambda value: value > 0.0,
+        "ech_cop_partload_curve_exp 必须 > 0。",
+    ),
+    "abs_boiler_assist_max_mw": (
+        lambda value: value >= 0.0,
+        "abs_boiler_assist_max_mw 必须 >= 0。",
+    ),
+    "abs_boiler_assist_boiler_fraction": (
+        lambda value: 0.0 <= value <= 1.0,
+        "abs_boiler_assist_boiler_fraction 必须在 [0,1]。",
     ),
     "gt_min_on_steps": (
         lambda value: value >= 0.0,

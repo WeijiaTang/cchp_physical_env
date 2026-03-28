@@ -88,6 +88,9 @@ class ConstraintConfig:
     q_abs_cool_cap_mw: float = 4.5
     q_tes_charge_cap_mw: float = 8.0
     q_tes_discharge_cap_mw: float = 8.0
+    abs_boiler_drive_enabled: bool = False
+    abs_boiler_assist_max_mw: float = 0.0
+    abs_boiler_assist_boiler_fraction: float = 0.0
     heat_backup_shield_enabled: bool = False
     heat_backup_shield_margin_mw: float = 0.0
 
@@ -205,6 +208,7 @@ class ConstraintSolver:
         m.q_ech_cool_mw = pyo.Var(bounds=(0.0, self.config.q_ech_cap_mw))
         m.q_tes_charge_mw = pyo.Var(bounds=(0.0, tes_charge_cap))
         m.q_tes_discharge_mw = pyo.Var(bounds=(0.0, tes_discharge_cap))
+        m.q_abs_boiler_assist_mw = pyo.Var(bounds=(0.0, max(0.0, self.config.abs_boiler_assist_max_mw)))
 
         # 平衡松弛变量：约束不可行时承接缺供/弃供。
         m.p_unmet_e_mw = pyo.Var(bounds=(0.0, None))
@@ -232,6 +236,19 @@ class ConstraintSolver:
             ),
             enabled=inputs.is_physics_mode,
         )
+        if inputs.is_physics_mode and bool(self.config.abs_boiler_drive_enabled):
+            m.abs_boiler_assist_share = pyo.Constraint(
+                expr=m.q_abs_boiler_assist_mw <= float(max(0.0, self.config.abs_boiler_assist_boiler_fraction)) * m.q_boiler_mw
+            )
+            m.abs_high_grade_plus_assist = pyo.Constraint(
+                expr=m.q_abs_drive_mw - m.q_tes_discharge_mw - m.qh_unmet_mw - m.q_abs_boiler_assist_mw
+                <= float(inputs.q_hrsg_available_mw - inputs.qh_dem_mw)
+            )
+        elif inputs.is_physics_mode and (not bool(self.config.abs_boiler_drive_enabled)):
+            m.abs_high_grade_only = pyo.Constraint(
+                expr=m.q_abs_drive_mw - m.q_tes_discharge_mw - m.qh_unmet_mw
+                <= float(inputs.q_hrsg_available_mw - inputs.qh_dem_mw)
+            )
         if bool(self.config.heat_backup_shield_enabled) and inputs.is_physics_mode:
             m.heat_backup_lower_bound = pyo.Constraint(
                 expr=(
@@ -420,6 +437,27 @@ class ConstraintSolver:
         u_tes = float(targets["u_tes_target"])
         q_tes_charge = max(0.0, -u_tes) * min(self.config.q_tes_charge_cap_mw, inputs.tes_charge_feasible_mw)
         q_tes_discharge = max(0.0, u_tes) * min(self.config.q_tes_discharge_cap_mw, inputs.tes_discharge_feasible_mw)
+        if inputs.is_physics_mode and bool(self.config.abs_boiler_drive_enabled):
+            q_boiler_needed_for_heat = max(0.0, inputs.qh_dem_mw - inputs.q_hrsg_available_mw - q_tes_discharge)
+            q_boiler_after_heat = max(0.0, q_boiler - q_boiler_needed_for_heat)
+            q_abs_boiler_assist = min(
+                q_boiler_after_heat,
+                max(0.0, self.config.abs_boiler_assist_max_mw),
+                max(0.0, self.config.abs_boiler_assist_boiler_fraction) * q_boiler,
+            )
+            q_abs_drive_cap_high_grade = max(
+                0.0,
+                inputs.q_hrsg_available_mw + q_tes_discharge - inputs.qh_dem_mw,
+            ) + q_abs_boiler_assist
+            q_abs_drive = min(q_abs_drive, q_abs_drive_cap_high_grade)
+            q_abs_cool = min(self.config.q_abs_cool_cap_mw, q_abs_drive * max(0.0, inputs.cop_abs_est))
+        elif inputs.is_physics_mode and (not bool(self.config.abs_boiler_drive_enabled)):
+            q_abs_drive_cap_high_grade = max(
+                0.0,
+                inputs.q_hrsg_available_mw + q_tes_discharge - inputs.qh_dem_mw,
+            )
+            q_abs_drive = min(q_abs_drive, q_abs_drive_cap_high_grade)
+            q_abs_cool = min(self.config.q_abs_cool_cap_mw, q_abs_drive * max(0.0, inputs.cop_abs_est))
         if bool(self.config.heat_backup_shield_enabled) and inputs.is_physics_mode:
             q_boiler_lower_bound = max(
                 0.0,
