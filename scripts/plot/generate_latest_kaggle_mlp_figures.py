@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,12 +19,14 @@ from matplotlib.ticker import FuncFormatter
 
 
 ROOT = Path(__file__).resolve().parents[2]
-PLOT_ROOT = ROOT / "scripts" / "plot"
+RESULTS_ROOT = ROOT / "results"
+FIGURE_ROOT = RESULTS_ROOT / "figures" / "paper" / "latest_kaggle_mlp"
+TABLE_ROOT = RESULTS_ROOT / "tables" / "paper" / "latest_kaggle_mlp"
 OUTPUT_DIRS = {
-    "png": PLOT_ROOT / "png",
-    "pdf": PLOT_ROOT / "pdf",
-    "eps": PLOT_ROOT / "eps",
-    "tiff": PLOT_ROOT / "tiff",
+    "png": FIGURE_ROOT / "png",
+    "pdf": FIGURE_ROOT / "pdf",
+    "eps": FIGURE_ROOT / "eps",
+    "tiff": FIGURE_ROOT / "tiff",
 }
 
 
@@ -41,35 +44,35 @@ RUN_SPECS: tuple[RunSpec, ...] = (
         label="rbDQN",
         color="#1B5E7A",
         run_dir=ROOT
-        / "kaggle/CCHP-SB3-dqn+mlp03272030/runs/20260327_032502_853296_train_sb3_dqn_mlp_k32",
+        / "kaggle/CCHP-SB3-dqn+mlp03290830/runs/20260328_112435_662485_train_sb3_dqn_mlp_k32",
     ),
     RunSpec(
         algo="ddpg",
         label="DDPG+rule_residual",
         color="#2D6A4F",
         run_dir=ROOT
-        / "kaggle/CCHP-SB3-ddpg+mlp03272030/runs/20260327_032418_930697_train_sb3_ddpg_mlp_k32",
+        / "kaggle/CCHP-SB3-ddpg+mlp03290830/runs/20260328_112434_292954_train_sb3_ddpg_mlp_k32",
     ),
     RunSpec(
         algo="td3",
         label="TD3+rule_residual",
         color="#B07D3C",
         run_dir=ROOT
-        / "kaggle/CCHP-SB3-td3+mlp03272030/runs/20260327_032436_184749_train_sb3_td3_mlp_k32",
+        / "kaggle/CCHP-SB3-td3+mlp03290830/runs/20260328_112450_593601_train_sb3_td3_mlp_k32",
     ),
     RunSpec(
         algo="ppo",
         label="PPO+rule_residual",
         color="#B45E5E",
         run_dir=ROOT
-        / "kaggle/CCHP-SB3-ppo+mlp03272030/runs/20260327_032544_641642_train_sb3_ppo_mlp_k32",
+        / "kaggle/CCHP-SB3-ppo+mlp03290830/runs/20260328_112455_949521_train_sb3_ppo_mlp_k32",
     ),
     RunSpec(
         algo="sac",
         label="SAC+rule_residual",
         color="#7C6F9B",
         run_dir=ROOT
-        / "kaggle/CCHP-SB3-sac+mlp03272030/runs/20260327_032508_703855_train_sb3_sac_mlp_k32",
+        / "kaggle/CCHP-SB3-sac+mlp03290830/runs/20260328_112454_348432_train_sb3_sac_mlp_k32",
     ),
 )
 
@@ -150,6 +153,25 @@ def _save_figure(fig: plt.Figure, stem: str) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
         dpi = 600 if fmt in {"png", "tiff"} else 300
         fig.savefig(out_dir / f"{stem}.{fmt}", format=fmt, dpi=dpi)
+
+
+def _export_metrics(bundle: dict[str, Any]) -> None:
+    TABLE_ROOT.mkdir(parents=True, exist_ok=True)
+
+    metrics = bundle["metrics"].copy()
+    metrics.to_csv(TABLE_ROOT / "latest_kaggle_mlp_metrics.csv", index=False, encoding="utf-8")
+
+    manifest = {
+        "results_root": str(RESULTS_ROOT),
+        "figure_root": str(FIGURE_ROOT),
+        "table_root": str(TABLE_ROOT),
+        "run_dirs": [str(spec.run_dir) for spec in RUN_SPECS],
+        "algorithms": metrics["label"].tolist(),
+    }
+    (TABLE_ROOT / "latest_kaggle_mlp_manifest.json").write_text(
+        json.dumps(manifest, indent=2),
+        encoding="utf-8",
+    )
 
 
 def _find_low_lr_event(curve: pd.DataFrame) -> float | None:
@@ -569,8 +591,30 @@ def plot_physics_uptake(bundle: dict[str, Any]) -> plt.Figure:
 
 
 def main() -> None:
+    global RESULTS_ROOT, FIGURE_ROOT, TABLE_ROOT, OUTPUT_DIRS
+
+    parser = argparse.ArgumentParser(description="Generate paper-style figures for the latest Kaggle MLP cohort.")
+    parser.add_argument(
+        "--results-root",
+        type=Path,
+        default=RESULTS_ROOT,
+        help="Root directory for exported figures and tables.",
+    )
+    args = parser.parse_args()
+
+    RESULTS_ROOT = args.results_root
+    FIGURE_ROOT = RESULTS_ROOT / "figures" / "paper" / "latest_kaggle_mlp"
+    TABLE_ROOT = RESULTS_ROOT / "tables" / "paper" / "latest_kaggle_mlp"
+    OUTPUT_DIRS = {
+        "png": FIGURE_ROOT / "png",
+        "pdf": FIGURE_ROOT / "pdf",
+        "eps": FIGURE_ROOT / "eps",
+        "tiff": FIGURE_ROOT / "tiff",
+    }
+
     _set_theme()
     bundle = _load_dataset()
+    _export_metrics(bundle)
 
     figures = {
         "latest_kaggle_mlp_main_results": plot_main_results(bundle),

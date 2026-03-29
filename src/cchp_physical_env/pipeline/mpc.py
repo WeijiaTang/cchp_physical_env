@@ -86,6 +86,8 @@ class BaseMPCPolicy:
         self._online_cool_repair_count = 0
         self._planner_heat_shield_alignment_steps = 0
         self._shared_heat_projection_steps = 0
+        self._optimizer_partial_solution_count = 0
+        self._optimizer_failure_count = 0
 
     def bind_episode_context(
         self,
@@ -108,6 +110,8 @@ class BaseMPCPolicy:
         self._online_cool_repair_count = 0
         self._planner_heat_shield_alignment_steps = 0
         self._shared_heat_projection_steps = 0
+        self._optimizer_partial_solution_count = 0
+        self._optimizer_failure_count = 0
 
     def reset_episode(self, observation: dict[str, float]) -> None:
         del observation
@@ -119,6 +123,8 @@ class BaseMPCPolicy:
         self._online_cool_repair_count = 0
         self._planner_heat_shield_alignment_steps = 0
         self._shared_heat_projection_steps = 0
+        self._optimizer_partial_solution_count = 0
+        self._optimizer_failure_count = 0
 
     def _oracle_mode(self) -> str:
         return str(getattr(self.config, "oracle_mpc_mode", "debug")).strip().lower()
@@ -164,6 +170,8 @@ class BaseMPCPolicy:
                 "online_cool_repair_count": int(self._online_cool_repair_count),
                 "planner_heat_shield_alignment_steps": int(self._planner_heat_shield_alignment_steps),
                 "shared_heat_projection_steps": int(self._shared_heat_projection_steps),
+                "optimizer_partial_solution_count": int(self._optimizer_partial_solution_count),
+                "optimizer_failure_count": int(self._optimizer_failure_count),
             },
         }
 
@@ -840,6 +848,21 @@ class BaseMPCPolicy:
             "u_tes": 0.0,
         }
 
+    def _fallback_action_with_debug(
+        self,
+        observation: dict[str, float],
+        *,
+        reason_code: float,
+        solver_status: float = -1.0,
+        partial_solution_used: bool = False,
+    ) -> dict[str, float]:
+        action = dict(self._fallback_action(observation))
+        action["planner_fallback"] = 1.0
+        action["planner_fallback_reason_code"] = float(reason_code)
+        action["planner_solver_status_code"] = float(solver_status)
+        action["planner_partial_solution_used"] = float(bool(partial_solution_used))
+        return action
+
     def _horizon_length(self, current_step: int) -> int:
         episode_df = self._episode_df
         if episode_df is None:
@@ -1362,6 +1385,7 @@ class _MILPIndex:
     q_abs_drive: slice
     q_abs_cool: slice
     abs_ready: slice
+    abs_dispatch_on: slice
     q_ech: slice
     q_tes_charge: slice
     q_tes_discharge: slice
@@ -1411,6 +1435,7 @@ class _MILPIndex:
             q_abs_drive=_next(),
             q_abs_cool=_next(),
             abs_ready=_next(),
+            abs_dispatch_on=_next(),
             q_ech=_next(),
             q_tes_charge=_next(),
             q_tes_discharge=_next(),
@@ -1445,22 +1470,25 @@ class MILPMPCPolicy(BaseMPCPolicy):
                 "optimizer": "scipy_milp",
                 "time_limit_seconds": float(self.time_limit_seconds),
                 "mip_relative_gap": float(self.relative_gap),
-                "abs_surrogate_mode": "tes_ready_binary_floor_cop_v2_no_simul_tes_charge_discharge",
+                "abs_surrogate_mode": "tes_ready_binary_floor_cop_v3_no_simul_tes_and_min_abs_dispatch",
             }
         )
         return payload
 
     def _solve_plan(self, *, current_step: int, observation: dict[str, float]) -> list[dict[str, float]]:
         if optimize is None or sparse is None:
-            return [self._fallback_action(observation)]
+            self._optimizer_failure_count += 1
+            return [self._fallback_action_with_debug(observation, reason_code=1.0)]
 
         horizon = self._horizon_length(current_step)
         if horizon <= 0:
-            return [self._fallback_action(observation)]
+            self._optimizer_failure_count += 1
+            return [self._fallback_action_with_debug(observation, reason_code=2.0)]
 
         coeffs = self._coeffs
         if coeffs is None:
-            return [self._fallback_action(observation)]
+            self._optimizer_failure_count += 1
+            return [self._fallback_action_with_debug(observation, reason_code=3.0)]
 
         state = self._snapshot_state()
         idx = _MILPIndex.build(horizon)
@@ -1499,6 +1527,22 @@ class MILPMPCPolicy(BaseMPCPolicy):
         )
         abs_ready_energy_mwh = float(self._planner_abs_ready_energy_mwh()) if self._planner_abs_enabled() else np.inf
         abs_cop_ready = float(self._planner_abs_ready_cop()) if self._planner_abs_enabled() else 0.0
+        abs_ready_gate_floor = 1.0
+        if self._planner_abs_enabled() and bool(self.config.abs_gate_enabled):
+            env_abs = self._require_env().abs_chiller
+            abs_ready_gate_floor = _sigmoid(
+                (float(self._planner_abs_ready_temperature_k()) - float(env_abs.design.t_drive_min_k))
+                / max(1e-6, float(self.config.abs_gate_scale_k))
+            )
+        abs_min_dispatch_mw = 0.0
+        if self._planner_abs_enabled() and q_abs_drive_cap > 1e-9:
+            abs_min_dispatch_mw = float(
+                _clip(
+                    float(max(0.0, self.config.abs_deadzone_u_th)) * q_abs_drive_cap / max(1e-6, abs_ready_gate_floor),
+                    0.0,
+                    q_abs_drive_cap,
+                )
+            )
         abs_ready_big_m = max(1e-6, tes_e_max)
         hard_unmet_caps = self._planner_unmet_caps_mw()
 
@@ -1525,6 +1569,7 @@ class MILPMPCPolicy(BaseMPCPolicy):
         _set_bounds(idx.q_abs_drive, 0.0, q_abs_drive_cap)
         _set_bounds(idx.q_abs_cool, 0.0, q_abs_cool_cap)
         _set_bounds(idx.abs_ready, 0.0, 1.0, binary=True)
+        _set_bounds(idx.abs_dispatch_on, 0.0, 1.0, binary=True)
         _set_bounds(idx.q_ech, 0.0, q_ech_cap)
         _set_bounds(idx.q_tes_charge, 0.0, q_tes_charge_cap)
         _set_bounds(idx.q_tes_discharge, 0.0, q_tes_discharge_cap)
@@ -1637,6 +1682,7 @@ class MILPMPCPolicy(BaseMPCPolicy):
             q_abs_drive_col = idx.q_abs_drive.start + offset
             q_abs_cool_col = idx.q_abs_cool.start + offset
             abs_ready_col = idx.abs_ready.start + offset
+            abs_dispatch_on_col = idx.abs_dispatch_on.start + offset
             q_ech_col = idx.q_ech.start + offset
             q_tes_ch_col = idx.q_tes_charge.start + offset
             q_tes_dis_col = idx.q_tes_discharge.start + offset
@@ -1893,6 +1939,31 @@ class MILPMPCPolicy(BaseMPCPolicy):
                     -np.inf,
                     0.0,
                 )
+                _append_row(
+                    {
+                        q_abs_drive_col: 1.0,
+                        abs_dispatch_on_col: -q_abs_drive_cap,
+                    },
+                    -np.inf,
+                    0.0,
+                )
+                _append_row(
+                    {
+                        abs_dispatch_on_col: 1.0,
+                        abs_ready_col: -1.0,
+                    },
+                    -np.inf,
+                    0.0,
+                )
+                if abs_min_dispatch_mw > 1e-9:
+                    _append_row(
+                        {
+                            q_abs_drive_col: 1.0,
+                            abs_dispatch_on_col: -abs_min_dispatch_mw,
+                        },
+                        0.0,
+                        np.inf,
+                    )
             _append_row(
                 {q_abs_cool_col: 1.0, q_ech_col: 1.0, qc_unmet_col: 1.0},
                 float(coeffs.qc_dem_mw[data_idx]),
@@ -1971,12 +2042,25 @@ class MILPMPCPolicy(BaseMPCPolicy):
                 },
             )
         except Exception:
-            return [self._fallback_action(observation)]
+            self._optimizer_failure_count += 1
+            return [self._fallback_action_with_debug(observation, reason_code=4.0)]
 
-        if not getattr(result, "success", False) or result.x is None:
-            return [self._fallback_action(observation)]
+        result_x = getattr(result, "x", None)
+        result_success = bool(getattr(result, "success", False))
+        result_status = float(getattr(result, "status", -1))
+        if result_x is None:
+            self._optimizer_failure_count += 1
+            return [
+                self._fallback_action_with_debug(
+                    observation,
+                    reason_code=5.0,
+                    solver_status=result_status,
+                )
+            ]
+        if not result_success:
+            self._optimizer_partial_solution_count += 1
 
-        x = np.asarray(result.x, dtype=float)
+        x = np.asarray(result_x, dtype=float)
         plan_array = np.column_stack(
             [
                 x[idx.p_gt],
@@ -2004,9 +2088,14 @@ class MILPMPCPolicy(BaseMPCPolicy):
                     "planner_opt_q_ech_cool_mw": float(x[idx.q_ech.start + offset]),
                     "planner_opt_q_abs_drive_mw": float(x[idx.q_abs_drive.start + offset]),
                     "planner_opt_q_abs_boiler_assist_mw": float(x[idx.q_abs_boiler_assist.start + offset]),
+                    "planner_opt_abs_dispatch_on": float(x[idx.abs_dispatch_on.start + offset]),
                     "planner_opt_q_tes_charge_mw": float(x[idx.q_tes_charge.start + offset]),
                     "planner_opt_q_tes_discharge_mw": float(x[idx.q_tes_discharge.start + offset]),
                     "planner_opt_tes_discharge_on": float(x[idx.tes_discharge_on.start + offset]),
+                    "planner_fallback": 0.0,
+                    "planner_fallback_reason_code": 0.0,
+                    "planner_solver_status_code": float(result_status),
+                    "planner_partial_solution_used": float(not result_success),
                 }
             )
         action_dicts: list[dict[str, float]] = []

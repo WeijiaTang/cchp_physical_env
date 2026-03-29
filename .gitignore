@@ -32,3 +32,6 @@ tmp*
 cchp-paper/
 *.bak
 scripts/plot/tiff/
+results/figures/paper/latest_kaggle_mlp/tiff
+results/figures/paper/latest_kaggle_mlp/pdf
+results/paper/drl_with_mlp/snapshots/

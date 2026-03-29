@@ -1,0 +1,19 @@
+{
+  "results_root": "results",
+  "figure_root": "results\\figures\\paper\\latest_kaggle_mlp",
+  "table_root": "results\\tables\\paper\\latest_kaggle_mlp",
+  "run_dirs": [
+    "D:\\EnergyStorage\\CCHP\\kaggle\\CCHP-SB3-dqn+mlp03290830\\runs\\20260328_112435_662485_train_sb3_dqn_mlp_k32",
+    "D:\\EnergyStorage\\CCHP\\kaggle\\CCHP-SB3-ddpg+mlp03290830\\runs\\20260328_112434_292954_train_sb3_ddpg_mlp_k32",
+    "D:\\EnergyStorage\\CCHP\\kaggle\\CCHP-SB3-td3+mlp03290830\\runs\\20260328_112450_593601_train_sb3_td3_mlp_k32",
+    "D:\\EnergyStorage\\CCHP\\kaggle\\CCHP-SB3-ppo+mlp03290830\\runs\\20260328_112455_949521_train_sb3_ppo_mlp_k32",
+    "D:\\EnergyStorage\\CCHP\\kaggle\\CCHP-SB3-sac+mlp03290830\\runs\\20260328_112454_348432_train_sb3_sac_mlp_k32"
+  ],
+  "algorithms": [
+    "PPO+rule_residual",
+    "DDPG+rule_residual",
+    "rbDQN",
+    "TD3+rule_residual",
+    "SAC+rule_residual"
+  ]
+}
