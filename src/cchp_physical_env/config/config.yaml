@@ -158,6 +158,8 @@ env:
 
 training:
   # 训练随机种子（影响 episode 随机切片起点、采样与初始化；用于复现实验）
+  # 注意：对固定 2025 全年 + deterministic SB3 eval，这个 seed 通常不会改变最终 KPI；
+  # 它只会改变输出目录名，除非环境本身含有随机初始化（例如 bes_init_strategy=random）。
   seed: 42
   # 策略类型：
   # - rule / easy_rule / random / milp_mpc / ga_mpc：基线策略（不训练深度模型，主要由 episodes 控制评估/统计采样量）

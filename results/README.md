@@ -13,12 +13,21 @@ This folder is the structured landing zone for exported experiment results, pape
 
 ## Current Convention
 
+- Submission-facing normalized archive:
+  - `results/archive/paper_ready_<date>/`
 - Same-info DRL paper summaries:
   - `results/paper/drl_with_mlp/snapshots/`
 - Latest Kaggle MLP figure exports:
   - `results/figures/paper/latest_kaggle_mlp/{png,pdf,eps,tiff}/`
 - Latest Kaggle MLP tabular exports:
   - `results/tables/paper/latest_kaggle_mlp/`
+
+## Submission Rule
+
+- `results/` is the only folder that should be treated as submission-facing output.
+- Raw experiment directories under `runs/`, `kaggle/`, and `tmp_verify/` remain source locations.
+- When a run becomes paper-relevant, copy its compact artifacts into `results/archive/paper_ready_<date>/`.
+- Plotting scripts should prefer `results/tables/` and `results/archive/` over direct reads from `runs/` or `kaggle/`.
 
 ## Notes
 

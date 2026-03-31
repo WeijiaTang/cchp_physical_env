@@ -546,6 +546,14 @@ def _command_eval(args: argparse.Namespace) -> None:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         base_run_dir = Path("runs") / f"{stamp}_eval_only"
 
+    if is_sb3_checkpoint and multi_seed:
+        raise ValueError(
+            "SB3 `eval` 当前不允许 deterministic 多-seed sweep。"
+            "固定 2025 全年 + deterministic policy replay 在当前配置下通常不会因 eval seed 改变 KPI，"
+            "只会生成误导性的 `seed_*` 目录。"
+            "如果要比较随机种子，请使用多训练 seed；如果确实要做 replay 随机性检查，请显式使用 `sb3-eval --stochastic`。"
+        )
+
     outputs: list[dict[str, object]] = []
     for seed in seed_values:
         current_options = dict(training_options)
@@ -717,6 +725,12 @@ def _command_sb3_eval(args: argparse.Namespace) -> None:
     seed_values = _normalize_seed_list(args.seed, fallback=42)
     multi_seed = len(seed_values) > 1
     base_run_dir = Path(args.run_dir)
+    if multi_seed and not args.stochastic:
+        raise ValueError(
+            "SB3 `sb3-eval` 当前不允许 deterministic 多-seed sweep。"
+            "固定 2025 全年 replay 在当前配置下通常不会因 eval seed 改变 KPI。"
+            "如果目标是种子敏感性，请比较多训练 seed；如果目标是策略采样随机性，请显式传 `--stochastic`。"
+        )
     outputs: list[dict[str, object]] = []
     for seed in seed_values:
         target_run_dir = _maybe_seed_run_dir(base_run_dir, seed, multi_seed)
