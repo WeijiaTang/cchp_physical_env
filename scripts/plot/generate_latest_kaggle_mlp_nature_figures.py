@@ -13,6 +13,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.ticker import FuncFormatter
 from matplotlib.lines import Line2D
 
@@ -55,9 +56,17 @@ CASE_SIGNAL_COLORS = {
 }
 CASE_STRATEGY_NOTES = {
     "rbDQN": "Steadier ABS-TES buffering",
-    "DDPG+rule_residual": "GT-led lower-cost dispatch",
+    "DDPG+rule_residual": "Cost-oriented dispatch with limited TES swing",
     "PPO+rule_residual": "ECH-biased cooling support",
 }
+CASE_FINGERPRINT_METRICS = [
+    ("abs_share", "ABS share"),
+    ("ech_share", "ECH share"),
+    ("gt_mean", "GT mean"),
+    ("grid_import_mean", "Grid import"),
+    ("tes_swing", "TES swing"),
+    ("grid_ramp_std", "Grid ramp std"),
+]
 
 
 def _hex_to_rgb(color: str) -> tuple[float, float, float]:
@@ -76,9 +85,9 @@ def _set_theme() -> None:
             "font.family": "serif",
             "font.serif": ["STIX Two Text", "STIXGeneral", "Times New Roman", "DejaVu Serif"],
             "mathtext.fontset": "stix",
-            "figure.facecolor": "#F6F1E8",
-            "axes.facecolor": "#FBF8F2",
-            "savefig.facecolor": "#F6F1E8",
+            "figure.facecolor": "#FFFFFF",
+            "axes.facecolor": "#FFFFFF",
+            "savefig.facecolor": "#FFFFFF",
             "savefig.bbox": "tight",
             "axes.edgecolor": "#CDBFAE",
             "axes.labelcolor": "#1D232A",
@@ -335,6 +344,13 @@ def _export_plot_tables(bundle: dict[str, Any], results_root: Path) -> dict[str,
             "multi_seed_training_cooling",
             "multi_seed_cooling_strip",
             "multi_seed_case_window",
+            "multi_seed_case_mechanism",
+            "multi_seed_convergence_evidence",
+            "multi_seed_convergence_ddpg",
+            "multi_seed_convergence_sac",
+            "multi_seed_convergence_td3",
+            "multi_seed_convergence_rbdqn",
+            "multi_seed_convergence_ppo",
         ],
     }
     (out_dir / "multi_seed_nature_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
@@ -415,6 +431,26 @@ def _export_case_window_table(bundle: dict[str, Any], results_root: Path) -> pd.
     return out
 
 
+def _export_case_summary_table(case_df: pd.DataFrame, results_root: Path) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for model in CASE_MODELS:
+        subset = case_df[case_df["model"] == model].copy().reset_index(drop=True)
+        metrics = _case_window_metrics(subset)
+        rows.append(
+            {
+                "model": model,
+                "short_label": MODEL_SHORT[model],
+                "train_seed": int(subset["train_seed"].iloc[0]),
+                **metrics,
+            }
+        )
+    summary = pd.DataFrame(rows)
+    out_dir = _table_dir(results_root)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    summary.to_csv(out_dir / "case_window_summary.csv", index=False, encoding="utf-8")
+    return summary
+
+
 def _case_window_metrics(window: pd.DataFrame) -> dict[str, float]:
     demand = window["cooling_demand_mw"].clip(lower=0.0)
     supplied = window["abs_cooling_mw"].clip(lower=0.0) + window["ech_cooling_mw"].clip(lower=0.0)
@@ -451,6 +487,69 @@ def _case_summary_text(model: str, metrics: dict[str, float]) -> str:
     return (
         f"ECH share {metrics['ech_share']:.0%} | "
         f"ABS share {metrics['abs_share']:.0%}\n"
+        f"GT mean {metrics['gt_mean']:.1f} MW"
+    )
+
+
+def _normalize_metric_table(summary: pd.DataFrame) -> pd.DataFrame:
+    normalized = summary.copy()
+    for metric, _ in CASE_FINGERPRINT_METRICS:
+        values = normalized[metric].astype(float).to_numpy()
+        lo = float(values.min())
+        hi = float(values.max())
+        normalized[metric] = 0.5 if np.isclose(lo, hi) else (values - lo) / (hi - lo)
+    return normalized
+
+
+def _format_case_metric(metric: str, value: float) -> str:
+    if metric in {"abs_share", "ech_share"}:
+        return f"{value:.0%}"
+    return f"{value:.1f}"
+
+
+def _case_tick_positions(window: pd.DataFrame) -> tuple[np.ndarray, list[str]]:
+    positions = np.linspace(0, len(window) - 1, 5, dtype=int)
+    labels = [pd.Timestamp(window["timestamp"].iloc[idx]).strftime("%m-%d\n%H:%M") for idx in positions]
+    return positions, labels
+
+
+def _panel_tag(ax: plt.Axes, text: str, color: str) -> None:
+    ax.text(
+        0.02,
+        0.96,
+        text,
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=9.2,
+        color=color,
+        fontweight="semibold",
+        bbox={
+            "boxstyle": "round,pad=0.24,rounding_size=0.12",
+            "fc": lighten_color(color, 0.84),
+            "ec": "none",
+            "alpha": 0.96,
+        },
+        zorder=8,
+    )
+
+
+def _case_metric_label(model: str, metrics: dict[str, float]) -> str:
+    if model == "rbDQN":
+        return (
+            f"ABS {metrics['abs_share']:.0%} | "
+            f"TES swing {metrics['tes_swing']:.1f} MWh | "
+            f"grid-ramp std {metrics['grid_ramp_std']:.1f}"
+        )
+    if model == "DDPG+rule_residual":
+        return (
+            f"GT mean {metrics['gt_mean']:.1f} MW | "
+            f"grid import {metrics['grid_import_mean']:.1f} MW | "
+            f"TES swing {metrics['tes_swing']:.1f} MWh"
+        )
+    return (
+        f"ECH {metrics['ech_share']:.0%} | "
+        f"ABS {metrics['abs_share']:.0%} | "
         f"GT mean {metrics['gt_mean']:.1f} MW"
     )
 
@@ -664,6 +763,270 @@ def plot_training_cooling(bundle: dict[str, Any]) -> plt.Figure:
     return fig
 
 
+def _latest_stable_snapshot(band: pd.DataFrame) -> pd.Series:
+    stable = band[band["n"] >= 3].copy()
+    if stable.empty:
+        return band.iloc[-1]
+    return stable.iloc[-1]
+
+
+def _export_convergence_snapshot(bundle: dict[str, Any], results_root: Path) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for model in MODEL_ORDER:
+        curves = bundle["curves"].get(model, [])
+        if not curves:
+            continue
+        cost_band = _curve_band(curves, "mean_total_cost")
+        cool_band = _curve_band(curves, _cooling_column(curves[0]))
+        cost_snap = _latest_stable_snapshot(cost_band)
+        cool_snap = _latest_stable_snapshot(cool_band)
+        rows.append(
+            {
+                "model": model,
+                "short_label": MODEL_SHORT[model],
+                "stable_timesteps": float(min(cost_snap["timesteps"], cool_snap["timesteps"])),
+                "cost_mean_m": float(cost_snap["mean"]) / 1_000_000.0,
+                "cost_std_m": float(cost_snap["std"]) / 1_000_000.0,
+                "cool_mean": float(cool_snap["mean"]),
+                "cool_std": float(cool_snap["std"]),
+                "n_cost": int(cost_snap["n"]),
+                "n_cool": int(cool_snap["n"]),
+            }
+        )
+    out = pd.DataFrame(rows)
+    out_dir = _table_dir(results_root)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out.to_csv(out_dir / "convergence_snapshot.csv", index=False, encoding="utf-8")
+    return out
+
+
+def plot_convergence_evidence(bundle: dict[str, Any], results_root: Path) -> plt.Figure:
+    snapshot = _export_convergence_snapshot(bundle, results_root)
+    panel_groups = [
+        ("Continuous-control families", ["DDPG+rule_residual", "SAC+rule_residual", "TD3+rule_residual"]),
+        ("Rule-guided shortlist", ["rbDQN", "PPO+rule_residual"]),
+    ]
+
+    fig = plt.figure(figsize=(10.4, 6.0))
+    outer = fig.add_gridspec(1, 2, left=0.06, right=0.985, bottom=0.10, top=0.92, wspace=0.10)
+
+    def draw_model_pair(cost_ax: plt.Axes, cool_ax: plt.Axes, model: str, *, bottom_row: bool, show_titles: bool) -> None:
+        curves = bundle["curves"].get(model, [])
+        if not curves:
+            return
+        color = MODEL_COLORS[model]
+
+        for curve in curves:
+            cost_ax.plot(
+                curve["timesteps"],
+                curve["mean_total_cost"] / 1_000_000.0,
+                color=lighten_color(color, 0.42),
+                linewidth=0.85,
+                alpha=0.42,
+            )
+            cool_ax.plot(
+                curve["timesteps"],
+                curve[_cooling_column(curve)],
+                color=lighten_color(color, 0.42),
+                linewidth=0.85,
+                alpha=0.45,
+            )
+
+        cost_band = _curve_band(curves, "mean_total_cost")
+        cool_band = _curve_band(curves, _cooling_column(curves[0]))
+        cost_ax.plot(cost_band["timesteps"], cost_band["mean"] / 1_000_000.0, color=color, linewidth=1.9)
+        cool_ax.plot(cool_band["timesteps"], cool_band["mean"], color=color, linewidth=1.9)
+
+        stable_cost = cost_band[cost_band["n"] >= 3]
+        if not stable_cost.empty:
+            start = float(stable_cost["timesteps"].min())
+            end = float(stable_cost["timesteps"].max())
+            cost_ax.axvspan(start, end, color=lighten_color(color, 0.84), alpha=0.14, zorder=0)
+            cool_ax.axvspan(start, end, color=lighten_color(color, 0.84), alpha=0.14, zorder=0)
+
+        snap = snapshot[snapshot["model"] == model].iloc[0]
+        _style_axes(cost_ax, grid_axis="y")
+        _style_axes(cool_ax, grid_axis="y")
+        cool_ax.axhline(0.99, color="#AF3D35", linestyle=(0, (4, 3)), linewidth=0.9)
+
+        cost_ax.text(
+            -0.14,
+            0.95,
+            MODEL_SHORT[model],
+            transform=cost_ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=8.2,
+            fontweight="semibold",
+            color=color,
+        )
+        cost_ax.text(
+            0.98,
+            0.86,
+            f"{snap['stable_timesteps']/1_000_000.0:.1f}M | "
+            f"{snap['cost_mean_m']:.3f} ± {snap['cost_std_m']:.3f} M",
+            transform=cost_ax.transAxes,
+            ha="right",
+            va="top",
+            fontsize=6.1,
+            color="#2B2B2B",
+            bbox={"boxstyle": "round,pad=0.12", "fc": "#FFFFFF", "ec": "#DCCFBE", "lw": 0.5, "alpha": 0.92},
+        )
+        cool_ax.text(
+            0.98,
+            0.86,
+            f"{snap['stable_timesteps']/1_000_000.0:.1f}M | "
+            f"{snap['cool_mean']:.4f} ± {snap['cool_std']:.4f}",
+            transform=cool_ax.transAxes,
+            ha="right",
+            va="top",
+            fontsize=6.1,
+            color="#2B2B2B",
+            bbox={"boxstyle": "round,pad=0.12", "fc": "#FFFFFF", "ec": "#DCCFBE", "lw": 0.5, "alpha": 0.92},
+        )
+
+        if show_titles:
+            cost_ax.set_title("Windowed cost", pad=6, fontsize=9.5)
+            cool_ax.set_title("Cooling reliability", pad=6, fontsize=9.5)
+        if bottom_row:
+            cost_ax.set_xlabel("Training timesteps", labelpad=4)
+            cool_ax.set_xlabel("Training timesteps", labelpad=4)
+        cost_ax.xaxis.set_major_formatter(FuncFormatter(_format_million_steps))
+        cool_ax.xaxis.set_major_formatter(FuncFormatter(_format_million_steps))
+        cost_ax.set_xlim(0.0, 2_000_000.0)
+        cool_ax.set_xlim(0.0, 2_000_000.0)
+        cool_ax.set_ylim(0.80, 1.005)
+        cost_ax.tick_params(labelsize=6.8, pad=1.2)
+        cool_ax.tick_params(labelsize=6.8, pad=1.2)
+
+    for group_idx, (group_title, models) in enumerate(panel_groups):
+        inner = outer[group_idx].subgridspec(len(models), 2, hspace=0.20, wspace=0.10)
+        group_cost_axes: list[plt.Axes] = []
+        group_cool_axes: list[plt.Axes] = []
+        for row_idx, model in enumerate(models):
+            cost_ax = fig.add_subplot(inner[row_idx, 0], sharex=group_cost_axes[0] if group_cost_axes else None)
+            cool_ax = fig.add_subplot(inner[row_idx, 1], sharex=group_cool_axes[0] if group_cool_axes else None)
+            group_cost_axes.append(cost_ax)
+            group_cool_axes.append(cool_ax)
+            draw_model_pair(
+                cost_ax,
+                cool_ax,
+                model,
+                bottom_row=row_idx == len(models) - 1,
+                show_titles=row_idx == 0,
+            )
+            if row_idx != len(models) - 1:
+                cost_ax.tick_params(labelbottom=False)
+                cool_ax.tick_params(labelbottom=False)
+        group_cost_axes[1 if len(group_cost_axes) > 1 else 0].set_ylabel("Cost (million)", labelpad=6)
+        group_cool_axes[1 if len(group_cool_axes) > 1 else 0].set_ylabel("Reliability", labelpad=6)
+        left = min(ax.get_position().x0 for ax in [*group_cost_axes, *group_cool_axes])
+        right = max(ax.get_position().x1 for ax in [*group_cost_axes, *group_cool_axes])
+        top = max(ax.get_position().y1 for ax in [*group_cost_axes, *group_cool_axes])
+        fig.text(
+            (left + right) / 2.0,
+            top + 0.02,
+            group_title,
+            ha="center",
+            va="bottom",
+            fontsize=9.8,
+            fontweight="semibold",
+            color="#1D232A",
+        )
+
+    return fig
+
+
+def plot_single_model_convergence(bundle: dict[str, Any], results_root: Path, model: str) -> plt.Figure:
+    snapshot = _export_convergence_snapshot(bundle, results_root)
+    curves = bundle["curves"].get(model, [])
+    if not curves:
+        raise ValueError(f"No learning curves available for {model}.")
+
+    color = MODEL_COLORS[model]
+    snap = snapshot[snapshot["model"] == model].iloc[0]
+    fig, (cost_ax, cool_ax) = plt.subplots(
+        2,
+        1,
+        figsize=(3.55, 4.35),
+        sharex=True,
+        gridspec_kw={"hspace": 0.18},
+    )
+
+    for curve in curves:
+        cost_ax.plot(
+            curve["timesteps"],
+            curve["mean_total_cost"] / 1_000_000.0,
+            color=lighten_color(color, 0.42),
+            linewidth=0.9,
+            alpha=0.42,
+        )
+        cool_ax.plot(
+            curve["timesteps"],
+            curve[_cooling_column(curve)],
+            color=lighten_color(color, 0.42),
+            linewidth=0.9,
+            alpha=0.45,
+        )
+
+    cost_band = _curve_band(curves, "mean_total_cost")
+    cool_band = _curve_band(curves, _cooling_column(curves[0]))
+    cost_ax.plot(cost_band["timesteps"], cost_band["mean"] / 1_000_000.0, color=color, linewidth=2.0)
+    cool_ax.plot(cool_band["timesteps"], cool_band["mean"], color=color, linewidth=2.0)
+
+    stable_cost = cost_band[cost_band["n"] >= 3]
+    if not stable_cost.empty:
+        start = float(stable_cost["timesteps"].min())
+        end = float(stable_cost["timesteps"].max())
+        cost_ax.axvspan(start, end, color=lighten_color(color, 0.84), alpha=0.14, zorder=0)
+        cool_ax.axvspan(start, end, color=lighten_color(color, 0.84), alpha=0.14, zorder=0)
+
+    _style_axes(cost_ax, grid_axis="y")
+    _style_axes(cool_ax, grid_axis="y")
+    cool_ax.axhline(0.99, color="#AF3D35", linestyle=(0, (4, 3)), linewidth=0.9)
+
+    cost_ax.set_title(f"{MODEL_SHORT[model]}: windowed cost", pad=5, fontsize=9.4, color="#1D232A")
+    cool_ax.set_title(f"{MODEL_SHORT[model]}: cooling reliability", pad=5, fontsize=9.4, color="#1D232A")
+    cost_ax.set_ylabel("Cost (million)", labelpad=5)
+    cool_ax.set_ylabel("Reliability", labelpad=5)
+    cool_ax.set_xlabel("Training timesteps", labelpad=4)
+
+    cost_ax.text(
+        0.98,
+        0.88,
+        f"{snap['stable_timesteps']/1_000_000.0:.1f}M | "
+        f"{snap['cost_mean_m']:.3f} ± {snap['cost_std_m']:.3f} M",
+        transform=cost_ax.transAxes,
+        ha="right",
+        va="top",
+        fontsize=6.5,
+        color="#2B2B2B",
+        bbox={"boxstyle": "round,pad=0.14", "fc": "#FFFFFF", "ec": "#DCCFBE", "lw": 0.5, "alpha": 0.92},
+    )
+    cool_ax.text(
+        0.98,
+        0.88,
+        f"{snap['stable_timesteps']/1_000_000.0:.1f}M | "
+        f"{snap['cool_mean']:.4f} ± {snap['cool_std']:.4f}",
+        transform=cool_ax.transAxes,
+        ha="right",
+        va="top",
+        fontsize=6.5,
+        color="#2B2B2B",
+        bbox={"boxstyle": "round,pad=0.14", "fc": "#FFFFFF", "ec": "#DCCFBE", "lw": 0.5, "alpha": 0.92},
+    )
+
+    cost_ax.xaxis.set_major_formatter(FuncFormatter(_format_million_steps))
+    cool_ax.xaxis.set_major_formatter(FuncFormatter(_format_million_steps))
+    cost_ax.set_xlim(0.0, 2_000_000.0)
+    cool_ax.set_xlim(0.0, 2_000_000.0)
+    cool_ax.set_ylim(0.80, 1.005)
+    cost_ax.tick_params(labelsize=7.0, pad=1.4)
+    cool_ax.tick_params(labelsize=7.0, pad=1.4)
+    fig.subplots_adjust(left=0.16, right=0.98, bottom=0.10, top=0.93)
+    return fig
+
+
 def plot_multi_seed_cooling_strip(bundle: dict[str, Any]) -> plt.Figure:
     df = bundle["full"].copy()
     fig, ax = plt.subplots(figsize=(7.5, 4.9))
@@ -734,8 +1097,17 @@ def plot_case_window(bundle: dict[str, Any], results_root: Path) -> plt.Figure:
         .loc[CASE_MODELS]
         .reset_index()
     )
-    fig, axes = plt.subplots(2, 3, figsize=(11.8, 6.2), sharex="col")
-    fig.subplots_adjust(left=0.07, right=0.96, bottom=0.16, top=0.84, wspace=0.23, hspace=0.18)
+    fig, axes = plt.subplots(2, 3, figsize=(11.8, 6.6), sharex="col")
+    fig.subplots_adjust(left=0.07, right=0.965, bottom=0.15, top=0.84, wspace=0.20, hspace=0.20)
+
+    cool_max = float(case_df["cooling_demand_mw"].max()) * 1.08
+    gt_max = float(case_df["gt_power_mw"].clip(lower=0.0).max()) * 1.08
+    grid_min = float(case_df["grid_net_mw"].min())
+    grid_max = float(case_df["grid_net_mw"].max())
+    dispatch_min = min(-0.6, grid_min * 1.15)
+    dispatch_max = max(gt_max, grid_max * 1.15)
+    tes_min = float(case_df["tes_energy_mwh"].min())
+    tes_max = float(case_df["tes_energy_mwh"].max())
 
     for col_idx, model in enumerate(CASE_MODELS):
         subset = case_df[case_df["model"] == model].copy().reset_index(drop=True)
@@ -744,67 +1116,60 @@ def plot_case_window(bundle: dict[str, Any], results_root: Path) -> plt.Figure:
         bottom_ax = axes[1, col_idx]
         storage_ax = bottom_ax.twinx()
         x = np.arange(len(subset))
+        tick_positions, tick_labels = _case_tick_positions(subset)
 
-        top_ax.fill_between(
+        demand = subset["cooling_demand_mw"].clip(lower=0.0).to_numpy()
+        abs_cool = subset["abs_cooling_mw"].clip(lower=0.0).to_numpy()
+        ech_cool = subset["ech_cooling_mw"].clip(lower=0.0).to_numpy()
+        gt_power = subset["gt_power_mw"].clip(lower=0.0).to_numpy()
+        grid_import = subset["grid_net_mw"].clip(lower=0.0).to_numpy()
+        grid_export = (-subset["grid_net_mw"].clip(upper=0.0)).to_numpy()
+
+        top_ax.stackplot(
             x,
-            0.0,
-            subset["cooling_demand_mw"],
-            color=lighten_color(CASE_SIGNAL_COLORS["demand"], 0.82),
-            alpha=0.28,
+            abs_cool,
+            ech_cool,
+            colors=[lighten_color(CASE_SIGNAL_COLORS["abs"], 0.18), lighten_color(CASE_SIGNAL_COLORS["ech"], 0.24)],
+            alpha=0.92,
             zorder=1,
         )
         top_ax.plot(
             x,
-            subset["cooling_demand_mw"],
+            demand,
             color=CASE_SIGNAL_COLORS["demand"],
             linewidth=1.8,
             linestyle=(0, (4, 2)),
             label="Cooling demand",
+            zorder=4,
         )
         top_ax.plot(
             x,
-            subset["abs_cooling_mw"],
+            abs_cool,
             color=CASE_SIGNAL_COLORS["abs"],
-            linewidth=2.0,
-            label="ABS cooling",
+            linewidth=1.5,
+            zorder=5,
         )
         top_ax.plot(
             x,
-            subset["ech_cooling_mw"],
+            abs_cool + ech_cool,
             color=CASE_SIGNAL_COLORS["ech"],
-            linewidth=2.0,
-            label="ECH cooling",
+            linewidth=1.4,
+            zorder=5,
         )
         _style_axes(top_ax, grid_axis="y")
+        top_ax.set_ylim(0.0, cool_max)
         top_ax.set_title(f"{MODEL_SHORT[model]} (seed {int(reps.iloc[col_idx]['train_seed'])})", color=MODEL_COLORS[model], pad=8)
+        _panel_tag(top_ax, CASE_STRATEGY_NOTES[model], MODEL_COLORS[model])
         top_ax.text(
             0.03,
-            0.95,
-            CASE_STRATEGY_NOTES[model],
+            0.84,
+            _case_metric_label(model, metrics),
             transform=top_ax.transAxes,
             ha="left",
             va="top",
-            fontsize=9.5,
-            color=MODEL_COLORS[model],
-            fontweight="semibold",
-            bbox={
-                "boxstyle": "round,pad=0.28,rounding_size=0.15",
-                "fc": lighten_color(MODEL_COLORS[model], 0.86),
-                "ec": "none",
-                "alpha": 0.96,
-            },
-            zorder=7,
-        )
-        top_ax.text(
-            0.03,
-            0.78,
-            _case_summary_text(model, metrics),
-            transform=top_ax.transAxes,
-            ha="left",
-            va="top",
-            fontsize=8.6,
+            fontsize=8.35,
             color="#2B2B2B",
-            linespacing=1.35,
+            linespacing=1.25,
             bbox={
                 "boxstyle": "round,pad=0.26,rounding_size=0.14",
                 "fc": "#FFFDF8",
@@ -815,22 +1180,47 @@ def plot_case_window(bundle: dict[str, Any], results_root: Path) -> plt.Figure:
             zorder=7,
         )
         if col_idx == 0:
-            top_ax.set_ylabel("Cooling-side power (MW)")
+            top_ax.set_ylabel("Cooling supply (MW)")
+        top_ax.set_xticks(tick_positions, [])
 
         bottom_ax.axhline(0.0, color="#CDBFAE", linewidth=0.9, zorder=1)
+        bottom_ax.fill_between(
+            x,
+            0.0,
+            gt_power,
+            color=lighten_color(CASE_SIGNAL_COLORS["gt"], 0.18),
+            alpha=0.92,
+            zorder=1,
+        )
         bottom_ax.plot(
             x,
-            subset["gt_power_mw"],
+            gt_power,
             color=CASE_SIGNAL_COLORS["gt"],
-            linewidth=1.9,
-            label="GT power",
+            linewidth=1.8,
+            zorder=4,
+        )
+        bottom_ax.fill_between(
+            x,
+            0.0,
+            grid_import,
+            color=lighten_color(CASE_SIGNAL_COLORS["grid"], 0.26),
+            alpha=0.82,
+            zorder=2,
+        )
+        bottom_ax.fill_between(
+            x,
+            -grid_export,
+            0.0,
+            color=lighten_color(CASE_SIGNAL_COLORS["grid"], 0.55),
+            alpha=0.55,
+            zorder=2,
         )
         bottom_ax.plot(
             x,
             subset["grid_net_mw"],
             color=CASE_SIGNAL_COLORS["grid"],
-            linewidth=1.8,
-            label="Net grid",
+            linewidth=1.5,
+            zorder=5,
         )
         storage_ax.plot(
             x,
@@ -838,46 +1228,46 @@ def plot_case_window(bundle: dict[str, Any], results_root: Path) -> plt.Figure:
             color=CASE_SIGNAL_COLORS["tes"],
             linewidth=1.8,
             linestyle=(0, (2, 2)),
-            label="TES energy",
+            zorder=6,
         )
         _style_axes(bottom_ax, grid_axis="y")
+        bottom_ax.set_ylim(dispatch_min, dispatch_max)
         bottom_ax.spines["right"].set_visible(False)
         storage_ax.spines["top"].set_visible(False)
         storage_ax.spines["left"].set_visible(False)
         storage_ax.spines["right"].set_linewidth(0.9)
         storage_ax.spines["right"].set_color("#CDBFAE")
         storage_ax.tick_params(colors="#7C6340", length=3.0, width=0.8)
+        storage_ax.set_ylim(tes_min - 0.05 * (tes_max - tes_min + 1e-9), tes_max + 0.05 * (tes_max - tes_min + 1e-9))
         if col_idx == 0:
-            bottom_ax.set_ylabel("Electric / thermal dispatch (MW)")
+            bottom_ax.set_ylabel("GT / grid dispatch (MW)")
             storage_ax.set_ylabel("TES energy (MWh)", color="#7C6340")
         else:
             storage_ax.set_yticklabels([])
 
-        tick_positions = np.linspace(0, len(subset) - 1, 5, dtype=int)
-        tick_labels = [subset["timestamp"].iloc[idx].strftime("%m-%d\n%H:%M") for idx in tick_positions]
         bottom_ax.set_xticks(tick_positions, tick_labels)
 
     legend_handles = [
         Line2D([0], [0], color=CASE_SIGNAL_COLORS["demand"], lw=1.8, linestyle=(0, (4, 2)), label="Cooling demand"),
-        Line2D([0], [0], color=CASE_SIGNAL_COLORS["abs"], lw=2.0, label="ABS cooling"),
-        Line2D([0], [0], color=CASE_SIGNAL_COLORS["ech"], lw=2.0, label="ECH cooling"),
-        Line2D([0], [0], color=CASE_SIGNAL_COLORS["gt"], lw=1.9, label="GT power"),
-        Line2D([0], [0], color=CASE_SIGNAL_COLORS["grid"], lw=1.8, label="Net grid import"),
+        Line2D([0], [0], color=CASE_SIGNAL_COLORS["abs"], lw=6.0, solid_capstyle="butt", label="ABS cooling"),
+        Line2D([0], [0], color=CASE_SIGNAL_COLORS["ech"], lw=6.0, solid_capstyle="butt", label="ECH cooling"),
+        Line2D([0], [0], color=CASE_SIGNAL_COLORS["gt"], lw=6.0, solid_capstyle="butt", label="GT power"),
+        Line2D([0], [0], color=CASE_SIGNAL_COLORS["grid"], lw=6.0, solid_capstyle="butt", label="Grid import / export"),
         Line2D([0], [0], color=CASE_SIGNAL_COLORS["tes"], lw=1.8, linestyle=(0, (2, 2)), label="TES energy"),
     ]
     fig.legend(
         handles=legend_handles,
         loc="upper center",
-        ncol=6,
-        bbox_to_anchor=(0.5, 0.98),
+        ncol=3,
+        bbox_to_anchor=(0.5, 1.01),
         columnspacing=1.2,
         handlelength=2.2,
     )
-    fig.suptitle("Representative high-cooling-load dispatch window", fontsize=14.5, fontweight="semibold", color="#1D232A", y=0.95)
+    fig.suptitle("Representative high-cooling-load dispatch composition", fontsize=14.5, fontweight="semibold", color="#1D232A", y=0.95)
     fig.text(
         0.07,
         0.06,
-        "The 24 h window is selected by the highest rolling-average cooling demand on the common 2025 horizon.",
+        "The 24 h window is selected by the highest rolling-average cooling demand on the shared 2025 horizon.",
         fontsize=9.0,
         color="#5F5A53",
         ha="left",
@@ -885,7 +1275,104 @@ def plot_case_window(bundle: dict[str, Any], results_root: Path) -> plt.Figure:
     fig.text(
         0.07,
         0.025,
-        "The annotations summarize the within-window mechanism that aligns with the yearly ranking: rbDQN is steadier, DDPG is cheaper, and PPO leans more on ECH.",
+        "The panel notes summarize the within-window mechanism: rbDQN uses more ABS-TES buffering, DDPG remains cost-oriented with limited TES motion, and PPO relies more heavily on ECH support.",
+        fontsize=9.0,
+        color="#5F5A53",
+        ha="left",
+    )
+    return fig
+
+
+def plot_case_mechanism(bundle: dict[str, Any], results_root: Path) -> plt.Figure:
+    case_df = _export_case_window_table(bundle, results_root)
+    summary = _export_case_summary_table(case_df, results_root)
+    summary = summary.set_index("model").loc[CASE_MODELS].reset_index()
+
+    fig = plt.figure(figsize=(11.8, 6.4))
+    gs = fig.add_gridspec(2, 2, height_ratios=[1.0, 1.15], width_ratios=[1.0, 1.35], hspace=0.36, wspace=0.22)
+    share_ax = fig.add_subplot(gs[0, 0])
+    metric_ax = fig.add_subplot(gs[0, 1])
+    trace_ax = fig.add_subplot(gs[1, :])
+
+    y_pos = np.arange(len(CASE_MODELS))
+    abs_share = summary["abs_share"].to_numpy(dtype=float)
+    ech_share = summary["ech_share"].to_numpy(dtype=float)
+    share_ax.barh(y_pos, abs_share, color=lighten_color(CASE_SIGNAL_COLORS["abs"], 0.16), edgecolor=CASE_SIGNAL_COLORS["abs"], height=0.56)
+    share_ax.barh(y_pos, ech_share, left=abs_share, color=lighten_color(CASE_SIGNAL_COLORS["ech"], 0.18), edgecolor=CASE_SIGNAL_COLORS["ech"], height=0.56)
+    for idx, row in enumerate(summary.itertuples()):
+        share_ax.text(abs_share[idx] / 2.0, idx, f"{row.abs_share:.0%}", ha="center", va="center", fontsize=8.9, color="#FFFFFF", fontweight="semibold")
+        share_ax.text(abs_share[idx] + ech_share[idx] / 2.0, idx, f"{row.ech_share:.0%}", ha="center", va="center", fontsize=8.9, color="#2B2B2B")
+    share_ax.set_xlim(0.0, 1.0)
+    share_ax.set_yticks(y_pos, [f"{MODEL_SHORT[row.model]} ({int(row.train_seed)})" for row in summary.itertuples()])
+    for tick, model in zip(share_ax.get_yticklabels(), summary["model"]):
+        tick.set_color(MODEL_COLORS[str(model)])
+        tick.set_fontweight("semibold")
+    share_ax.invert_yaxis()
+    share_ax.set_xlabel("Cooling-path composition")
+    share_ax.set_title("Cooling-path split over the representative 24 h window", pad=8)
+    _style_axes(share_ax, grid_axis="x")
+
+    metric_names = ["gt_mean", "grid_import_mean", "tes_swing", "grid_ramp_std"]
+    metric_labels = ["GT mean", "Grid import", "TES swing", "Grid-ramp std"]
+    x_centers = np.arange(len(metric_names))
+    bar_width = 0.22
+    for idx, row in enumerate(summary.itertuples()):
+        values = [float(getattr(row, metric)) for metric in metric_names]
+        metric_ax.bar(
+            x_centers + (idx - 1) * bar_width,
+            values,
+            width=bar_width,
+            color=lighten_color(MODEL_COLORS[str(row.model)], 0.18),
+            edgecolor=MODEL_COLORS[str(row.model)],
+            linewidth=0.9,
+            label=f"{row.short_label} ({int(row.train_seed)})",
+            zorder=3,
+        )
+    metric_ax.set_xticks(x_centers, metric_labels)
+    metric_ax.set_ylabel("Value (MW / MWh)")
+    metric_ax.set_title("Compact dispatch summary under the same window", pad=8)
+    _style_axes(metric_ax, grid_axis="y")
+
+    ref_subset = case_df[case_df["model"] == CASE_MODELS[0]].copy().reset_index(drop=True)
+    x = np.arange(len(ref_subset))
+    for model in CASE_MODELS:
+        subset = case_df[case_df["model"] == model].copy().reset_index(drop=True)
+        total_cooling = subset["abs_cooling_mw"].clip(lower=0.0) + subset["ech_cooling_mw"].clip(lower=0.0)
+        abs_fraction = np.divide(
+            subset["abs_cooling_mw"].clip(lower=0.0),
+            total_cooling,
+            out=np.zeros(len(subset), dtype=float),
+            where=total_cooling.to_numpy() > 1e-9,
+        )
+        trace_ax.plot(x, abs_fraction, color=MODEL_COLORS[model], linewidth=2.2, label=f"{MODEL_SHORT[model]} ABS share")
+    demand_scaled = ref_subset["cooling_demand_mw"] / float(ref_subset["cooling_demand_mw"].max())
+    trace_ax.plot(
+        x,
+        demand_scaled,
+        color=CASE_SIGNAL_COLORS["demand"],
+        linewidth=1.8,
+        linestyle=(0, (4, 2)),
+        label="Scaled cooling demand",
+    )
+    tick_positions, tick_labels = _case_tick_positions(ref_subset)
+    trace_ax.set_xticks(tick_positions, tick_labels)
+    trace_ax.set_ylim(0.0, 1.02)
+    trace_ax.set_ylabel("ABS-share trace")
+    trace_ax.set_title("Time-resolved ABS uptake under the same demand stress window", pad=8)
+    _style_axes(trace_ax, grid_axis="y")
+    trace_ax.legend(ncol=2, loc="upper right", frameon=False, columnspacing=1.2, handlelength=2.4)
+
+    fig.suptitle(
+        "Mechanism summary under the representative high-load window",
+        fontsize=14.5,
+        fontweight="semibold",
+        color="#1D232A",
+        y=0.995,
+    )
+    fig.text(
+        0.07,
+        0.025,
+        "Top: 24 h cooling-path split and compact dispatch metrics with true values. Bottom: time-resolved ABS-share traces under the same demand profile.",
         fontsize=9.0,
         color="#5F5A53",
         ha="left",
@@ -916,8 +1403,15 @@ def main() -> None:
         "multi_seed_cost_strip": plot_multi_seed_cost_strip(bundle),
         "multi_seed_training_cost": plot_training_cost(bundle),
         "multi_seed_training_cooling": plot_training_cooling(bundle),
+        "multi_seed_convergence_evidence": plot_convergence_evidence(bundle, args.results_root),
+        "multi_seed_convergence_ddpg": plot_single_model_convergence(bundle, args.results_root, "DDPG+rule_residual"),
+        "multi_seed_convergence_sac": plot_single_model_convergence(bundle, args.results_root, "SAC+rule_residual"),
+        "multi_seed_convergence_td3": plot_single_model_convergence(bundle, args.results_root, "TD3+rule_residual"),
+        "multi_seed_convergence_rbdqn": plot_single_model_convergence(bundle, args.results_root, "rbDQN"),
+        "multi_seed_convergence_ppo": plot_single_model_convergence(bundle, args.results_root, "PPO+rule_residual"),
         "multi_seed_cooling_strip": plot_multi_seed_cooling_strip(bundle),
         "multi_seed_case_window": plot_case_window(bundle, args.results_root),
+        "multi_seed_case_mechanism": plot_case_mechanism(bundle, args.results_root),
     }
     for stem, fig in figures.items():
         _save_figure(fig, stem, figure_dirs)

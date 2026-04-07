@@ -10,7 +10,7 @@ wheels/
 .venv
 .windsurfrules
 .ace-tool/
-ref*
+reference/
 # IDE
 .kiro
 .wind*
@@ -29,12 +29,16 @@ kaggle/
 context_portal/*
 ${workspaceFolder}/
 tmp*
-cchp-paper/
+cchp-paper/build*
+cchp-paper/sections
+cchp-paper/main.*
 *.bak
 scripts/plot/tiff/
 results/figures/paper/latest_kaggle_mlp/tiff
-*.tiff
+*.tif*
 results/figures/paper/latest_kaggle_mlp/pdf
 *.pdf
 results/paper/drl_with_mlp/snapshots/
 results
+cchp-paper/figures/scientific-figure/*-plot/
+cchp-paper/bib/check.ps1
