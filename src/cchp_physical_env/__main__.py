@@ -151,6 +151,7 @@ TRAINING_OPTION_KEYS = (
     "pafc_economic_boiler_proxy_coef",
     "pafc_economic_abs_tradeoff_coef",
     "pafc_economic_gt_grid_proxy_coef",
+    "pafc_economic_gt_distill_coef",
     "pafc_economic_teacher_distill_coef",
     "pafc_economic_teacher_proxy_advantage_min",
     "pafc_economic_teacher_gt_proxy_advantage_min",
@@ -167,6 +168,9 @@ TRAINING_OPTION_KEYS = (
     "pafc_economic_teacher_tes_action_weight",
     "pafc_economic_teacher_full_year_warm_start_samples",
     "pafc_economic_teacher_full_year_warm_start_epochs",
+    "pafc_economic_gt_full_year_warm_start_samples",
+    "pafc_economic_gt_full_year_warm_start_epochs",
+    "pafc_economic_gt_full_year_warm_start_u_weight",
     "pafc_economic_bes_distill_coef",
     "pafc_economic_bes_prior_u",
     "pafc_economic_bes_charge_u_scale",
@@ -574,6 +578,7 @@ def _command_train(args: argparse.Namespace) -> None:
                 "pafc_economic_boiler_proxy_coef",
                 "pafc_economic_abs_tradeoff_coef",
                 "pafc_economic_gt_grid_proxy_coef",
+                "pafc_economic_gt_distill_coef",
                 "pafc_economic_teacher_distill_coef",
                 "pafc_economic_teacher_proxy_advantage_min",
                 "pafc_economic_teacher_bes_proxy_advantage_min",
@@ -592,6 +597,9 @@ def _command_train(args: argparse.Namespace) -> None:
                 "pafc_economic_bes_charge_pressure_bonus",
                 "pafc_economic_bes_charge_soc_ceiling",
                 "pafc_economic_bes_discharge_soc_floor",
+                "pafc_economic_gt_full_year_warm_start_samples",
+                "pafc_economic_gt_full_year_warm_start_epochs",
+                "pafc_economic_gt_full_year_warm_start_u_weight",
                 "pafc_economic_bes_full_year_warm_start_samples",
                 "pafc_economic_bes_full_year_warm_start_epochs",
                 "pafc_economic_bes_full_year_warm_start_u_weight",
@@ -681,6 +689,9 @@ def _command_train(args: argparse.Namespace) -> None:
                 economic_gt_grid_proxy_coef=float(
                     current_options["pafc_economic_gt_grid_proxy_coef"]
                 ),
+                economic_gt_distill_coef=float(
+                    current_options["pafc_economic_gt_distill_coef"]
+                ),
                 economic_teacher_distill_coef=float(
                     current_options["pafc_economic_teacher_distill_coef"]
                 ),
@@ -728,6 +739,15 @@ def _command_train(args: argparse.Namespace) -> None:
                 ),
                 economic_teacher_full_year_warm_start_epochs=int(
                     current_options["pafc_economic_teacher_full_year_warm_start_epochs"]
+                ),
+                economic_gt_full_year_warm_start_samples=int(
+                    current_options["pafc_economic_gt_full_year_warm_start_samples"]
+                ),
+                economic_gt_full_year_warm_start_epochs=int(
+                    current_options["pafc_economic_gt_full_year_warm_start_epochs"]
+                ),
+                economic_gt_full_year_warm_start_u_weight=float(
+                    current_options["pafc_economic_gt_full_year_warm_start_u_weight"]
                 ),
                 economic_bes_distill_coef=float(
                     current_options["pafc_economic_bes_distill_coef"]
@@ -1322,6 +1342,13 @@ def _command_pafc_train(args: argparse.Namespace) -> None:
                     0.25,
                 )
             ),
+            economic_gt_distill_coef=float(
+                _arg_or_training_default(
+                    "economic_gt_distill_coef",
+                    "pafc_economic_gt_distill_coef",
+                    0.0,
+                )
+            ),
             economic_teacher_distill_coef=float(
                 _arg_or_training_default(
                     "economic_teacher_distill_coef",
@@ -1432,6 +1459,27 @@ def _command_pafc_train(args: argparse.Namespace) -> None:
                     "economic_teacher_full_year_warm_start_epochs",
                     "pafc_economic_teacher_full_year_warm_start_epochs",
                     4,
+                )
+            ),
+            economic_gt_full_year_warm_start_samples=int(
+                _arg_or_training_default(
+                    "economic_gt_full_year_warm_start_samples",
+                    "pafc_economic_gt_full_year_warm_start_samples",
+                    0,
+                )
+            ),
+            economic_gt_full_year_warm_start_epochs=int(
+                _arg_or_training_default(
+                    "economic_gt_full_year_warm_start_epochs",
+                    "pafc_economic_gt_full_year_warm_start_epochs",
+                    0,
+                )
+            ),
+            economic_gt_full_year_warm_start_u_weight=float(
+                _arg_or_training_default(
+                    "economic_gt_full_year_warm_start_u_weight",
+                    "pafc_economic_gt_full_year_warm_start_u_weight",
+                    0.0,
                 )
             ),
             economic_bes_distill_coef=float(
@@ -2207,6 +2255,7 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--pafc-economic-boiler-proxy-coef", type=float, default=argparse.SUPPRESS)
     train_parser.add_argument("--pafc-economic-abs-tradeoff-coef", type=float, default=argparse.SUPPRESS)
     train_parser.add_argument("--pafc-economic-gt-grid-proxy-coef", type=float, default=argparse.SUPPRESS)
+    train_parser.add_argument("--pafc-economic-gt-distill-coef", type=float, default=argparse.SUPPRESS)
     train_parser.add_argument("--pafc-economic-teacher-distill-coef", type=float, default=argparse.SUPPRESS)
     train_parser.add_argument("--pafc-economic-teacher-proxy-advantage-min", type=float, default=argparse.SUPPRESS)
     train_parser.add_argument("--pafc-economic-teacher-gt-proxy-advantage-min", type=float, default=argparse.SUPPRESS)
@@ -2229,6 +2278,21 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument(
         "--pafc-economic-teacher-full-year-warm-start-epochs",
         type=int,
+        default=argparse.SUPPRESS,
+    )
+    train_parser.add_argument(
+        "--pafc-economic-gt-full-year-warm-start-samples",
+        type=int,
+        default=argparse.SUPPRESS,
+    )
+    train_parser.add_argument(
+        "--pafc-economic-gt-full-year-warm-start-epochs",
+        type=int,
+        default=argparse.SUPPRESS,
+    )
+    train_parser.add_argument(
+        "--pafc-economic-gt-full-year-warm-start-u-weight",
+        type=float,
         default=argparse.SUPPRESS,
     )
     train_parser.add_argument("--pafc-economic-bes-distill-coef", type=float, default=argparse.SUPPRESS)
@@ -2666,6 +2730,7 @@ def build_parser() -> argparse.ArgumentParser:
     pafc_train_parser.add_argument("--economic-boiler-proxy-coef", type=float, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--economic-abs-tradeoff-coef", type=float, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--economic-gt-grid-proxy-coef", type=float, default=argparse.SUPPRESS)
+    pafc_train_parser.add_argument("--economic-gt-distill-coef", type=float, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--economic-teacher-distill-coef", type=float, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--economic-teacher-proxy-advantage-min", type=float, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--economic-teacher-bes-proxy-advantage-min", type=float, default=argparse.SUPPRESS)
@@ -2675,6 +2740,14 @@ def build_parser() -> argparse.ArgumentParser:
     pafc_train_parser.add_argument("--economic-teacher-bes-anchor-preserve-scale", type=float, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--economic-teacher-warm-start-weight", type=float, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--economic-teacher-prefill-replay-boost", type=int, default=argparse.SUPPRESS)
+    pafc_train_parser.add_argument("--economic-teacher-gt-action-weight", type=float, default=argparse.SUPPRESS)
+    pafc_train_parser.add_argument("--economic-teacher-bes-action-weight", type=float, default=argparse.SUPPRESS)
+    pafc_train_parser.add_argument("--economic-teacher-tes-action-weight", type=float, default=argparse.SUPPRESS)
+    pafc_train_parser.add_argument("--economic-teacher-full-year-warm-start-samples", type=int, default=argparse.SUPPRESS)
+    pafc_train_parser.add_argument("--economic-teacher-full-year-warm-start-epochs", type=int, default=argparse.SUPPRESS)
+    pafc_train_parser.add_argument("--economic-gt-full-year-warm-start-samples", type=int, default=argparse.SUPPRESS)
+    pafc_train_parser.add_argument("--economic-gt-full-year-warm-start-epochs", type=int, default=argparse.SUPPRESS)
+    pafc_train_parser.add_argument("--economic-gt-full-year-warm-start-u-weight", type=float, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--economic-bes-distill-coef", type=float, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument(
         "--state-feasible-action-shaping-enabled",

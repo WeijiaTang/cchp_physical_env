@@ -24,6 +24,7 @@ from .projection_surrogate import build_projection_surrogate_network
 
 _NORM_EPS = 1e-6
 _BES_PRIOR_MIN_OPPORTUNITY = 0.05
+_GT_PRIOR_MIN_OPPORTUNITY = 0.05
 _COST_KEYS = ("cost_e", "cost_h", "cost_c")
 _DUAL_NAMES = ("lambda_e", "lambda_h", "lambda_c")
 _ACTION_BOUNDS = {
@@ -323,6 +324,242 @@ def _bes_prior_weight_multiplier_np(
     )
 
 
+def _gt_price_prior_target_np(
+    *,
+    price_e: float,
+    price_gas: float,
+    p_dem_mw: float,
+    pv_mw: float,
+    wt_mw: float,
+    t_amb_k: float,
+    heat_backup_min_needed_mw: float,
+    abs_drive_margin_k: float,
+    qc_dem_mw: float,
+    p_gt_prev_mw: float,
+    env_config,
+    gt_off_deadband_ratio: float,
+    price_low_threshold: float,
+    price_high_threshold: float,
+    u_bes: float = 0.0,
+    u_ech: float = 0.0,
+    carbon_tax: float = 0.0,
+) -> dict[str, float | str]:
+    price_pressure = _bes_price_pressure_np(
+        price_e=price_e,
+        price_low_threshold=price_low_threshold,
+        price_high_threshold=price_high_threshold,
+    )
+    p_gt_cap_mw = max(_NORM_EPS, float(env_config.p_gt_cap_mw))
+    gt_min_output_mw = max(0.0, float(env_config.gt_min_output_mw))
+    gt_min_ratio = float(np.clip(gt_min_output_mw / p_gt_cap_mw, 0.0, 1.0))
+    q_boiler_cap_mw = max(_NORM_EPS, float(env_config.q_boiler_cap_mw))
+    q_abs_cool_cap_mw = max(_NORM_EPS, float(env_config.q_abs_cool_cap_mw))
+    q_ech_cap_mw = max(_NORM_EPS, float(env_config.q_ech_cap_mw))
+    gate_scale_k = max(_NORM_EPS, float(env_config.abs_gate_scale_k))
+    u_bes = float(np.clip(u_bes, -1.0, 1.0))
+    u_ech = float(np.clip(u_ech, 0.0, 1.0))
+    p_bes_charge_proxy_mw = (
+        max(0.0, -u_bes)
+        * float(env_config.p_bes_cap_mw)
+        / max(_NORM_EPS, float(env_config.bes_eta_charge))
+    )
+    p_bes_discharge_proxy_mw = (
+        max(0.0, u_bes)
+        * float(env_config.p_bes_cap_mw)
+        * float(env_config.bes_eta_discharge)
+    )
+    q_ech_proxy_mw = u_ech * q_ech_cap_mw
+    ech_cop = np.clip(
+        float(env_config.cop_nominal) - 0.03 * (float(t_amb_k) - 298.15),
+        float(env_config.cop_nominal) * float(env_config.ech_cop_partload_min_fraction),
+        float(env_config.cop_nominal),
+    )
+    p_ech_proxy_mw = q_ech_proxy_mw / max(_NORM_EPS, float(ech_cop))
+    net_grid_need_proxy_mw = max(
+        0.0,
+        float(p_dem_mw)
+        + p_ech_proxy_mw
+        + p_bes_charge_proxy_mw
+        - float(pv_mw)
+        - float(wt_mw)
+        - p_bes_discharge_proxy_mw,
+    )
+    net_grid_need_ratio = float(np.clip(net_grid_need_proxy_mw / p_gt_cap_mw, 0.0, 1.0))
+    heat_support_need = float(
+        np.clip(float(heat_backup_min_needed_mw) / q_boiler_cap_mw, 0.0, 1.0)
+    )
+    qc_need_ratio = float(
+        np.clip(float(qc_dem_mw) / max(q_abs_cool_cap_mw, q_ech_cap_mw), 0.0, 1.0)
+    )
+    abs_ready = float(1.0 / (1.0 + np.exp(-float(abs_drive_margin_k) / gate_scale_k)))
+    cool_support_need = float(np.clip(qc_need_ratio * max(abs_ready, 0.35), 0.0, 1.0))
+    prev_gt_ratio = float(np.clip(float(p_gt_prev_mw) / p_gt_cap_mw, 0.0, 1.0))
+    eta_ref_ratio = float(
+        np.clip(max(gt_min_ratio, 0.5 * (prev_gt_ratio + net_grid_need_ratio)), 0.0, 1.0)
+    )
+    eta_ref = float(env_config.gt_eta_min) + (
+        float(env_config.gt_eta_max) - float(env_config.gt_eta_min)
+    ) * eta_ref_ratio
+    gt_dispatch_basis_mw = max(gt_min_output_mw, 0.25 * p_gt_cap_mw, _NORM_EPS)
+    startup_basis_mwh = max(
+        _NORM_EPS,
+        float(getattr(env_config, "dt_hours", 0.25)) * gt_dispatch_basis_mw,
+    )
+    startup_off_factor = float(
+        np.clip(1.0 - float(p_gt_prev_mw) / gt_dispatch_basis_mw, 0.0, 1.0)
+    )
+    gt_marginal_cost = (
+        float(price_gas) / max(_NORM_EPS, float(eta_ref))
+        + float(getattr(env_config, "gt_om_var_cost_per_mwh", 0.0))
+        + float(max(0.0, float(carbon_tax)))
+        * float(getattr(env_config, "gt_emission_ton_per_mwh_th", 0.0))
+        / max(_NORM_EPS, float(eta_ref))
+        + startup_off_factor
+        * (
+            float(getattr(env_config, "gt_start_cost", 0.0))
+            + float(getattr(env_config, "gt_cycle_cost", 0.0))
+        )
+        / startup_basis_mwh
+    )
+    price_advantage = float(
+        np.clip(
+            (float(price_e) - gt_marginal_cost)
+            / max(_NORM_EPS, max(float(price_e), gt_marginal_cost)),
+            -1.0,
+            1.0,
+        )
+    )
+    market_commit = max(float(price_pressure["discharge_pressure"]), max(0.0, price_advantage))
+    market_off = max(float(price_pressure["charge_pressure"]), max(0.0, -price_advantage))
+    net_grid_absorb_ratio = float(
+        np.clip(
+            (net_grid_need_ratio - 0.75 * gt_min_ratio)
+            / max(_NORM_EPS, 1.0 - 0.75 * gt_min_ratio),
+            0.0,
+            1.0,
+        )
+    )
+    cogen_support_need = max(heat_support_need, 0.55 * cool_support_need)
+    support_commit_floor = float(
+        np.clip(
+            (0.55 * heat_support_need + 0.25 * cool_support_need)
+            * (0.20 + 0.80 * max(0.0, price_advantage)),
+            0.0,
+            1.0,
+        )
+    )
+    commit_score = float(
+        np.clip(
+            max(
+                market_commit * max(net_grid_absorb_ratio, 0.40 * cogen_support_need),
+                support_commit_floor,
+            ),
+            0.0,
+            1.0,
+        )
+    )
+    low_load_relief = float(
+        np.clip(
+            (gt_min_ratio - net_grid_need_ratio) / max(_NORM_EPS, gt_min_ratio),
+            0.0,
+            1.0,
+        )
+    )
+    off_score = float(
+        np.clip(
+            (market_off + 0.35 * low_load_relief)
+            * max(0.0, 1.0 - max(net_grid_absorb_ratio, 0.75 * cogen_support_need))
+            * max(0.0, 1.0 - 0.15 * prev_gt_ratio),
+            0.0,
+            1.0,
+        )
+    )
+    opportunity = float(max(commit_score, off_score))
+    if opportunity <= _GT_PRIOR_MIN_OPPORTUNITY:
+        return {
+            "target_u_gt": 0.0,
+            "opportunity": 0.0,
+            "commit_score": float(commit_score),
+            "off_score": float(off_score),
+            "net_grid_need_ratio": float(net_grid_need_ratio),
+            "net_grid_absorb_ratio": float(net_grid_absorb_ratio),
+            "heat_support_need": float(heat_support_need),
+            "cool_support_need": float(cool_support_need),
+            "cogen_support_need": float(cogen_support_need),
+            "price_advantage": float(max(0.0, price_advantage)),
+            "target_load_ratio": 0.0,
+            "mode_weight": 1.0,
+            "mode": "idle",
+        }
+    commit_margin = float(np.clip(commit_score - off_score, 0.0, 1.0))
+    if off_score >= max(commit_score, _GT_PRIOR_MIN_OPPORTUNITY) or commit_margin <= max(
+        _GT_PRIOR_MIN_OPPORTUNITY,
+        0.5 * gt_min_ratio,
+    ):
+        return {
+            "target_u_gt": -1.0,
+            "opportunity": float(off_score),
+            "commit_score": float(commit_score),
+            "off_score": float(off_score),
+            "net_grid_need_ratio": float(net_grid_need_ratio),
+            "net_grid_absorb_ratio": float(net_grid_absorb_ratio),
+            "heat_support_need": float(heat_support_need),
+            "cool_support_need": float(cool_support_need),
+            "cogen_support_need": float(cogen_support_need),
+            "price_advantage": float(max(0.0, price_advantage)),
+            "target_load_ratio": 0.0,
+            "mode_weight": float(1.0 + 0.75 * off_score),
+            "mode": "off",
+        }
+    on_signal = max(net_grid_absorb_ratio, cogen_support_need, market_commit)
+    dispatch_floor_ratio = float(
+        np.clip(
+            gt_min_ratio + 0.12 * on_signal,
+            gt_min_ratio,
+            max(gt_min_ratio, 0.35),
+        )
+    )
+    dispatch_cap_ratio = float(
+        np.clip(
+            0.25 + 0.75 * on_signal,
+            dispatch_floor_ratio,
+            1.0,
+        )
+    )
+    dispatch_strength = float(np.clip(commit_score * on_signal, 0.0, 1.0))
+    target_load_ratio = float(
+        np.clip(
+            dispatch_floor_ratio
+            + (dispatch_cap_ratio - dispatch_floor_ratio) * dispatch_strength,
+            0.0,
+            1.0,
+        )
+    )
+    p_gt_target_mw = _canonicalize_gt_target_np(
+        p_gt_target_mw=target_load_ratio * p_gt_cap_mw,
+        p_gt_low_mw=0.0,
+        p_gt_high_mw=float(env_config.p_gt_cap_mw),
+        gt_min_output_mw=gt_min_output_mw,
+        gt_off_deadband_ratio=gt_off_deadband_ratio,
+    )
+    target_u_gt = float(np.clip(2.0 * (p_gt_target_mw / p_gt_cap_mw) - 1.0, -1.0, 1.0))
+    return {
+        "target_u_gt": float(target_u_gt),
+        "opportunity": float(commit_score),
+        "commit_score": float(commit_score),
+        "off_score": float(off_score),
+        "net_grid_need_ratio": float(net_grid_need_ratio),
+        "net_grid_absorb_ratio": float(net_grid_absorb_ratio),
+        "heat_support_need": float(heat_support_need),
+        "cool_support_need": float(cool_support_need),
+        "cogen_support_need": float(cogen_support_need),
+        "price_advantage": float(max(0.0, price_advantage)),
+        "target_load_ratio": float(target_load_ratio),
+        "mode_weight": float(1.0 + 0.25 * dispatch_strength + 0.35 * commit_margin),
+        "mode": "on",
+    }
+
+
 def _select_bes_full_year_target_np(
     *,
     source_label: str,
@@ -492,6 +729,49 @@ def _allocate_bes_teacher_target_counts(
     }
 
 
+def _allocate_gt_warm_start_mode_counts(
+    *,
+    requested_total: int,
+    on_available: int,
+    off_available: int,
+    idle_available: int,
+) -> dict[str, int]:
+    requested_total = max(0, int(requested_total))
+    available = {
+        "on": max(0, int(on_available)),
+        "off": max(0, int(off_available)),
+        "idle": max(0, int(idle_available)),
+    }
+    if requested_total <= 0:
+        return {mode: 0 for mode in available}
+    planned = {
+        "off": int(round(float(requested_total) * 0.60)),
+        "on": int(round(float(requested_total) * 0.35)),
+    }
+    planned["idle"] = max(0, requested_total - planned["off"] - planned["on"])
+    selected = {
+        mode: min(int(available[mode]), int(planned.get(mode, 0)))
+        for mode in ("on", "off", "idle")
+    }
+    remaining = max(0, requested_total - int(sum(selected.values())))
+    while remaining > 0:
+        progressed = False
+        for mode in ("off", "on", "idle"):
+            if int(selected[mode]) >= int(available[mode]):
+                continue
+            selected[mode] += 1
+            remaining -= 1
+            progressed = True
+            if remaining <= 0:
+                break
+        if not progressed:
+            break
+    return {
+        mode: int(selected[mode])
+        for mode in ("on", "off", "idle")
+    }
+
+
 def _select_temporal_priority_indices(
     *,
     indices: Sequence[int],
@@ -548,6 +828,18 @@ def _gt_anchor_relax_signal_np(
             1.0,
         )
     )
+
+
+def _gt_teacher_direction_consistent_np(
+    *,
+    teacher_u_gt: float,
+    prior_mode: str,
+) -> bool:
+    teacher_gt_on = float(teacher_u_gt) > -0.95
+    normalized_mode = str(prior_mode).strip().lower()
+    if teacher_gt_on:
+        return normalized_mode == "on"
+    return normalized_mode != "on"
 
 
 def _economic_teacher_blend_weight_np(
@@ -918,6 +1210,24 @@ def _build_mixed_economic_teacher_target_np(
     }
 
 
+def _economic_teacher_safe_preserve_weights_np(
+    *,
+    action_keys: Sequence[str],
+) -> np.ndarray:
+    """Preserve cooling and thermal control dimensions during GT/BES teacher fitting."""
+
+    weights = np.ones((len(action_keys),), dtype=np.float32)
+    for index, key in enumerate(action_keys):
+        normalized_key = str(key).strip().lower()
+        if normalized_key in {"u_abs", "u_ech"}:
+            weights[index] = 4.0
+        elif normalized_key == "u_boiler":
+            weights[index] = 3.0
+        elif normalized_key == "u_tes":
+            weights[index] = 2.0
+    return weights
+
+
 def _build_observation_norm(
     *,
     feature_keys: Sequence[str],
@@ -1018,6 +1328,7 @@ class PAFCTD3TrainConfig:
     economic_boiler_proxy_coef: float = 0.0
     economic_abs_tradeoff_coef: float = 0.0
     economic_gt_grid_proxy_coef: float = 0.25
+    economic_gt_distill_coef: float = 0.0
     economic_teacher_distill_coef: float = 0.0
     economic_teacher_proxy_advantage_min: float = 0.02
     economic_teacher_gt_proxy_advantage_min: float = 0.01
@@ -1034,6 +1345,9 @@ class PAFCTD3TrainConfig:
     economic_teacher_tes_action_weight: float = 0.5
     economic_teacher_full_year_warm_start_samples: int = 4096
     economic_teacher_full_year_warm_start_epochs: int = 4
+    economic_gt_full_year_warm_start_samples: int = 0
+    economic_gt_full_year_warm_start_epochs: int = 0
+    economic_gt_full_year_warm_start_u_weight: float = 0.0
     economic_bes_distill_coef: float = 0.0
     economic_bes_prior_u: float = 0.35
     economic_bes_charge_u_scale: float = 1.8
@@ -1119,6 +1433,7 @@ class PAFCTD3TrainConfig:
         self.economic_boiler_proxy_coef = float(self.economic_boiler_proxy_coef)
         self.economic_abs_tradeoff_coef = float(self.economic_abs_tradeoff_coef)
         self.economic_gt_grid_proxy_coef = float(self.economic_gt_grid_proxy_coef)
+        self.economic_gt_distill_coef = float(self.economic_gt_distill_coef)
         self.economic_teacher_distill_coef = float(self.economic_teacher_distill_coef)
         self.economic_teacher_proxy_advantage_min = float(
             self.economic_teacher_proxy_advantage_min
@@ -1164,6 +1479,15 @@ class PAFCTD3TrainConfig:
         )
         self.economic_teacher_full_year_warm_start_epochs = int(
             self.economic_teacher_full_year_warm_start_epochs
+        )
+        self.economic_gt_full_year_warm_start_samples = int(
+            self.economic_gt_full_year_warm_start_samples
+        )
+        self.economic_gt_full_year_warm_start_epochs = int(
+            self.economic_gt_full_year_warm_start_epochs
+        )
+        self.economic_gt_full_year_warm_start_u_weight = float(
+            self.economic_gt_full_year_warm_start_u_weight
         )
         self.economic_bes_distill_coef = float(self.economic_bes_distill_coef)
         self.economic_bes_prior_u = float(self.economic_bes_prior_u)
@@ -1281,6 +1605,8 @@ class PAFCTD3TrainConfig:
             raise ValueError("economic_abs_tradeoff_coef 必须 >= 0。")
         if self.economic_gt_grid_proxy_coef < 0.0:
             raise ValueError("economic_gt_grid_proxy_coef 必须 >= 0。")
+        if self.economic_gt_distill_coef < 0.0:
+            raise ValueError("economic_gt_distill_coef 必须 >= 0。")
         if self.economic_teacher_distill_coef < 0.0:
             raise ValueError("economic_teacher_distill_coef 必须 >= 0。")
         if (
@@ -1331,6 +1657,12 @@ class PAFCTD3TrainConfig:
             raise ValueError("economic_teacher_full_year_warm_start_samples 必须 >= 0。")
         if self.economic_teacher_full_year_warm_start_epochs < 0:
             raise ValueError("economic_teacher_full_year_warm_start_epochs 必须 >= 0。")
+        if self.economic_gt_full_year_warm_start_samples < 0:
+            raise ValueError("economic_gt_full_year_warm_start_samples 必须 >= 0。")
+        if self.economic_gt_full_year_warm_start_epochs < 0:
+            raise ValueError("economic_gt_full_year_warm_start_epochs 必须 >= 0。")
+        if self.economic_gt_full_year_warm_start_u_weight < 0.0:
+            raise ValueError("economic_gt_full_year_warm_start_u_weight 必须 >= 0。")
         if self.economic_bes_distill_coef < 0.0:
             raise ValueError("economic_bes_distill_coef 必须 >= 0。")
         if self.economic_bes_prior_u < 0.0 or self.economic_bes_prior_u > 1.0:
@@ -2195,6 +2527,18 @@ class PAFCTD3Trainer:
             dtype=self.torch.float32,
             device=self.device,
         )
+        safe_preserve_weights = _economic_teacher_safe_preserve_weights_np(
+            action_keys=self.action_keys,
+        ).reshape(1, -1)
+        self.economic_teacher_safe_preserve_weight_np = safe_preserve_weights.astype(
+            np.float32,
+            copy=True,
+        )
+        self.economic_teacher_safe_preserve_weight = self.torch.as_tensor(
+            safe_preserve_weights,
+            dtype=self.torch.float32,
+            device=self.device,
+        )
         (
             self.bes_price_low_threshold,
             self.bes_price_high_threshold,
@@ -2406,6 +2750,27 @@ class PAFCTD3Trainer:
             "enabled": bool(
                 int(self.config.economic_teacher_full_year_warm_start_samples) > 0
                 and int(self.config.economic_teacher_full_year_warm_start_epochs) > 0
+            ),
+            "samples": int(self.config.economic_teacher_full_year_warm_start_samples),
+            "epochs": int(self.config.economic_teacher_full_year_warm_start_epochs),
+            "status": "not_run",
+        }
+        self.actor_gt_warm_start_summary: dict[str, Any] = {
+            "enabled": bool(
+                int(self.config.economic_gt_full_year_warm_start_samples) > 0
+                and int(self.config.economic_gt_full_year_warm_start_epochs) > 0
+                and "u_gt" in self.action_index
+            ),
+            "samples": int(self.config.economic_gt_full_year_warm_start_samples),
+            "epochs": int(self.config.economic_gt_full_year_warm_start_epochs),
+            "u_weight": float(self.config.economic_gt_full_year_warm_start_u_weight),
+            "status": "not_run",
+        }
+        self.actor_teacher_gt_head_warm_start_summary: dict[str, Any] = {
+            "enabled": bool(
+                int(self.config.economic_teacher_full_year_warm_start_samples) > 0
+                and int(self.config.economic_teacher_full_year_warm_start_epochs) > 0
+                and "u_gt" in self.action_index
             ),
             "samples": int(self.config.economic_teacher_full_year_warm_start_samples),
             "epochs": int(self.config.economic_teacher_full_year_warm_start_epochs),
@@ -4199,6 +4564,9 @@ class PAFCTD3Trainer:
         summary = {
             "teacher_target_row_rate": 0.0,
             "teacher_target_dim_rate": 0.0,
+            "gt_price_prior_row_rate": 0.0,
+            "gt_price_prior_on_rate": 0.0,
+            "gt_price_prior_off_rate": 0.0,
             "bes_price_prior_row_rate": 0.0,
             "bes_price_prior_charge_rate": 0.0,
             "bes_price_prior_discharge_rate": 0.0,
@@ -4224,13 +4592,19 @@ class PAFCTD3Trainer:
         teacher_dims = 0
         teacher_sample_weight_boost_sum = 0.0
         teacher_sample_weight_boost_max = 0.0
+        gt_prior_rows = 0
+        gt_prior_on_rows = 0
+        gt_prior_off_rows = 0
         bes_prior_rows = 0
         bes_prior_charge_rows = 0
         bes_prior_discharge_rows = 0
+        u_gt_index = self.action_index.get("u_gt")
         u_bes_index = self.action_index.get("u_bes")
+        u_ech_index = self.action_index.get("u_ech")
         charge_u, discharge_u = self._resolve_bes_prior_u_pair()
 
         for row_index in range(len(warm_targets)):
+            teacher_gt_override = False
             teacher_bes_override = False
             if (
                 row_index < len(teacher_exec)
@@ -4253,8 +4627,63 @@ class PAFCTD3Trainer:
                         teacher_sample_weight_boost_max,
                         teacher_row_boost,
                     )
+                    if u_gt_index is not None:
+                        teacher_gt_override = bool(active_mask[int(u_gt_index)])
                     if u_bes_index is not None:
                         teacher_bes_override = bool(active_mask[int(u_bes_index)])
+
+            if (
+                u_gt_index is not None
+                and not teacher_gt_override
+                and {"price_e", "price_gas", "p_dem_mw", "pv_mw", "wt_mw", "t_amb_k", "heat_backup_min_needed_mw", "abs_drive_margin_k", "qc_dem_mw", "p_gt_prev_mw"}.issubset(
+                    self.observation_index
+                )
+            ):
+                gt_prior = _gt_price_prior_target_np(
+                    price_e=float(observations[row_index, self.observation_index["price_e"]]),
+                    price_gas=float(observations[row_index, self.observation_index["price_gas"]]),
+                    p_dem_mw=float(observations[row_index, self.observation_index["p_dem_mw"]]),
+                    pv_mw=float(observations[row_index, self.observation_index["pv_mw"]]),
+                    wt_mw=float(observations[row_index, self.observation_index["wt_mw"]]),
+                    t_amb_k=float(observations[row_index, self.observation_index["t_amb_k"]]),
+                    heat_backup_min_needed_mw=float(
+                        observations[row_index, self.observation_index["heat_backup_min_needed_mw"]]
+                    ),
+                    abs_drive_margin_k=float(
+                        observations[row_index, self.observation_index["abs_drive_margin_k"]]
+                    ),
+                    qc_dem_mw=float(observations[row_index, self.observation_index["qc_dem_mw"]]),
+                    p_gt_prev_mw=float(observations[row_index, self.observation_index["p_gt_prev_mw"]]),
+                    env_config=self.env_config,
+                    gt_off_deadband_ratio=float(self.config.gt_off_deadband_ratio),
+                    price_low_threshold=float(self.bes_price_low_threshold),
+                    price_high_threshold=float(self.bes_price_high_threshold),
+                    u_bes=(
+                        float(warm_targets[row_index, int(u_bes_index)])
+                        if u_bes_index is not None
+                        else 0.0
+                    ),
+                    u_ech=(
+                        float(warm_targets[row_index, int(u_ech_index)])
+                        if u_ech_index is not None
+                        else 0.0
+                    ),
+                    carbon_tax=float(
+                        observations[row_index, self.observation_index["carbon_tax"]]
+                    )
+                    if "carbon_tax" in self.observation_index
+                    else 0.0,
+                )
+                if float(gt_prior["opportunity"]) > 0.0:
+                    warm_targets[row_index, int(u_gt_index)] = float(gt_prior["target_u_gt"])
+                    sample_weight_boost[row_index, 0] += float(gt_prior["opportunity"]) * float(
+                        gt_prior.get("mode_weight", 1.0)
+                    )
+                    gt_prior_rows += 1
+                    if str(gt_prior["mode"]) == "on":
+                        gt_prior_on_rows += 1
+                    elif str(gt_prior["mode"]) == "off":
+                        gt_prior_off_rows += 1
 
             if u_bes_index is None or teacher_bes_override:
                 continue
@@ -4298,6 +4727,9 @@ class PAFCTD3Trainer:
                     teacher_sample_weight_boost_sum / max(1, teacher_rows)
                 ),
                 "teacher_sample_weight_boost_max": float(teacher_sample_weight_boost_max),
+                "gt_price_prior_row_rate": float(gt_prior_rows / total_rows),
+                "gt_price_prior_on_rate": float(gt_prior_on_rows / total_rows),
+                "gt_price_prior_off_rate": float(gt_prior_off_rows / total_rows),
                 "bes_price_prior_row_rate": float(bes_prior_rows / total_rows),
                 "bes_price_prior_charge_rate": float(bes_prior_charge_rows / total_rows),
                 "bes_price_prior_discharge_rate": float(bes_prior_discharge_rows / total_rows),
@@ -4861,6 +5293,97 @@ class PAFCTD3Trainer:
             dtype=self.torch.float32,
             device=self.device,
         )
+        teacher_mask_tensor_shared = teacher_mask_tensor.clone()
+        self.actor_teacher_gt_head_warm_start_summary = {
+            "enabled": bool("u_gt" in self.action_index),
+            "samples": int(obs_tensor.shape[0]),
+            "epochs": int(self.config.economic_teacher_full_year_warm_start_epochs),
+            "status": "skipped_no_gt_targets",
+        }
+        u_gt_index = self.action_index.get("u_gt")
+        gt_head_linear = None
+        if (
+            u_gt_index is not None
+            and hasattr(self.actor, "net")
+            and isinstance(getattr(self.actor, "net"), self.torch.nn.Sequential)
+            and len(self.actor.net) > 0
+            and isinstance(self.actor.net[-1], self.torch.nn.Linear)
+        ):
+            gt_head_linear = self.actor.net[-1]
+        if u_gt_index is not None and gt_head_linear is not None:
+            gt_row_mask = teacher_mask_tensor[:, int(u_gt_index) : int(u_gt_index) + 1] > 0.5
+            gt_row_indices = self.torch.nonzero(gt_row_mask.reshape(-1), as_tuple=False).reshape(-1)
+            if int(gt_row_indices.numel()) > 0:
+                gt_optimizer = AdamW(
+                    [gt_head_linear.weight, gt_head_linear.bias],
+                    lr=float(self.config.actor_warm_start_lr),
+                )
+                gt_epoch_losses: list[float] = []
+                gt_batch_size = min(int(self.config.actor_warm_start_batch_size), int(gt_row_indices.numel()))
+                gt_indices_np = gt_row_indices.detach().cpu().numpy().astype(np.int64, copy=True)
+                for _ in range(int(self.config.economic_teacher_full_year_warm_start_epochs)):
+                    self.rng.shuffle(gt_indices_np)
+                    batch_losses: list[float] = []
+                    for start in range(0, int(len(gt_indices_np)), int(gt_batch_size)):
+                        batch_indices = gt_indices_np[start : start + int(gt_batch_size)]
+                        batch_obs = obs_tensor[batch_indices]
+                        batch_gt_target = teacher_action_tensor[
+                            batch_indices,
+                            int(u_gt_index) : int(u_gt_index) + 1,
+                        ]
+                        batch_gt_weight = sample_weight_tensor[batch_indices]
+                        prediction = self.actor(self._normalize_observation_tensor(batch_obs))
+                        prediction = self._apply_abs_cooling_blend_tensor(
+                            obs_batch=batch_obs,
+                            action_batch=prediction,
+                        )
+                        gt_loss = (
+                            (batch_gt_weight * (prediction[:, int(u_gt_index) : int(u_gt_index) + 1] - batch_gt_target).pow(2)).sum()
+                            / batch_gt_weight.sum().clamp_min(1.0)
+                        )
+                        gt_optimizer.zero_grad(set_to_none=True)
+                        gt_loss.backward()
+                        if gt_head_linear.weight.grad is not None:
+                            keep_weight = self.torch.zeros_like(gt_head_linear.weight.grad)
+                            keep_weight[int(u_gt_index) : int(u_gt_index) + 1, :] = 1.0
+                            gt_head_linear.weight.grad.mul_(keep_weight)
+                        if gt_head_linear.bias.grad is not None:
+                            keep_bias = self.torch.zeros_like(gt_head_linear.bias.grad)
+                            keep_bias[int(u_gt_index) : int(u_gt_index) + 1] = 1.0
+                            gt_head_linear.bias.grad.mul_(keep_bias)
+                        gt_optimizer.step()
+                        batch_losses.append(float(gt_loss.detach().cpu().item()))
+                    gt_epoch_losses.append(float(np.mean(batch_losses)) if batch_losses else 0.0)
+                teacher_mask_tensor_shared[:, int(u_gt_index) : int(u_gt_index) + 1] = 0.0
+                self.actor_teacher_gt_head_warm_start_summary = {
+                    "enabled": True,
+                    "samples": int(gt_row_indices.numel()),
+                    "epochs": int(self.config.economic_teacher_full_year_warm_start_epochs),
+                    "status": "applied",
+                    "batch_size": int(gt_batch_size),
+                    "lr": float(self.config.actor_warm_start_lr),
+                    "loss_first": float(gt_epoch_losses[0]) if gt_epoch_losses else 0.0,
+                    "loss_last": float(gt_epoch_losses[-1]) if gt_epoch_losses else 0.0,
+                }
+            else:
+                self.actor_teacher_gt_head_warm_start_summary = {
+                    "enabled": True,
+                    "samples": 0,
+                    "epochs": int(self.config.economic_teacher_full_year_warm_start_epochs),
+                    "status": "skipped_no_gt_targets",
+                }
+        elif u_gt_index is not None:
+            self.actor_teacher_gt_head_warm_start_summary = {
+                "enabled": True,
+                "samples": 0,
+                "epochs": int(self.config.economic_teacher_full_year_warm_start_epochs),
+                "status": "skipped_missing_linear_head",
+            }
+        safe_preserve_weight_tensor = self.torch.as_tensor(
+            _economic_teacher_safe_preserve_weights_np(action_keys=self.action_keys).reshape(1, -1),
+            dtype=self.torch.float32,
+            device=self.device,
+        )
         batch_size = min(int(self.config.actor_warm_start_batch_size), int(obs_tensor.shape[0]))
         indices = np.arange(int(obs_tensor.shape[0]), dtype=np.int64)
         epoch_losses: list[float] = []
@@ -4875,7 +5398,7 @@ class PAFCTD3Trainer:
                 batch_obs = obs_tensor[batch_indices]
                 batch_base_target = base_action_tensor[batch_indices]
                 batch_teacher_target = teacher_action_tensor[batch_indices]
-                batch_teacher_mask = teacher_mask_tensor[batch_indices]
+                batch_teacher_mask = teacher_mask_tensor_shared[batch_indices]
                 batch_sample_weight = sample_weight_tensor[batch_indices]
                 prediction = self.actor(self._normalize_observation_tensor(batch_obs))
                 prediction = self._apply_abs_cooling_blend_tensor(
@@ -4883,12 +5406,13 @@ class PAFCTD3Trainer:
                     action_batch=prediction,
                 )
                 batch_safe_mask = self.torch.clamp(1.0 - batch_teacher_mask, 0.0, 1.0)
+                weighted_safe_mask = batch_safe_mask * safe_preserve_weight_tensor
                 safe_loss = (
-                    ((prediction - batch_base_target).pow(2) * batch_safe_mask).sum(
+                    ((prediction - batch_base_target).pow(2) * weighted_safe_mask).sum(
                         dim=1,
                         keepdim=True,
                     )
-                    / batch_safe_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+                    / weighted_safe_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
                 ).mean()
                 teacher_sq = (
                     ((prediction - batch_teacher_target).pow(2) * batch_teacher_mask).sum(
@@ -4923,9 +5447,459 @@ class PAFCTD3Trainer:
                 "loss_last": float(epoch_losses[-1]) if epoch_losses else 0.0,
                 "teacher_loss_first": float(epoch_teacher_losses[0]) if epoch_teacher_losses else 0.0,
                 "teacher_loss_last": float(epoch_teacher_losses[-1]) if epoch_teacher_losses else 0.0,
+                "safe_preserve_weights": {
+                    str(key): float(value)
+                    for key, value in zip(
+                        self.action_keys,
+                        _economic_teacher_safe_preserve_weights_np(action_keys=self.action_keys),
+                    )
+                },
             }
         )
         self.actor_teacher_full_year_warm_start_summary = final_summary
+
+    def _collect_gt_full_year_warm_start_dataset(
+        self,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+        empty_obs = np.zeros((0, len(self.observation_keys)), dtype=np.float32)
+        empty_actions = np.zeros((0, len(self.action_keys)), dtype=np.float32)
+        empty_targets = np.zeros((0, 1), dtype=np.float32)
+        empty_weights = np.zeros((0, 1), dtype=np.float32)
+        summary = {
+            "enabled": bool(
+                int(self.config.economic_gt_full_year_warm_start_samples) > 0
+                and int(self.config.economic_gt_full_year_warm_start_epochs) > 0
+            ),
+            "requested_samples": int(self.config.economic_gt_full_year_warm_start_samples),
+            "epochs": int(self.config.economic_gt_full_year_warm_start_epochs),
+            "u_weight": float(self.config.economic_gt_full_year_warm_start_u_weight),
+            "status": "disabled",
+            "samples": 0,
+        }
+        if not bool(summary["enabled"]):
+            return empty_obs, empty_actions, empty_targets, empty_weights, summary
+        required_obs = {
+            "price_e",
+            "price_gas",
+            "p_dem_mw",
+            "pv_mw",
+            "wt_mw",
+            "t_amb_k",
+            "heat_backup_min_needed_mw",
+            "abs_drive_margin_k",
+            "qc_dem_mw",
+            "p_gt_prev_mw",
+        }
+        required_actions = {"u_gt", "u_bes", "u_ech"}
+        if (
+            not required_obs.issubset(self.observation_index)
+            or not required_actions.issubset(self.action_index)
+        ):
+            summary["status"] = "missing_gt_features"
+            return empty_obs, empty_actions, empty_targets, empty_weights, summary
+
+        expert_policy, expert_policy_info = self._build_expert_policy()
+        rollout = self._rollout_expert_prefill_episode(
+            expert_policy=expert_policy,
+            expert_policy_info=expert_policy_info,
+            episode_df=self.train_df.reset_index(drop=True),
+            episode_seed=int(self.config.seed) + 920_000,
+            max_steps=int(len(self.train_df)),
+            abs_exec_threshold=float(self.config.expert_prefill_abs_exec_threshold),
+            collect_teacher_targets=bool(self.economic_teacher_policy is not None),
+        )
+        transitions = tuple(rollout.get("transitions", ()))
+        summary.update(
+            {
+                "status": "no_rollout",
+                "teacher": dict(expert_policy_info),
+                "rollout_steps": int(len(transitions)),
+                "economic_teacher_available": bool(self.economic_teacher_policy is not None),
+            }
+        )
+        if not transitions:
+            return empty_obs, empty_actions, empty_targets, empty_weights, summary
+
+        u_gt_index = int(self.action_index["u_gt"])
+        u_bes_index = int(self.action_index["u_bes"])
+        u_ech_index = int(self.action_index["u_ech"])
+        teacher_on_indices: list[int] = []
+        teacher_off_indices: list[int] = []
+        prior_on_indices: list[int] = []
+        prior_off_indices: list[int] = []
+        idle_indices: list[int] = []
+        target_u_rows = np.zeros((len(transitions), 1), dtype=np.float32)
+        priorities = np.zeros((len(transitions),), dtype=np.float32)
+        sample_weights = np.ones((len(transitions), 1), dtype=np.float32)
+        sampled_modes_all: list[str] = []
+        sampled_sources_all: list[str] = []
+        teacher_target_count = 0
+        teacher_target_on_count = 0
+        teacher_target_off_count = 0
+        prior_fallback_count = 0
+        prior_fallback_on_count = 0
+        prior_fallback_off_count = 0
+        prior_fallback_idle_count = 0
+        for idx, transition in enumerate(transitions):
+            obs_vector = np.asarray(transition["obs"], dtype=np.float32).reshape(-1)
+            action_exec = np.asarray(transition["action_exec"], dtype=np.float32).reshape(-1)
+            teacher_action_exec = np.asarray(
+                transition.get("teacher_action_exec", np.zeros((len(self.action_keys),), dtype=np.float32)),
+                dtype=np.float32,
+            ).reshape(-1)
+            teacher_action_mask = np.asarray(
+                transition.get("teacher_action_mask", np.zeros((len(self.action_keys),), dtype=np.float32)),
+                dtype=np.float32,
+            ).reshape(-1)
+            teacher_gt_available = bool(transition.get("teacher_available", False)) and bool(
+                float(teacher_action_mask[u_gt_index]) > 0.5
+            )
+            prior = _gt_price_prior_target_np(
+                price_e=float(obs_vector[self.observation_index["price_e"]]),
+                price_gas=float(obs_vector[self.observation_index["price_gas"]]),
+                p_dem_mw=float(obs_vector[self.observation_index["p_dem_mw"]]),
+                pv_mw=float(obs_vector[self.observation_index["pv_mw"]]),
+                wt_mw=float(obs_vector[self.observation_index["wt_mw"]]),
+                t_amb_k=float(obs_vector[self.observation_index["t_amb_k"]]),
+                heat_backup_min_needed_mw=float(
+                    obs_vector[self.observation_index["heat_backup_min_needed_mw"]]
+                ),
+                abs_drive_margin_k=float(obs_vector[self.observation_index["abs_drive_margin_k"]]),
+                qc_dem_mw=float(obs_vector[self.observation_index["qc_dem_mw"]]),
+                p_gt_prev_mw=float(obs_vector[self.observation_index["p_gt_prev_mw"]]),
+                env_config=self.env_config,
+                gt_off_deadband_ratio=float(self.config.gt_off_deadband_ratio),
+                price_low_threshold=float(self.bes_price_low_threshold),
+                price_high_threshold=float(self.bes_price_high_threshold),
+                u_bes=float(action_exec[u_bes_index]),
+                u_ech=float(action_exec[u_ech_index]),
+                carbon_tax=float(obs_vector[self.observation_index["carbon_tax"]])
+                if "carbon_tax" in self.observation_index
+                else 0.0,
+            )
+            teacher_gt_consistent = teacher_gt_available and _gt_teacher_direction_consistent_np(
+                teacher_u_gt=float(teacher_action_exec[u_gt_index]),
+                prior_mode=str(prior["mode"]),
+            )
+            if teacher_gt_consistent:
+                row_stats = self._compute_economic_teacher_full_year_row_priority(
+                    obs_vector=obs_vector,
+                    action_exec=action_exec,
+                    teacher_action_exec=teacher_action_exec,
+                    teacher_action_mask=teacher_action_mask,
+                )
+                target_u = float(np.clip(teacher_action_exec[u_gt_index], -1.0, 1.0))
+                mode = "off" if target_u <= -0.95 else "on"
+                source = "teacher"
+                target_u_rows[idx, 0] = target_u
+                priorities[idx] = max(0.0, float(row_stats["priority"]))
+                sample_weights[idx, 0] = max(1.0, float(row_stats["sample_weight"]))
+                teacher_target_count += 1
+                if mode == "on":
+                    teacher_on_indices.append(int(idx))
+                    teacher_target_on_count += 1
+                else:
+                    teacher_off_indices.append(int(idx))
+                    teacher_target_off_count += 1
+            else:
+                mode = str(prior["mode"])
+                source = "prior"
+                target_u_rows[idx, 0] = float(prior["target_u_gt"])
+                if mode == "on":
+                    priorities[idx] = (
+                        float(prior["opportunity"])
+                        * float(prior.get("mode_weight", 1.0))
+                        * (0.25 + 0.75 * float(prior.get("target_load_ratio", 0.0)))
+                    )
+                elif mode == "off":
+                    priorities[idx] = (
+                        float(prior["opportunity"])
+                        * float(prior.get("mode_weight", 1.0))
+                        * 1.25
+                    )
+                else:
+                    priorities[idx] = 0.0
+                sample_weights[idx, 0] = (
+                    1.0
+                    + priorities[idx]
+                    + float(float(target_u_rows[idx, 0]) <= -0.95)
+                )
+                prior_fallback_count += 1
+                if mode == "on":
+                    prior_on_indices.append(int(idx))
+                    prior_fallback_on_count += 1
+                elif mode == "off":
+                    prior_off_indices.append(int(idx))
+                    prior_fallback_off_count += 1
+                else:
+                    idle_indices.append(int(idx))
+                    prior_fallback_idle_count += 1
+            sampled_modes_all.append(mode)
+            sampled_sources_all.append(source)
+
+        requested_samples = min(
+            int(self.config.economic_gt_full_year_warm_start_samples),
+            int(len(transitions)),
+        )
+        total_on_available = len(teacher_on_indices) + len(prior_on_indices)
+        total_off_available = len(teacher_off_indices) + len(prior_off_indices)
+        mode_counts = _allocate_gt_warm_start_mode_counts(
+            requested_total=requested_samples,
+            on_available=total_on_available,
+            off_available=total_off_available,
+            idle_available=len(idle_indices),
+        )
+        desired_on = int(mode_counts["on"])
+        desired_off = int(mode_counts["off"])
+        desired_idle = int(mode_counts["idle"])
+        selected_indices: list[int] = []
+        teacher_selected_on = _select_temporal_priority_indices(
+            indices=teacher_on_indices,
+            priorities=priorities,
+            target_count=min(desired_on, len(teacher_on_indices)),
+        )
+        selected_indices.extend(teacher_selected_on)
+        teacher_selected_off = _select_temporal_priority_indices(
+            indices=teacher_off_indices,
+            priorities=priorities,
+            target_count=min(desired_off, len(teacher_off_indices)),
+        )
+        selected_indices.extend(teacher_selected_off)
+        remaining_on = max(0, desired_on - len(teacher_selected_on))
+        remaining_off = max(0, desired_off - len(teacher_selected_off))
+        selected_indices.extend(
+            _select_temporal_priority_indices(
+                indices=prior_on_indices,
+                priorities=priorities,
+                target_count=remaining_on,
+            )
+        )
+        selected_indices.extend(
+            _select_temporal_priority_indices(
+                indices=prior_off_indices,
+                priorities=priorities,
+                target_count=remaining_off,
+            )
+        )
+        selected_indices.extend(
+            _select_temporal_priority_indices(
+                indices=idle_indices,
+                priorities=priorities,
+                target_count=desired_idle,
+            )
+        )
+        selected_set = {int(idx) for idx in selected_indices}
+        remaining_teacher_indices = [
+            idx
+            for idx in range(len(transitions))
+            if int(idx) not in selected_set and sampled_sources_all[int(idx)] == "teacher"
+        ]
+        if len(selected_set) < requested_samples:
+            fill_teacher_indices = _select_temporal_priority_indices(
+                indices=remaining_teacher_indices,
+                priorities=priorities,
+                target_count=int(requested_samples - len(selected_set)),
+            )
+            selected_set.update(int(idx) for idx in fill_teacher_indices)
+        remaining_indices = [idx for idx in range(len(transitions)) if int(idx) not in selected_set]
+        if len(selected_set) < requested_samples:
+            fill_indices = _select_temporal_priority_indices(
+                indices=remaining_indices,
+                priorities=priorities,
+                target_count=int(requested_samples - len(selected_set)),
+            )
+            selected_set.update(int(idx) for idx in fill_indices)
+        selected_indices = sorted(selected_set)
+        if not selected_indices:
+            summary["status"] = "no_selected_samples"
+            return empty_obs, empty_actions, empty_targets, empty_weights, summary
+
+        obs_rows: list[np.ndarray] = []
+        action_exec_rows: list[np.ndarray] = []
+        sampled_mode_counts = {"on": 0, "off": 0, "idle": 0}
+        sampled_source_counts = {"teacher": 0, "prior": 0}
+        replay_augmented_steps = 0
+        for idx in selected_indices:
+            transition = transitions[int(idx)]
+            mode = str(sampled_modes_all[int(idx)])
+            if mode not in sampled_mode_counts:
+                mode = "idle"
+            sampled_mode_counts[mode] += 1
+            source = str(sampled_sources_all[int(idx)])
+            if source not in sampled_source_counts:
+                source = "prior"
+            sampled_source_counts[source] += 1
+            obs_rows.append(np.asarray(transition["obs"], dtype=np.float32).copy())
+            action_exec_rows.append(np.asarray(transition["action_exec"], dtype=np.float32).copy())
+            self.replay.add(
+                obs=np.asarray(transition["obs"], dtype=np.float32).copy(),
+                next_obs=np.asarray(transition["next_obs"], dtype=np.float32).copy(),
+                action_raw=np.asarray(transition["action_raw"], dtype=np.float32).copy(),
+                action_exec=np.asarray(transition["action_exec"], dtype=np.float32).copy(),
+                teacher_action_exec=np.asarray(
+                    transition["teacher_action_exec"],
+                    dtype=np.float32,
+                ).copy(),
+                teacher_action_mask=np.asarray(
+                    transition["teacher_action_mask"],
+                    dtype=np.float32,
+                ).copy(),
+                teacher_available=bool(transition["teacher_available"]),
+                reward=float(transition["reward"]),
+                cost=np.asarray(transition["cost"], dtype=np.float32).copy(),
+                gap=np.asarray(transition["gap"], dtype=np.float32).copy(),
+                done=bool(transition["done"]),
+            )
+            replay_augmented_steps += 1
+
+        selected_indices_np = np.asarray(selected_indices, dtype=np.int64)
+        selected_weights = np.asarray(sample_weights[selected_indices_np], dtype=np.float32).reshape(-1, 1)
+        summary.update(
+            {
+                "status": "ready",
+                "samples": int(len(selected_indices)),
+                "teacher_target_count": int(teacher_target_count),
+                "teacher_target_on_count": int(teacher_target_on_count),
+                "teacher_target_off_count": int(teacher_target_off_count),
+                "prior_fallback_count": int(prior_fallback_count),
+                "prior_fallback_on_count": int(prior_fallback_on_count),
+                "prior_fallback_off_count": int(prior_fallback_off_count),
+                "prior_fallback_idle_count": int(prior_fallback_idle_count),
+                "available_on_count": int(total_on_available),
+                "available_off_count": int(total_off_available),
+                "available_idle_count": int(len(idle_indices)),
+                "sampled_on_count": int(sampled_mode_counts["on"]),
+                "sampled_off_count": int(sampled_mode_counts["off"]),
+                "sampled_idle_count": int(sampled_mode_counts["idle"]),
+                "sampled_teacher_count": int(sampled_source_counts["teacher"]),
+                "sampled_prior_count": int(sampled_source_counts["prior"]),
+                "sampled_teacher_rate": float(
+                    sampled_source_counts["teacher"] / max(1, len(selected_indices))
+                ),
+                "sampled_priority_mean": float(
+                    np.asarray(priorities[selected_indices_np], dtype=np.float32).mean()
+                ),
+                "sampled_target_abs_mean": float(
+                    np.asarray(np.abs(target_u_rows[selected_indices_np]), dtype=np.float32).mean()
+                ),
+                "sample_weight_mean": float(selected_weights.mean()),
+                "replay_augmented_steps": int(replay_augmented_steps),
+                "price_low_threshold": float(self.bes_price_low_threshold),
+                "price_high_threshold": float(self.bes_price_high_threshold),
+            }
+        )
+        return (
+            np.asarray(obs_rows, dtype=np.float32),
+            np.asarray(action_exec_rows, dtype=np.float32),
+            np.asarray(target_u_rows[selected_indices_np], dtype=np.float32),
+            np.asarray(selected_weights, dtype=np.float32),
+            summary,
+        )
+
+    def _warm_start_actor_from_gt_full_year(self) -> None:
+        (
+            observations,
+            action_exec_targets,
+            target_u_gt,
+            sample_weights,
+            summary,
+        ) = self._collect_gt_full_year_warm_start_dataset()
+        if observations.size == 0 or action_exec_targets.size == 0 or target_u_gt.size == 0:
+            self.actor_gt_warm_start_summary = dict(summary)
+            return
+
+        _, _, _, AdamW = _require_torch_modules()
+        optimizer = AdamW(self.actor.parameters(), lr=float(self.config.actor_warm_start_lr))
+        obs_tensor = self.torch.as_tensor(observations, dtype=self.torch.float32, device=self.device)
+        base_action_tensor = self.torch.as_tensor(
+            action_exec_targets,
+            dtype=self.torch.float32,
+            device=self.device,
+        )
+        target_u_tensor = self.torch.as_tensor(
+            target_u_gt,
+            dtype=self.torch.float32,
+            device=self.device,
+        )
+        sample_weight_tensor = self.torch.as_tensor(
+            sample_weights,
+            dtype=self.torch.float32,
+            device=self.device,
+        )
+        preserve_scale = _economic_teacher_safe_preserve_weights_np(
+            action_keys=self.action_keys,
+        ).reshape(1, -1)
+        u_gt_index = int(self.action_index["u_gt"])
+        preserve_scale[:, u_gt_index] = 0.0
+        preserve_scale_tensor = self.torch.as_tensor(
+            preserve_scale,
+            dtype=self.torch.float32,
+            device=self.device,
+        )
+        batch_size = min(int(self.config.actor_warm_start_batch_size), int(obs_tensor.shape[0]))
+        indices = np.arange(int(obs_tensor.shape[0]), dtype=np.int64)
+        epoch_losses: list[float] = []
+        epoch_gt_losses: list[float] = []
+
+        for _ in range(int(self.config.economic_gt_full_year_warm_start_epochs)):
+            self.rng.shuffle(indices)
+            batch_losses: list[float] = []
+            batch_gt_losses: list[float] = []
+            for start in range(0, int(len(indices)), int(batch_size)):
+                batch_indices = indices[start : start + int(batch_size)]
+                batch_obs = obs_tensor[batch_indices]
+                batch_base_target = base_action_tensor[batch_indices]
+                batch_target_u = target_u_tensor[batch_indices]
+                batch_weight = sample_weight_tensor[batch_indices]
+                prediction = self.actor(self._normalize_observation_tensor(batch_obs))
+                prediction = self._apply_abs_cooling_blend_tensor(
+                    obs_batch=batch_obs,
+                    action_batch=prediction,
+                )
+                safe_loss = (
+                    ((prediction - batch_base_target).pow(2) * preserve_scale_tensor).mean(
+                        dim=1,
+                        keepdim=True,
+                    )
+                ).mean()
+                gt_prediction = prediction[:, u_gt_index : u_gt_index + 1]
+                gt_loss = (
+                    batch_weight * (gt_prediction - batch_target_u).pow(2)
+                ).sum() / batch_weight.sum().clamp_min(1.0)
+                loss = safe_loss + (
+                    float(self.config.economic_gt_full_year_warm_start_u_weight) * gt_loss
+                )
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                optimizer.step()
+                batch_losses.append(float(loss.detach().cpu().item()))
+                batch_gt_losses.append(float(gt_loss.detach().cpu().item()))
+            epoch_losses.append(float(np.mean(batch_losses)) if batch_losses else 0.0)
+            epoch_gt_losses.append(float(np.mean(batch_gt_losses)) if batch_gt_losses else 0.0)
+
+        self.actor_target.load_state_dict(self.actor.state_dict())
+        self.actor_optimizer = AdamW(self.actor.parameters(), lr=float(self.config.actor_lr))
+        self.current_actor_lr = float(self.config.actor_lr)
+        final_summary = dict(summary)
+        final_summary.update(
+            {
+                "status": "applied",
+                "batch_size": int(batch_size),
+                "lr": float(self.config.actor_warm_start_lr),
+                "loss_first": float(epoch_losses[0]) if epoch_losses else 0.0,
+                "loss_last": float(epoch_losses[-1]) if epoch_losses else 0.0,
+                "gt_loss_first": float(epoch_gt_losses[0]) if epoch_gt_losses else 0.0,
+                "gt_loss_last": float(epoch_gt_losses[-1]) if epoch_gt_losses else 0.0,
+                "target_positive_rate": float(
+                    (target_u_tensor > 0.0).float().mean().detach().cpu().item()
+                ),
+                "target_off_rate": float(
+                    (target_u_tensor < -0.95).float().mean().detach().cpu().item()
+                ),
+                "target_abs_mean": float(target_u_tensor.abs().mean().detach().cpu().item()),
+            }
+        )
+        self.actor_gt_warm_start_summary = final_summary
 
     def _collect_bes_full_year_warm_start_dataset(
         self,
@@ -5576,6 +6550,347 @@ class PAFCTD3Trainer:
             "pressure_bonus": pressure_bonus,
         }
 
+    def _compute_gt_price_prior_terms(self, *, obs_batch, action_exec_batch):
+        required_obs = {
+            "p_dem_mw",
+            "pv_mw",
+            "wt_mw",
+            "price_e",
+            "price_gas",
+            "t_amb_k",
+            "heat_backup_min_needed_mw",
+            "abs_drive_margin_k",
+            "qc_dem_mw",
+            "p_gt_prev_mw",
+        }
+        required_actions = {"u_gt", "u_bes", "u_ech"}
+        if (
+            not required_obs.issubset(self.observation_index)
+            or not required_actions.issubset(self.action_index)
+        ):
+            return None
+        p_dem_index = int(self.observation_index["p_dem_mw"])
+        pv_index = int(self.observation_index["pv_mw"])
+        wt_index = int(self.observation_index["wt_mw"])
+        price_e_index = int(self.observation_index["price_e"])
+        price_gas_index = int(self.observation_index["price_gas"])
+        t_amb_index = int(self.observation_index["t_amb_k"])
+        heat_backup_index = int(self.observation_index["heat_backup_min_needed_mw"])
+        abs_margin_index = int(self.observation_index["abs_drive_margin_k"])
+        qc_index = int(self.observation_index["qc_dem_mw"])
+        p_gt_prev_index = int(self.observation_index["p_gt_prev_mw"])
+        u_gt_index = int(self.action_index["u_gt"])
+        u_bes_index = int(self.action_index["u_bes"])
+        u_ech_index = int(self.action_index["u_ech"])
+        price_e = obs_batch[:, price_e_index : price_e_index + 1]
+        price_gas = obs_batch[:, price_gas_index : price_gas_index + 1]
+        carbon_tax = self.torch.zeros_like(price_e)
+        if "carbon_tax" in self.observation_index:
+            carbon_tax_index = int(self.observation_index["carbon_tax"])
+            carbon_tax = obs_batch[:, carbon_tax_index : carbon_tax_index + 1].clamp_min(0.0)
+        low_price = float(self.bes_price_low_threshold)
+        high_price = max(low_price + _NORM_EPS, float(self.bes_price_high_threshold))
+        mid_price = 0.5 * (low_price + high_price)
+        charge_span = max(_NORM_EPS, mid_price - low_price)
+        discharge_span = max(_NORM_EPS, high_price - mid_price)
+        grid_price_low = self.torch.clamp((mid_price - price_e) / charge_span, 0.0, 1.0)
+        grid_price_high = self.torch.clamp((price_e - mid_price) / discharge_span, 0.0, 1.0)
+        u_bes_exec = action_exec_batch[:, u_bes_index : u_bes_index + 1].clamp(-1.0, 1.0)
+        u_ech_exec = action_exec_batch[:, u_ech_index : u_ech_index + 1].clamp(0.0, 1.0)
+        p_gt_cap_mw = max(_NORM_EPS, float(self.env_config.p_gt_cap_mw))
+        gt_min_output_mw = max(0.0, float(self.env_config.gt_min_output_mw))
+        gt_min_ratio = float(
+            np.clip(
+                gt_min_output_mw / p_gt_cap_mw,
+                0.0,
+                1.0,
+            )
+        )
+        p_bes_charge_proxy_mw = (
+            (-u_bes_exec).clamp_min(0.0)
+            * float(self.env_config.p_bes_cap_mw)
+            / max(_NORM_EPS, float(self.env_config.bes_eta_charge))
+        )
+        p_bes_discharge_proxy_mw = (
+            u_bes_exec.clamp_min(0.0)
+            * float(self.env_config.p_bes_cap_mw)
+            * float(self.env_config.bes_eta_discharge)
+        )
+        q_ech_proxy_mw = u_ech_exec * float(self.env_config.q_ech_cap_mw)
+        ech_cop = (
+            float(self.env_config.cop_nominal)
+            - 0.03 * (obs_batch[:, t_amb_index : t_amb_index + 1] - 298.15)
+        ).clamp(
+            min=float(self.env_config.cop_nominal) * float(self.env_config.ech_cop_partload_min_fraction),
+            max=float(self.env_config.cop_nominal),
+        )
+        p_ech_proxy_mw = q_ech_proxy_mw / ech_cop.clamp_min(_NORM_EPS)
+        net_grid_need_ratio = self.torch.clamp(
+            (
+                obs_batch[:, p_dem_index : p_dem_index + 1]
+                + p_ech_proxy_mw
+                + p_bes_charge_proxy_mw
+                - obs_batch[:, pv_index : pv_index + 1]
+                - obs_batch[:, wt_index : wt_index + 1]
+                - p_bes_discharge_proxy_mw
+            )
+            / p_gt_cap_mw,
+            0.0,
+            1.0,
+        )
+        heat_support_need = self.torch.clamp(
+            obs_batch[:, heat_backup_index : heat_backup_index + 1]
+            / max(_NORM_EPS, float(self.env_config.q_boiler_cap_mw)),
+            0.0,
+            1.0,
+        )
+        qc_need_ratio = self.torch.clamp(
+            obs_batch[:, qc_index : qc_index + 1]
+            / max(
+                _NORM_EPS,
+                max(float(self.env_config.q_abs_cool_cap_mw), float(self.env_config.q_ech_cap_mw)),
+            ),
+            0.0,
+            1.0,
+        )
+        abs_ready = self.torch.sigmoid(
+            obs_batch[:, abs_margin_index : abs_margin_index + 1]
+            / max(_NORM_EPS, float(self.env_config.abs_gate_scale_k))
+        )
+        cool_support_need = self.torch.clamp(
+            qc_need_ratio * self.torch.clamp(abs_ready, min=0.35, max=1.0),
+            0.0,
+            1.0,
+        )
+        prev_gt_ratio = self.torch.clamp(
+            obs_batch[:, p_gt_prev_index : p_gt_prev_index + 1] / p_gt_cap_mw,
+            0.0,
+            1.0,
+        )
+        eta_ref_ratio = self.torch.clamp(
+            self.torch.maximum(
+                prev_gt_ratio.add(net_grid_need_ratio).mul(0.5),
+                self.torch.full_like(prev_gt_ratio, float(gt_min_ratio)),
+            ),
+            0.0,
+            1.0,
+        )
+        eta_ref = float(self.env_config.gt_eta_min) + (
+            float(self.env_config.gt_eta_max) - float(self.env_config.gt_eta_min)
+        ) * eta_ref_ratio
+        gt_dispatch_basis_mw = max(gt_min_output_mw, 0.25 * p_gt_cap_mw, _NORM_EPS)
+        startup_basis_mwh = max(
+            _NORM_EPS,
+            float(getattr(self.env_config, "dt_hours", 0.25)) * gt_dispatch_basis_mw,
+        )
+        startup_off_factor = 1.0 - self.torch.clamp(
+            obs_batch[:, p_gt_prev_index : p_gt_prev_index + 1] / gt_dispatch_basis_mw,
+            0.0,
+            1.0,
+        )
+        gt_marginal_cost = (
+            price_gas / eta_ref.clamp_min(_NORM_EPS)
+            + float(getattr(self.env_config, "gt_om_var_cost_per_mwh", 0.0))
+            + carbon_tax
+            * float(getattr(self.env_config, "gt_emission_ton_per_mwh_th", 0.0))
+            / eta_ref.clamp_min(_NORM_EPS)
+            + startup_off_factor
+            * (
+                float(getattr(self.env_config, "gt_start_cost", 0.0))
+                + float(getattr(self.env_config, "gt_cycle_cost", 0.0))
+            )
+            / startup_basis_mwh
+        )
+        price_advantage = self.torch.clamp(
+            (price_e - gt_marginal_cost)
+            / self.torch.maximum(price_e, gt_marginal_cost).clamp_min(_NORM_EPS),
+            -1.0,
+            1.0,
+        )
+        market_commit = self.torch.maximum(grid_price_high, price_advantage.clamp_min(0.0))
+        market_off = self.torch.maximum(grid_price_low, (-price_advantage).clamp_min(0.0))
+        net_grid_absorb_ratio = self.torch.clamp(
+            (net_grid_need_ratio - 0.75 * float(gt_min_ratio))
+            / max(_NORM_EPS, 1.0 - 0.75 * float(gt_min_ratio)),
+            0.0,
+            1.0,
+        )
+        cogen_support_need = self.torch.maximum(
+            heat_support_need,
+            0.55 * cool_support_need,
+        )
+        support_commit_floor = self.torch.clamp(
+            (0.55 * heat_support_need + 0.25 * cool_support_need)
+            * (0.20 + 0.80 * price_advantage.clamp_min(0.0)),
+            0.0,
+            1.0,
+        )
+        commit_score = self.torch.clamp(
+            self.torch.maximum(
+                market_commit * self.torch.maximum(net_grid_absorb_ratio, 0.40 * cogen_support_need),
+                support_commit_floor,
+            ),
+            0.0,
+            1.0,
+        )
+        low_load_relief = self.torch.clamp(
+            (float(gt_min_ratio) - net_grid_need_ratio) / max(_NORM_EPS, float(gt_min_ratio)),
+            0.0,
+            1.0,
+        )
+        off_score = self.torch.clamp(
+            (market_off + 0.35 * low_load_relief)
+            * (1.0 - self.torch.maximum(net_grid_absorb_ratio, 0.75 * cogen_support_need)).clamp_min(0.0)
+            * (1.0 - 0.15 * prev_gt_ratio).clamp_min(0.0),
+            0.0,
+            1.0,
+        )
+        opportunity = self.torch.maximum(commit_score, off_score)
+        base_active_mask = (opportunity > float(_GT_PRIOR_MIN_OPPORTUNITY)).to(dtype=obs_batch.dtype)
+        commit_margin = (commit_score - off_score).clamp_min(0.0)
+        on_margin_threshold = max(float(_GT_PRIOR_MIN_OPPORTUNITY), 0.5 * float(gt_min_ratio))
+        on_mask = (
+            (commit_score > off_score).to(dtype=obs_batch.dtype)
+            * (commit_margin > on_margin_threshold).to(dtype=obs_batch.dtype)
+            * base_active_mask
+        )
+        off_mask = (
+            (1.0 - on_mask)
+            * (off_score >= float(_GT_PRIOR_MIN_OPPORTUNITY)).to(dtype=obs_batch.dtype)
+            * base_active_mask
+        )
+        decision_mask = (on_mask + off_mask).clamp(0.0, 1.0)
+        on_signal = self.torch.maximum(
+            self.torch.maximum(net_grid_absorb_ratio, cogen_support_need),
+            market_commit,
+        )
+        dispatch_floor_ratio = self.torch.clamp(
+            float(gt_min_ratio) + 0.12 * on_signal,
+            min=float(gt_min_ratio),
+            max=max(float(gt_min_ratio), 0.35),
+        )
+        dispatch_cap_ratio = self.torch.clamp(
+            0.25 + 0.75 * on_signal,
+            min=0.0,
+            max=1.0,
+        )
+        dispatch_cap_ratio = self.torch.maximum(dispatch_cap_ratio, dispatch_floor_ratio)
+        dispatch_strength = self.torch.clamp(commit_score * on_signal, 0.0, 1.0)
+        target_load_ratio = self.torch.clamp(
+            dispatch_floor_ratio
+            + (dispatch_cap_ratio - dispatch_floor_ratio) * dispatch_strength,
+            0.0,
+            1.0,
+        )
+        target_u_gt = 2.0 * target_load_ratio - 1.0
+        target_u_gt = (
+            (-1.0) * off_mask
+            + target_u_gt.clamp(-1.0, 1.0) * (1.0 - off_mask)
+        ) * decision_mask
+        mode_on = on_mask
+        mode_off = off_mask.to(dtype=obs_batch.dtype)
+        mode_weight = (
+            (1.0 + 0.75 * off_score) * mode_off
+            + (1.0 + 0.25 * dispatch_strength + 0.35 * commit_margin) * mode_on
+        ) * decision_mask
+        return {
+            "target_u_gt": target_u_gt,
+            "target_load_ratio": target_load_ratio * mode_on,
+            "opportunity": opportunity * decision_mask,
+            "commit_score": commit_score,
+            "off_score": off_score,
+            "net_grid_need_ratio": net_grid_need_ratio,
+            "net_grid_absorb_ratio": net_grid_absorb_ratio,
+            "heat_support_need": heat_support_need,
+            "cool_support_need": cool_support_need,
+            "cogen_support_need": cogen_support_need,
+            "price_advantage": price_advantage.clamp_min(0.0),
+            "mode_weight": mode_weight,
+            "mode_on": mode_on,
+            "mode_off": mode_off,
+            "u_gt_exec": action_exec_batch[:, u_gt_index : u_gt_index + 1].clamp(-1.0, 1.0),
+        }
+
+    def _compute_gt_teacher_direction_match(
+        self,
+        *,
+        prior_terms,
+        teacher_action_exec_batch,
+    ):
+        if "u_gt" not in self.action_index:
+            return self.torch.ones(
+                (teacher_action_exec_batch.shape[0], 1),
+                dtype=teacher_action_exec_batch.dtype,
+                device=teacher_action_exec_batch.device,
+            )
+        u_gt_index = int(self.action_index["u_gt"])
+        teacher_gt = teacher_action_exec_batch[:, u_gt_index : u_gt_index + 1].clamp(-1.0, 1.0)
+        teacher_gt_on = (teacher_gt > -0.95).to(dtype=teacher_gt.dtype)
+        off_match = self.torch.clamp(1.0 - prior_terms["mode_on"], 0.0, 1.0)
+        return (
+            teacher_gt_on * prior_terms["mode_on"]
+            + (1.0 - teacher_gt_on) * off_match
+        ).clamp(0.0, 1.0)
+
+    def _compute_gt_prior_distill_loss(
+        self,
+        *,
+        obs_batch,
+        action_raw_batch,
+        action_exec_batch,
+        gap_batch,
+        teacher_action_exec_batch=None,
+        teacher_action_mask_batch=None,
+        teacher_available_batch=None,
+    ):
+        if float(self.config.economic_gt_distill_coef) <= 0.0:
+            zero = self.torch.zeros((1,), dtype=obs_batch.dtype, device=obs_batch.device).squeeze(0)
+            return zero, zero
+        if "u_gt" not in self.action_index:
+            zero = self.torch.zeros((1,), dtype=obs_batch.dtype, device=obs_batch.device).squeeze(0)
+            return zero, zero
+        prior_terms = self._compute_gt_price_prior_terms(
+            obs_batch=obs_batch,
+            action_exec_batch=action_exec_batch,
+        )
+        if prior_terms is None:
+            zero = self.torch.zeros((1,), dtype=obs_batch.dtype, device=obs_batch.device).squeeze(0)
+            return zero, zero
+        projection_risk = self.torch.clamp(gap_batch[:, :1].detach(), 0.0, 1.0)
+        prior_weight = (
+            prior_terms["opportunity"]
+            * prior_terms["mode_weight"]
+            * (1.0 - projection_risk)
+        )
+        u_gt_index = int(self.action_index["u_gt"])
+        if teacher_action_mask_batch is not None and teacher_available_batch is not None:
+            teacher_gt_available = self.torch.clamp(
+                teacher_available_batch,
+                0.0,
+                1.0,
+            ) * (teacher_action_mask_batch[:, u_gt_index : u_gt_index + 1] > 0.5).to(
+                dtype=obs_batch.dtype
+            )
+            teacher_gt_direction_match = self.torch.ones_like(teacher_gt_available)
+            if teacher_action_exec_batch is not None:
+                teacher_gt_direction_match = self._compute_gt_teacher_direction_match(
+                    prior_terms=prior_terms,
+                    teacher_action_exec_batch=teacher_action_exec_batch,
+                ).to(dtype=obs_batch.dtype)
+            prior_weight = prior_weight * (
+                1.0 - teacher_gt_available * teacher_gt_direction_match
+            )
+        prior_weight_sum = prior_weight.sum()
+        if float(prior_weight_sum.detach().cpu().item()) <= 0.0:
+            zero = self.torch.zeros((1,), dtype=obs_batch.dtype, device=obs_batch.device).squeeze(0)
+            return zero, prior_weight.mean()
+        prior_sq = (
+            action_raw_batch[:, u_gt_index : u_gt_index + 1].clamp(-1.0, 1.0)
+            - prior_terms["target_u_gt"]
+        ).pow(2)
+        prior_loss = (prior_weight * prior_sq).sum() / prior_weight_sum.clamp_min(1.0)
+        return prior_loss, prior_weight.mean()
+
     def _compute_bes_prior_distill_loss(
         self,
         *,
@@ -5715,6 +7030,8 @@ class PAFCTD3Trainer:
             "t_amb_k",
             "heat_backup_min_needed_mw",
             "abs_drive_margin_k",
+            "qc_dem_mw",
+            "p_gt_prev_mw",
         }
         required_actions = {"u_gt", "u_bes", "u_ech"}
         if (
@@ -5723,107 +7040,50 @@ class PAFCTD3Trainer:
         ):
             return None
 
-        p_dem_index = int(self.observation_index["p_dem_mw"])
-        pv_index = int(self.observation_index["pv_mw"])
-        wt_index = int(self.observation_index["wt_mw"])
-        price_e_index = int(self.observation_index["price_e"])
-        price_gas_index = int(self.observation_index["price_gas"])
-        t_amb_index = int(self.observation_index["t_amb_k"])
-        backup_index = int(self.observation_index["heat_backup_min_needed_mw"])
-        margin_index = int(self.observation_index["abs_drive_margin_k"])
         u_gt_index = int(self.action_index["u_gt"])
-        u_bes_index = int(self.action_index["u_bes"])
-        u_ech_index = int(self.action_index["u_ech"])
-
-        p_dem = obs_batch[:, p_dem_index : p_dem_index + 1]
-        pv = obs_batch[:, pv_index : pv_index + 1]
-        wt = obs_batch[:, wt_index : wt_index + 1]
-        price_e = obs_batch[:, price_e_index : price_e_index + 1]
-        price_gas = obs_batch[:, price_gas_index : price_gas_index + 1]
-        t_amb_k = obs_batch[:, t_amb_index : t_amb_index + 1]
-        heat_backup_min_needed_mw = obs_batch[:, backup_index : backup_index + 1]
-        abs_margin_k = obs_batch[:, margin_index : margin_index + 1]
         p_gt_cap_mw = max(_NORM_EPS, float(self.env_config.p_gt_cap_mw))
-        q_boiler_cap_mw = max(_NORM_EPS, float(self.env_config.q_boiler_cap_mw))
-
-        u_bes_exec = action_exec_batch[:, u_bes_index : u_bes_index + 1].clamp(-1.0, 1.0)
-        p_bes_charge_proxy_mw = (
-            (-u_bes_exec).clamp_min(0.0)
-            * float(self.env_config.p_bes_cap_mw)
-            / max(_NORM_EPS, float(self.env_config.bes_eta_charge))
+        prior_terms = self._compute_gt_price_prior_terms(
+            obs_batch=obs_batch,
+            action_exec_batch=action_exec_batch,
         )
-        p_bes_discharge_proxy_mw = (
-            u_bes_exec.clamp_min(0.0)
-            * float(self.env_config.p_bes_cap_mw)
-            * float(self.env_config.bes_eta_discharge)
-        )
-        u_ech_exec = action_exec_batch[:, u_ech_index : u_ech_index + 1].clamp(0.0, 1.0)
-        q_ech_proxy_mw = u_ech_exec * float(self.env_config.q_ech_cap_mw)
-        ech_cop_base = (
-            float(self.env_config.cop_nominal)
-            - 0.03 * (t_amb_k - 298.15)
-        ).clamp(
-            min=float(self.env_config.cop_nominal) * float(self.env_config.ech_cop_partload_min_fraction),
-            max=float(self.env_config.cop_nominal),
-        )
-        p_ech_proxy_mw = q_ech_proxy_mw / ech_cop_base.clamp_min(_NORM_EPS)
-
-        net_grid_need_proxy_mw = (
-            p_dem
-            + p_ech_proxy_mw
-            + p_bes_charge_proxy_mw
-            - pv
-            - wt
-            - p_bes_discharge_proxy_mw
-        ).clamp_min(0.0)
+        if prior_terms is None:
+            return None
         p_gt_exec = (
             (action_exec_batch[:, u_gt_index : u_gt_index + 1] + 1.0)
             * 0.5
             * p_gt_cap_mw
         )
-        gt_load_ratio = self.torch.clamp(
-            p_gt_exec / p_gt_cap_mw,
-            0.0,
-            1.0,
-        )
-        eta_gt = float(self.env_config.gt_eta_min) + (
-            float(self.env_config.gt_eta_max) - float(self.env_config.gt_eta_min)
-        ) * gt_load_ratio
-        gt_marginal_cost = price_gas / eta_gt.clamp_min(_NORM_EPS)
-
-        price_advantage = self.torch.clamp(
-            (price_e - gt_marginal_cost) / price_e.clamp_min(_NORM_EPS),
-            0.0,
-            1.0,
-        )
-        heat_support_need = self.torch.clamp(
-            heat_backup_min_needed_mw / q_boiler_cap_mw,
-            0.0,
-            1.0,
-        )
-        abs_ready = self.torch.sigmoid(
-            abs_margin_k / max(_NORM_EPS, float(self.env_config.abs_gate_scale_k))
-        )
+        mode_on = prior_terms["mode_on"].clamp(0.0, 1.0)
+        commit_score = prior_terms["commit_score"].clamp(0.0, 1.0)
+        net_grid_need_ratio = prior_terms["net_grid_need_ratio"].clamp(0.0, 1.0)
+        net_grid_absorb_ratio = prior_terms["net_grid_absorb_ratio"].clamp(0.0, 1.0)
+        cogen_support_need = prior_terms["cogen_support_need"].clamp(0.0, 1.0)
+        target_load_ratio = prior_terms["target_load_ratio"].clamp(0.0, 1.0)
+        gt_target_proxy_mw = target_load_ratio * p_gt_cap_mw
+        undercommit_ratio = (
+            (gt_target_proxy_mw - p_gt_exec).clamp_min(0.0) / p_gt_cap_mw
+        ) * mode_on
         support_multiplier = self.torch.clamp(
-            0.65 + 0.15 * abs_ready + 0.20 * heat_support_need,
+            commit_score * self.torch.maximum(net_grid_absorb_ratio, 0.75 * cogen_support_need),
             0.0,
             1.0,
         )
-        encourage_score = self.torch.clamp(price_advantage * support_multiplier, 0.0, 1.0)
-        gt_target_proxy_mw = (
-            net_grid_need_proxy_mw.clamp_max(p_gt_cap_mw) * encourage_score
-        )
-        undercommit_ratio = (gt_target_proxy_mw - p_gt_exec).clamp_min(0.0) / p_gt_cap_mw
-        net_grid_need_ratio = self.torch.clamp(net_grid_need_proxy_mw / p_gt_cap_mw, 0.0, 1.0)
         return {
             "gt_target_proxy_mw": gt_target_proxy_mw,
             "p_gt_exec": p_gt_exec,
             "undercommit_ratio": undercommit_ratio,
-            "price_advantage": price_advantage,
-            "abs_ready": abs_ready,
-            "heat_support_need": heat_support_need,
+            "price_advantage": prior_terms["price_advantage"].clamp(0.0, 1.0) * mode_on,
+            "opportunity": prior_terms["opportunity"].clamp(0.0, 1.0),
+            "commit_score": commit_score,
+            "off_score": prior_terms["off_score"].clamp(0.0, 1.0),
+            "mode_on": mode_on,
+            "mode_off": prior_terms["mode_off"].clamp(0.0, 1.0),
+            "heat_support_need": prior_terms["heat_support_need"].clamp(0.0, 1.0),
+            "cool_support_need": prior_terms["cool_support_need"].clamp(0.0, 1.0),
+            "cogen_support_need": cogen_support_need,
             "support_multiplier": support_multiplier,
             "net_grid_need_ratio": net_grid_need_ratio,
+            "net_grid_absorb_ratio": net_grid_absorb_ratio,
         }
 
     def _compute_gt_grid_economic_proxy_penalty(self, *, obs_batch, action_exec_batch):
@@ -5885,6 +7145,7 @@ class PAFCTD3Trainer:
         obs_batch,
         action_raw_batch,
         action_exec_batch,
+        teacher_action_exec_batch=None,
         teacher_available_batch=None,
         teacher_action_mask_batch=None,
     ):
@@ -5928,30 +7189,89 @@ class PAFCTD3Trainer:
             0.0,
             1.0,
         )
+        gt_commit_pressure = terms.get("net_grid_absorb_ratio", terms["net_grid_need_ratio"])
         gt_relax_signal = self.torch.clamp(
             2.5
             * terms["price_advantage"]
-            * self.torch.maximum(terms["net_grid_need_ratio"], terms["undercommit_ratio"])
+            * self.torch.maximum(gt_commit_pressure, terms["undercommit_ratio"])
             * terms["support_multiplier"]
             * (1.0 - projection_risk),
             0.0,
             1.0,
         )
+        gt_prior_terms = self._compute_gt_price_prior_terms(
+            obs_batch=obs_batch,
+            action_exec_batch=action_exec_batch,
+        )
         gt_anchor_floor = float(np.clip(self.config.exec_action_anchor_safe_floor, 0.0, 1.0))
         if "u_gt" in self.action_index:
+            u_gt_index = int(self.action_index["u_gt"])
+            if gt_prior_terms is not None:
+                gt_prior_gap = self.torch.clamp(
+                    (
+                        gt_prior_terms["target_u_gt"]
+                        - action_exec_batch[:, u_gt_index : u_gt_index + 1].clamp(-1.0, 1.0)
+                    ).abs(),
+                    0.0,
+                    1.0,
+                )
+                gt_prior_relax_signal = self.torch.clamp(
+                    2.0
+                    * gt_prior_terms["opportunity"]
+                    * gt_prior_gap
+                    * (0.50 + 0.50 * gt_prior_terms["mode_weight"].clamp(0.0, 2.0))
+                    * (1.0 - reliability_risk)
+                    * (1.0 - projection_risk),
+                    0.0,
+                    1.0,
+                )
+                gt_relax_signal = self.torch.maximum(gt_relax_signal, gt_prior_relax_signal)
+            if teacher_action_exec_batch is not None and teacher_available_batch is not None and teacher_action_mask_batch is not None:
+                teacher_gt_available = self.torch.clamp(
+                    teacher_available_batch,
+                    0.0,
+                    1.0,
+                ) * (teacher_action_mask_batch[:, u_gt_index : u_gt_index + 1] > 0.5).to(
+                    dtype=obs_batch.dtype
+                )
+                if float(teacher_gt_available.max().detach().cpu().item()) > 0.0:
+                    teacher_gt_direction_match = self.torch.ones_like(teacher_gt_available)
+                    if gt_prior_terms is not None:
+                        teacher_gt_direction_match = self._compute_gt_teacher_direction_match(
+                            prior_terms=gt_prior_terms,
+                            teacher_action_exec_batch=teacher_action_exec_batch,
+                        ).to(dtype=obs_batch.dtype)
+                    teacher_gt_gap = self.torch.clamp(
+                        (
+                            teacher_action_exec_batch[:, u_gt_index : u_gt_index + 1].clamp(-1.0, 1.0)
+                            - action_exec_batch[:, u_gt_index : u_gt_index + 1].clamp(-1.0, 1.0)
+                        ).abs(),
+                        0.0,
+                        1.0,
+                    )
+                    teacher_gt_relax_signal = self.torch.clamp(
+                        2.5
+                        * teacher_gt_available
+                        * teacher_gt_direction_match
+                        * teacher_gt_gap
+                        * (1.0 - reliability_risk)
+                        * (1.0 - projection_risk),
+                        0.0,
+                        1.0,
+                    )
+                    gt_relax_signal = self.torch.maximum(gt_relax_signal, teacher_gt_relax_signal)
             gt_anchor_scale = self.torch.clamp(
                 1.0 - (1.0 - gt_anchor_floor) * gt_relax_signal,
                 gt_anchor_floor,
                 1.0,
             )
-            u_gt_index = int(self.action_index["u_gt"])
             anchor_scale[:, u_gt_index : u_gt_index + 1] = gt_anchor_scale
         if "u_bes" in self.action_index:
             bes_anchor_floor = float(np.clip(gt_anchor_floor * 0.5, 0.05, 1.0))
             bes_relax_signal = self.torch.clamp(
                 1.75
                 * terms["price_advantage"]
-                * self.torch.maximum(terms["net_grid_need_ratio"], 0.5 * terms["undercommit_ratio"])
+                * self.torch.maximum(gt_commit_pressure, 0.5 * terms["undercommit_ratio"])
                 * (1.0 - reliability_risk)
                 * (1.0 - projection_risk),
                 0.0,
@@ -6013,9 +7333,8 @@ class PAFCTD3Trainer:
         if float(self.config.economic_teacher_distill_coef) <= 0.0:
             return self.torch.zeros((obs_batch.shape[0], 1), dtype=obs_batch.dtype, device=obs_batch.device)
         teacher_mask = self.torch.clamp(teacher_available_batch, 0.0, 1.0)
-        active_teacher_dims = (
-            teacher_action_mask_batch * self.economic_teacher_action_weight
-        ).sum(dim=1, keepdim=True)
+        weighted_teacher_mask = teacher_action_mask_batch * self.economic_teacher_action_weight
+        active_teacher_dims = weighted_teacher_mask.sum(dim=1, keepdim=True)
         teacher_mask = teacher_mask * (active_teacher_dims > 0.0).to(dtype=obs_batch.dtype)
         if float(teacher_mask.max().detach().cpu().item()) <= 0.0:
             return teacher_mask
@@ -6026,8 +7345,13 @@ class PAFCTD3Trainer:
         if terms is None:
             opportunity_score = teacher_mask
         else:
+            gt_commit_pressure = terms.get("net_grid_absorb_ratio", terms["net_grid_need_ratio"])
             opportunity_score = self.torch.clamp(
-                0.5 * terms["price_advantage"] + 0.5 * terms["net_grid_need_ratio"],
+                0.5 * terms["price_advantage"]
+                + 0.5 * self.torch.maximum(
+                    gt_commit_pressure,
+                    terms["undercommit_ratio"],
+                ),
                 0.0,
                 1.0,
             )
@@ -6054,17 +7378,105 @@ class PAFCTD3Trainer:
         reliability_risk = self.torch.maximum(reliability_risk, projection_risk)
         safety_margin = self.torch.clamp(1.0 - reliability_risk, 0.0, 1.0)
         disagreement_score = self.torch.clamp(
-            (teacher_action_exec_batch - action_exec_batch).abs().mean(dim=1, keepdim=True).detach(),
+            (
+                ((teacher_action_exec_batch - action_exec_batch).abs() * weighted_teacher_mask)
+                .sum(dim=1, keepdim=True)
+                .detach()
+            )
+            / active_teacher_dims.clamp_min(1.0),
             0.0,
             1.0,
         )
-        return teacher_mask * self.torch.clamp(
+        teacher_weight = teacher_mask * self.torch.clamp(
             (0.35 + 0.65 * opportunity_score)
             * (0.50 + 0.50 * safety_margin)
             * (0.50 + 0.50 * disagreement_score),
             0.0,
             1.0,
         )
+        if "u_gt" in self.action_index:
+            u_gt_index = int(self.action_index["u_gt"])
+            teacher_gt_available = teacher_mask * (
+                teacher_action_mask_batch[:, u_gt_index : u_gt_index + 1] > 0.5
+            ).to(dtype=obs_batch.dtype)
+            if float(teacher_gt_available.max().detach().cpu().item()) > 0.0:
+                gt_terms = self._compute_gt_price_prior_terms(
+                    obs_batch=obs_batch,
+                    action_exec_batch=teacher_action_exec_batch,
+                )
+                if gt_terms is not None:
+                    teacher_gt = teacher_action_exec_batch[:, u_gt_index : u_gt_index + 1].clamp(
+                        -1.0,
+                        1.0,
+                    )
+                    current_gt = action_exec_batch[:, u_gt_index : u_gt_index + 1].clamp(
+                        -1.0,
+                        1.0,
+                    )
+                    gt_gap = self.torch.clamp(
+                        0.5 * (teacher_gt - current_gt).abs().detach(),
+                        0.0,
+                        1.0,
+                    )
+                    teacher_gt_on = (teacher_gt > -0.95).to(dtype=obs_batch.dtype)
+                    gt_commit_score = gt_terms["commit_score"].clamp(0.0, 1.0)
+                    gt_off_score = gt_terms["off_score"].clamp(0.0, 1.0)
+                    gt_direction_margin = (
+                        teacher_gt_on * (gt_commit_score - gt_off_score).clamp_min(0.0)
+                        + (1.0 - teacher_gt_on) * (gt_off_score - gt_commit_score).clamp_min(0.0)
+                    )
+                    teacher_weight = teacher_weight * (
+                        1.0
+                        - teacher_gt_available
+                        + teacher_gt_available * (0.25 + 0.75 * gt_direction_margin)
+                    )
+                    gt_direction_score = (
+                        teacher_gt_on
+                        * self.torch.maximum(
+                            gt_direction_margin,
+                            gt_terms["price_advantage"].clamp(0.0, 1.0),
+                        )
+                        + (1.0 - teacher_gt_on) * gt_direction_margin
+                    )
+                    gt_teacher_weight = teacher_gt_available * self.torch.clamp(
+                        (0.20 + 0.80 * gt_direction_score.clamp(0.0, 1.0))
+                        * (0.35 + 0.65 * gt_gap)
+                        * (0.50 + 0.50 * safety_margin),
+                        0.0,
+                        1.0,
+                    )
+                    teacher_weight = self.torch.maximum(
+                        teacher_weight,
+                        gt_teacher_weight,
+                    )
+        return teacher_weight
+
+    def _compute_economic_teacher_safe_preserve_loss(
+        self,
+        *,
+        action_exec_batch,
+        teacher_action_exec_batch,
+        teacher_action_mask_batch,
+        teacher_available_batch,
+    ):
+        teacher_row_mask = self.torch.clamp(teacher_available_batch, 0.0, 1.0)
+        active_teacher_dims = (
+            teacher_action_mask_batch * self.economic_teacher_action_weight
+        ).sum(dim=1, keepdim=True)
+        teacher_row_mask = teacher_row_mask * (active_teacher_dims > 0.0).to(
+            dtype=action_exec_batch.dtype
+        )
+        if float(teacher_row_mask.max().detach().cpu().item()) <= 0.0:
+            return self.torch.zeros((1,), dtype=action_exec_batch.dtype, device=action_exec_batch.device).squeeze(0)
+        preserve_mask = self.torch.clamp(
+            1.0 - teacher_action_mask_batch,
+            0.0,
+            1.0,
+        ) * self.economic_teacher_safe_preserve_weight
+        preserve_sq = (
+            (action_exec_batch - teacher_action_exec_batch).pow(2) * preserve_mask
+        ).sum(dim=1, keepdim=True) / preserve_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+        return (teacher_row_mask * preserve_sq).sum() / teacher_row_mask.sum().clamp_min(1.0)
 
     def _random_action(self) -> np.ndarray:
         return self.rng.uniform(
@@ -6171,6 +7583,7 @@ class PAFCTD3Trainer:
             "economic_boiler_proxy_coef": float(self.config.economic_boiler_proxy_coef),
             "economic_abs_tradeoff_coef": float(self.config.economic_abs_tradeoff_coef),
             "economic_gt_grid_proxy_coef": float(self.config.economic_gt_grid_proxy_coef),
+            "economic_gt_distill_coef": float(self.config.economic_gt_distill_coef),
             "economic_teacher_distill_coef": float(self.config.economic_teacher_distill_coef),
             "economic_teacher_proxy_advantage_min": float(
                 self.config.economic_teacher_proxy_advantage_min
@@ -6216,6 +7629,15 @@ class PAFCTD3Trainer:
             ),
             "economic_teacher_full_year_warm_start_epochs": int(
                 self.config.economic_teacher_full_year_warm_start_epochs
+            ),
+            "economic_gt_full_year_warm_start_samples": int(
+                self.config.economic_gt_full_year_warm_start_samples
+            ),
+            "economic_gt_full_year_warm_start_epochs": int(
+                self.config.economic_gt_full_year_warm_start_epochs
+            ),
+            "economic_gt_full_year_warm_start_u_weight": float(
+                self.config.economic_gt_full_year_warm_start_u_weight
             ),
             "economic_bes_distill_coef": float(self.config.economic_bes_distill_coef),
             "economic_bes_prior_u": float(self.config.economic_bes_prior_u),
@@ -6668,6 +8090,9 @@ class PAFCTD3Trainer:
         economic_teacher_loss_value = float("nan")
         economic_teacher_weight_value = float("nan")
         economic_teacher_target_rate_value = float("nan")
+        economic_teacher_safe_preserve_loss_value = float("nan")
+        economic_gt_distill_loss_value = float("nan")
+        economic_gt_distill_weight_value = float("nan")
         economic_bes_distill_loss_value = float("nan")
         economic_bes_distill_weight_value = float("nan")
         reward_actor_value = float("nan")
@@ -6708,6 +8133,7 @@ class PAFCTD3Trainer:
                 obs_batch=obs,
                 action_raw_batch=action_raw,
                 action_exec_batch=action_exec_hat,
+                teacher_action_exec_batch=teacher_action_exec,
                 teacher_available_batch=teacher_available,
                 teacher_action_mask_batch=teacher_action_mask,
             )
@@ -6747,15 +8173,34 @@ class PAFCTD3Trainer:
                 (action_exec_hat - teacher_action_exec).pow(2) * effective_teacher_mask
             ).sum(dim=1, keepdim=True) / effective_teacher_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
             economic_teacher_weight_sum = economic_teacher_weight.sum()
-            economic_teacher_loss = (
+            economic_teacher_selected_loss = (
                 (economic_teacher_weight * economic_teacher_sq).sum()
                 / economic_teacher_weight_sum.clamp_min(1.0)
+            )
+            economic_teacher_safe_preserve_loss = self._compute_economic_teacher_safe_preserve_loss(
+                action_exec_batch=action_exec_hat,
+                teacher_action_exec_batch=teacher_action_exec,
+                teacher_action_mask_batch=teacher_action_mask,
+                teacher_available_batch=teacher_available,
+            )
+            economic_teacher_loss = (
+                economic_teacher_selected_loss
+                + economic_teacher_safe_preserve_loss
             )
             economic_bes_distill_loss, economic_bes_distill_weight = self._compute_bes_prior_distill_loss(
                 obs_batch=obs,
                 action_raw_batch=action_raw,
                 action_exec_batch=action_exec_hat,
                 gap_batch=gap,
+            )
+            economic_gt_distill_loss, economic_gt_distill_weight = self._compute_gt_prior_distill_loss(
+                obs_batch=obs,
+                action_raw_batch=action_raw,
+                action_exec_batch=action_exec_hat,
+                gap_batch=gap,
+                teacher_action_exec_batch=teacher_action_exec,
+                teacher_action_mask_batch=teacher_action_mask,
+                teacher_available_batch=teacher_available,
             )
             actor_loss = (
                 -reward_actor.mean()
@@ -6767,6 +8212,7 @@ class PAFCTD3Trainer:
                 + float(self.config.economic_abs_tradeoff_coef) * abs_tradeoff_penalty
                 + float(self.config.economic_gt_grid_proxy_coef) * gt_grid_proxy_penalty
                 + float(self.config.economic_teacher_distill_coef) * economic_teacher_loss
+                + float(self.config.economic_gt_distill_coef) * economic_gt_distill_loss
                 + float(self.config.economic_bes_distill_coef) * economic_bes_distill_loss
             )
             self.actor_optimizer.zero_grad(set_to_none=True)
@@ -6824,6 +8270,13 @@ class PAFCTD3Trainer:
             economic_teacher_loss_value = float(economic_teacher_loss.detach().cpu().item())
             economic_teacher_weight_value = float(economic_teacher_weight.mean().detach().cpu().item())
             economic_teacher_target_rate_value = float(teacher_available.mean().detach().cpu().item())
+            economic_teacher_safe_preserve_loss_value = float(
+                economic_teacher_safe_preserve_loss.detach().cpu().item()
+            )
+            economic_gt_distill_loss_value = float(economic_gt_distill_loss.detach().cpu().item())
+            economic_gt_distill_weight_value = float(
+                economic_gt_distill_weight.detach().cpu().item()
+            )
             economic_bes_distill_loss_value = float(
                 economic_bes_distill_loss.detach().cpu().item()
             )
@@ -6850,6 +8303,9 @@ class PAFCTD3Trainer:
             "actor_economic_teacher_loss": economic_teacher_loss_value,
             "actor_economic_teacher_weight": economic_teacher_weight_value,
             "actor_economic_teacher_target_rate": economic_teacher_target_rate_value,
+            "actor_economic_teacher_safe_preserve_loss": economic_teacher_safe_preserve_loss_value,
+            "actor_economic_gt_distill_loss": economic_gt_distill_loss_value,
+            "actor_economic_gt_distill_weight": economic_gt_distill_weight_value,
             "actor_economic_bes_distill_loss": economic_bes_distill_loss_value,
             "actor_economic_bes_distill_weight": economic_bes_distill_weight_value,
             "actor_constraint_mean": mean_constraint_value,
@@ -6877,6 +8333,7 @@ class PAFCTD3Trainer:
         )
         self._warm_start_actor_from_economic_teacher_full_year()
         self._warm_start_actor_from_bes_full_year()
+        self._warm_start_actor_from_gt_full_year()
         effective_warmup_steps = 0 if self.replay.size > 0 else int(self.config.warmup_steps)
 
         sampler = make_episode_sampler(
@@ -6906,6 +8363,9 @@ class PAFCTD3Trainer:
             "actor_economic_teacher_loss": float("nan"),
             "actor_economic_teacher_weight": float("nan"),
             "actor_economic_teacher_target_rate": float("nan"),
+            "actor_economic_teacher_safe_preserve_loss": float("nan"),
+            "actor_economic_gt_distill_loss": float("nan"),
+            "actor_economic_gt_distill_weight": float("nan"),
             "actor_economic_bes_distill_loss": float("nan"),
             "actor_economic_bes_distill_weight": float("nan"),
             "actor_constraint_mean": float("nan"),
@@ -7159,6 +8619,7 @@ class PAFCTD3Trainer:
             "economic_boiler_proxy_coef": float(self.config.economic_boiler_proxy_coef),
             "economic_abs_tradeoff_coef": float(self.config.economic_abs_tradeoff_coef),
             "economic_gt_grid_proxy_coef": float(self.config.economic_gt_grid_proxy_coef),
+            "economic_gt_distill_coef": float(self.config.economic_gt_distill_coef),
             "economic_teacher_distill_coef": float(self.config.economic_teacher_distill_coef),
             "economic_teacher_proxy_advantage_min": float(
                 self.config.economic_teacher_proxy_advantage_min
@@ -7204,6 +8665,15 @@ class PAFCTD3Trainer:
             ),
             "economic_teacher_full_year_warm_start_epochs": int(
                 self.config.economic_teacher_full_year_warm_start_epochs
+            ),
+            "economic_gt_full_year_warm_start_samples": int(
+                self.config.economic_gt_full_year_warm_start_samples
+            ),
+            "economic_gt_full_year_warm_start_epochs": int(
+                self.config.economic_gt_full_year_warm_start_epochs
+            ),
+            "economic_gt_full_year_warm_start_u_weight": float(
+                self.config.economic_gt_full_year_warm_start_u_weight
             ),
             "economic_bes_distill_coef": float(self.config.economic_bes_distill_coef),
             "economic_bes_prior_u": float(self.config.economic_bes_prior_u),
@@ -7336,9 +8806,13 @@ class PAFCTD3Trainer:
             "economic_teacher_distill": dict(self.economic_teacher_distill_summary),
             "actor_init": dict(self.actor_init_summary),
             "actor_warm_start": dict(self.actor_warm_start_summary),
+            "actor_teacher_gt_head_warm_start": dict(
+                self.actor_teacher_gt_head_warm_start_summary
+            ),
             "actor_teacher_full_year_warm_start": dict(
                 self.actor_teacher_full_year_warm_start_summary
             ),
+            "actor_gt_warm_start": dict(self.actor_gt_warm_start_summary),
             "actor_bes_warm_start": dict(self.actor_bes_warm_start_summary),
             "replay_schema": {
                 "obs": list(self.observation_keys),

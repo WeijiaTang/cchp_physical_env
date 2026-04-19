@@ -113,6 +113,7 @@ TRAINING_DEFAULTS: dict[str, Any] = {
     "pafc_economic_boiler_proxy_coef": 0.0,
     "pafc_economic_abs_tradeoff_coef": 0.0,
     "pafc_economic_gt_grid_proxy_coef": 0.25,
+    "pafc_economic_gt_distill_coef": 0.0,
     "pafc_economic_teacher_distill_coef": 0.0,
     "pafc_economic_teacher_proxy_advantage_min": 0.02,
     "pafc_economic_teacher_gt_proxy_advantage_min": 0.01,
@@ -129,6 +130,9 @@ TRAINING_DEFAULTS: dict[str, Any] = {
     "pafc_economic_teacher_tes_action_weight": 0.5,
     "pafc_economic_teacher_full_year_warm_start_samples": 4096,
     "pafc_economic_teacher_full_year_warm_start_epochs": 4,
+    "pafc_economic_gt_full_year_warm_start_samples": 0,
+    "pafc_economic_gt_full_year_warm_start_epochs": 0,
+    "pafc_economic_gt_full_year_warm_start_u_weight": 0.0,
     "pafc_economic_bes_distill_coef": 0.0,
     "pafc_economic_bes_prior_u": 0.35,
     "pafc_economic_bes_charge_u_scale": 1.8,
@@ -634,6 +638,8 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
         "pafc_expert_prefill_abs_window_mining_candidates",
         "pafc_economic_teacher_full_year_warm_start_samples",
         "pafc_economic_teacher_full_year_warm_start_epochs",
+        "pafc_economic_gt_full_year_warm_start_samples",
+        "pafc_economic_gt_full_year_warm_start_epochs",
         "pafc_economic_bes_full_year_warm_start_samples",
         "pafc_economic_bes_full_year_warm_start_epochs",
         "pafc_actor_warm_start_epochs",
@@ -707,6 +713,8 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
                         "pafc_expert_prefill_abs_window_mining_candidates",
                         "pafc_economic_teacher_full_year_warm_start_samples",
                         "pafc_economic_teacher_full_year_warm_start_epochs",
+                        "pafc_economic_gt_full_year_warm_start_samples",
+                        "pafc_economic_gt_full_year_warm_start_epochs",
                         "pafc_economic_bes_full_year_warm_start_samples",
                         "pafc_economic_bes_full_year_warm_start_epochs",
                         "pafc_actor_warm_start_epochs",
@@ -725,6 +733,8 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
                     "pafc_expert_prefill_abs_window_mining_candidates",
                     "pafc_economic_teacher_full_year_warm_start_samples",
                     "pafc_economic_teacher_full_year_warm_start_epochs",
+                    "pafc_economic_gt_full_year_warm_start_samples",
+                    "pafc_economic_gt_full_year_warm_start_epochs",
                     "pafc_economic_bes_full_year_warm_start_samples",
                     "pafc_economic_bes_full_year_warm_start_epochs",
                     "pafc_actor_warm_start_epochs",
@@ -821,6 +831,7 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
             "pafc_economic_boiler_proxy_coef",
             "pafc_economic_abs_tradeoff_coef",
             "pafc_economic_gt_grid_proxy_coef",
+            "pafc_economic_gt_distill_coef",
             "pafc_economic_teacher_distill_coef",
             "pafc_economic_teacher_proxy_advantage_min",
             "pafc_economic_teacher_gt_proxy_advantage_min",
@@ -836,6 +847,9 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
             "pafc_economic_teacher_tes_action_weight",
             "pafc_economic_teacher_full_year_warm_start_samples",
             "pafc_economic_teacher_full_year_warm_start_epochs",
+            "pafc_economic_gt_full_year_warm_start_samples",
+            "pafc_economic_gt_full_year_warm_start_epochs",
+            "pafc_economic_gt_full_year_warm_start_u_weight",
             "pafc_economic_bes_distill_coef",
             "pafc_economic_bes_prior_u",
             "pafc_economic_bes_charge_u_scale",
@@ -1234,6 +1248,9 @@ def build_training_options(overrides: dict[str, Any] | None = None) -> dict[str,
     normalized["pafc_economic_gt_grid_proxy_coef"] = float(
         normalized["pafc_economic_gt_grid_proxy_coef"]
     )
+    normalized["pafc_economic_gt_distill_coef"] = float(
+        normalized["pafc_economic_gt_distill_coef"]
+    )
     normalized["pafc_economic_teacher_distill_coef"] = float(
         normalized["pafc_economic_teacher_distill_coef"]
     )
@@ -1281,6 +1298,15 @@ def build_training_options(overrides: dict[str, Any] | None = None) -> dict[str,
     )
     normalized["pafc_economic_teacher_full_year_warm_start_epochs"] = int(
         normalized["pafc_economic_teacher_full_year_warm_start_epochs"]
+    )
+    normalized["pafc_economic_gt_full_year_warm_start_samples"] = int(
+        normalized["pafc_economic_gt_full_year_warm_start_samples"]
+    )
+    normalized["pafc_economic_gt_full_year_warm_start_epochs"] = int(
+        normalized["pafc_economic_gt_full_year_warm_start_epochs"]
+    )
+    normalized["pafc_economic_gt_full_year_warm_start_u_weight"] = float(
+        normalized["pafc_economic_gt_full_year_warm_start_u_weight"]
     )
     normalized["pafc_economic_bes_distill_coef"] = float(
         normalized["pafc_economic_bes_distill_coef"]
