@@ -1,4 +1,4 @@
-# Ref: docs/spec/task.md (Task-ID: 010)
+# Ref: docs/spec/task.md (Task-ID: 012)
 # Ref: docs/spec/architecture.md (Pattern: Orchestrator + Physics Layer)
 """
 CCHP 物理环境：Gym 风格的多能耦合调度环境。
@@ -617,6 +617,95 @@ class CCHPPhysicalEnv:
             "p_gt_target_below_min": bool(p_gt_target_below_min),
         }
 
+    def _build_action_trace(
+        self,
+        *,
+        action: Mapping[str, float],
+        processed_action: Mapping[str, float],
+        p_gt_mw: float,
+        p_bes_mw: float,
+        u_boiler_final: float,
+        abs_result,
+        ech_result,
+        tes_result,
+        tes_charge_limit: float,
+        tes_discharge_limit: float,
+    ) -> dict[str, float]:
+        raw_action = {
+            "u_gt": float(action.get("u_gt", 0.0)),
+            "u_bes": float(action.get("u_bes", 0.0)),
+            "u_boiler": float(action.get("u_boiler", 0.0)),
+            "u_abs": float(action.get("u_abs", 0.0)),
+            "u_ech": float(action.get("u_ech", 0.0)),
+            "u_tes": float(action.get("u_tes", 0.0)),
+        }
+        pre_action = {
+            "u_gt": float(processed_action.get("u_gt", 0.0)),
+            "u_bes": float(processed_action.get("u_bes", 0.0)),
+            "u_boiler": float(processed_action.get("u_boiler", 0.0)),
+            "u_abs": float(processed_action.get("u_abs", 0.0)),
+            "u_ech": float(processed_action.get("u_ech", 0.0)),
+            "u_tes": float(processed_action.get("u_tes", 0.0)),
+        }
+        exec_action = {
+            "u_gt": float(self._gt_target_mw_to_action(p_gt_mw)),
+            "u_bes": float(
+                _clip(
+                    p_bes_mw / max(1e-6, float(self.config.p_bes_cap_mw)),
+                    -1.0,
+                    1.0,
+                )
+            ),
+            "u_boiler": float(_clip(u_boiler_final, 0.0, 1.0)),
+            "u_abs": float(
+                _clip(
+                    float(abs_result.q_drive_used_mw) / max(1e-6, float(self.config.q_abs_drive_cap_mw)),
+                    0.0,
+                    1.0,
+                )
+            ),
+            "u_ech": float(
+                _clip(
+                    float(ech_result.q_cool_mw) / max(1e-6, float(self.config.q_ech_cap_mw)),
+                    0.0,
+                    1.0,
+                )
+            ),
+            "u_tes": float(
+                _clip(
+                    float(tes_result.q_discharge_mw) / max(1e-6, float(tes_discharge_limit))
+                    - float(tes_result.q_charge_mw) / max(1e-6, float(tes_charge_limit)),
+                    -1.0,
+                    1.0,
+                )
+            ),
+        }
+
+        trace: dict[str, float] = {}
+        gap_raw_exec: list[float] = []
+        gap_pre_exec: list[float] = []
+        for key in self.action_keys:
+            raw_value = float(raw_action[key])
+            pre_value = float(pre_action[key])
+            exec_value = float(exec_action[key])
+            trace[f"action_raw_{key}"] = raw_value
+            trace[f"action_pre_{key}"] = pre_value
+            trace[f"action_exec_{key}"] = exec_value
+            trace[f"projection_gap_raw_exec_{key}"] = float(exec_value - raw_value)
+            trace[f"projection_gap_pre_exec_{key}"] = float(exec_value - pre_value)
+            gap_raw_exec.append(abs(exec_value - raw_value))
+            gap_pre_exec.append(abs(exec_value - pre_value))
+
+        gap_raw_exec_arr = np.asarray(gap_raw_exec, dtype=np.float64)
+        gap_pre_exec_arr = np.asarray(gap_pre_exec, dtype=np.float64)
+        trace["projection_gap_l1"] = float(gap_raw_exec_arr.sum())
+        trace["projection_gap_l2"] = float(np.sqrt(np.square(gap_raw_exec_arr).sum()))
+        trace["projection_gap_max"] = float(gap_raw_exec_arr.max())
+        trace["projection_gap_pre_l1"] = float(gap_pre_exec_arr.sum())
+        trace["projection_gap_pre_l2"] = float(np.sqrt(np.square(gap_pre_exec_arr).sum()))
+        trace["projection_gap_pre_max"] = float(gap_pre_exec_arr.max())
+        return trace
+
     def reset(
         self,
         *,
@@ -1075,6 +1164,20 @@ class CCHPPhysicalEnv:
             "boiler_started": boiler_started,
             "ech_started": ech_started,
         }
+        step_info.update(
+            self._build_action_trace(
+                action=action,
+                processed_action=processed_action,
+                p_gt_mw=float(p_gt_mw),
+                p_bes_mw=float(p_bes_mw),
+                u_boiler_final=float(u_boiler_final),
+                abs_result=abs_result,
+                ech_result=ech_result,
+                tes_result=tes_result,
+                tes_charge_limit=float(tes_charge_limit),
+                tes_discharge_limit=float(tes_discharge_limit),
+            )
+        )
         for key, value in planner_debug.items():
             if isinstance(value, (bool, np.bool_)):
                 step_info[key] = bool(value)

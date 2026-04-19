@@ -1,4 +1,4 @@
-# Ref: docs/spec/task.md (Task-ID: 011)
+# Ref: docs/spec/task.md (Task-ID: 012)
 # Ref: docs/spec/architecture.md (Module: core/)
 from __future__ import annotations
 
@@ -51,6 +51,65 @@ def write_kv_csv(
     target.parent.mkdir(parents=True, exist_ok=True)
     rows = [{key_col: str(k), value_col: float(v)} for k, v in mapping.items()]
     pd.DataFrame(rows).to_csv(target, index=False)
+
+
+def write_metric_stats_csv(path: str | Path, mapping: dict[str, Any]) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    rows = [{"metric": str(k), "value": value} for k, value in mapping.items()]
+    pd.DataFrame(rows).to_csv(target, index=False)
+
+
+def write_projection_stats_csv(path: str | Path, mapping: dict[str, Any]) -> None:
+    write_metric_stats_csv(path, mapping)
+
+
+def _build_dispatch_stats(step_log: pd.DataFrame, *, dt_h: float = 0.25) -> dict[str, Any]:
+    stats: dict[str, Any] = {}
+
+    mean_columns = (
+        "u_gt_raw",
+        "u_abs_raw",
+        "u_boiler_final",
+        "p_gt_mw",
+        "p_grid_import_mw",
+        "q_boiler_mw",
+        "q_abs_cool_mw",
+        "q_ech_cool_mw",
+    )
+    for col in mean_columns:
+        if col not in step_log.columns:
+            continue
+        series = pd.to_numeric(step_log[col], errors="coerce")
+        if series.notna().any():
+            stats[f"{col}__mean"] = float(series.fillna(0.0).mean())
+
+    active_rate_specs = (
+        ("gt_active_rate", "p_gt_mw"),
+        ("boiler_active_rate", "q_boiler_mw"),
+        ("abs_active_rate", "q_abs_cool_mw"),
+        ("ech_active_rate", "q_ech_cool_mw"),
+    )
+    for metric_name, col in active_rate_specs:
+        if col not in step_log.columns:
+            continue
+        series = pd.to_numeric(step_log[col], errors="coerce").fillna(0.0)
+        stats[metric_name] = float((series.abs() > 1e-9).mean())
+
+    if {"q_abs_cool_mw", "q_ech_cool_mw"}.issubset(step_log.columns):
+        q_abs = pd.to_numeric(step_log["q_abs_cool_mw"], errors="coerce").clip(lower=0.0).fillna(0.0)
+        q_ech = pd.to_numeric(step_log["q_ech_cool_mw"], errors="coerce").clip(lower=0.0).fillna(0.0)
+        abs_energy = float(q_abs.sum() * float(dt_h))
+        ech_energy = float(q_ech.sum() * float(dt_h))
+        total_cooling = abs_energy + ech_energy
+        if total_cooling > 1e-9:
+            stats["cooling_supply_abs_share"] = abs_energy / total_cooling
+            stats["cooling_supply_ech_share"] = ech_energy / total_cooling
+        else:
+            stats["cooling_supply_abs_share"] = 0.0
+            stats["cooling_supply_ech_share"] = 0.0
+
+    return stats
 
 
 def build_daily_aggregation(step_log: pd.DataFrame, *, dt_h: float = 0.25) -> pd.DataFrame:
@@ -143,6 +202,31 @@ def write_paper_eval_artifacts(
             value_col="count",
         )
 
+    projection_columns = [
+        "projection_gap_l1",
+        "projection_gap_l2",
+        "projection_gap_max",
+        "projection_gap_pre_l1",
+        "projection_gap_pre_l2",
+        "projection_gap_pre_max",
+    ]
+    available_projection_cols = [col for col in projection_columns if col in step_log.columns]
+    if available_projection_cols:
+        projection_stats: dict[str, Any] = {}
+        for col in available_projection_cols:
+            series = pd.to_numeric(step_log[col], errors="coerce").fillna(0.0)
+            projection_stats[f"{col}__mean"] = float(series.mean())
+            projection_stats[f"{col}__p95"] = float(series.quantile(0.95))
+            projection_stats[f"{col}__max"] = float(series.max())
+        if "projection_gap_l1" in step_log.columns:
+            gap_l1 = pd.to_numeric(step_log["projection_gap_l1"], errors="coerce").fillna(0.0)
+            projection_stats["projection_adjusted_step_rate"] = float((gap_l1 > 1e-9).mean())
+        write_projection_stats_csv(out_dir / "projection_stats.csv", projection_stats)
+
+    dispatch_stats = _build_dispatch_stats(step_log, dt_h=float(dt_h))
+    if dispatch_stats:
+        write_metric_stats_csv(out_dir / "dispatch_stats.csv", dispatch_stats)
+
     light = step_log.copy()
     drop_cols = [
         c
@@ -173,6 +257,8 @@ def write_paper_eval_artifacts(
                 if isinstance(state_diagnostic_counts, dict) and state_diagnostic_counts
                 else None
             ),
+            "projection_stats_csv": "projection_stats.csv" if available_projection_cols else None,
+            "dispatch_stats_csv": "dispatch_stats.csv" if dispatch_stats else None,
             "step_log_light_csv": "step_log_light.csv",
             "daily_agg_csv": "daily_agg.csv",
         },

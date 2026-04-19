@@ -11,6 +11,9 @@ from tespy.networks import Network
 from .solver_cache import SolverCache
 
 
+GT_MIN_OUTPUT_EPS_MW = 1e-6
+
+
 def _clip(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
@@ -125,7 +128,10 @@ class GTNetwork:
     def solve_offdesign(self, *, p_gt_request_mw: float, t_amb_k: float) -> GTResult:
         p_gt = _clip(p_gt_request_mw, 0.0, self.design.p_gt_cap_mw)
         if 0.0 < p_gt < self.design.gt_min_output_mw:
-            p_gt = 0.0
+            if p_gt >= (self.design.gt_min_output_mw - GT_MIN_OUTPUT_EPS_MW):
+                p_gt = self.design.gt_min_output_mw
+            else:
+                p_gt = 0.0
 
         if p_gt <= 0.0:
             return GTResult(

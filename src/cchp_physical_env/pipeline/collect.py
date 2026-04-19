@@ -1,4 +1,4 @@
-# Ref: docs/spec/task.md (Task-ID: 011)
+# Ref: docs/spec/task.md (Task-ID: 012)
 # Ref: docs/spec/architecture.md (Module: pipeline/)
 from __future__ import annotations
 
@@ -42,6 +42,24 @@ DEFAULT_PAPER_COLUMNS: tuple[str, ...] = (
     "cost_breakdown__unmet_c",
     "cost_breakdown__viol",
     "emissions_ton__total",
+    "dispatch_stats__u_gt_raw__mean",
+    "dispatch_stats__u_abs_raw__mean",
+    "dispatch_stats__u_boiler_final__mean",
+    "dispatch_stats__p_gt_mw__mean",
+    "dispatch_stats__p_grid_import_mw__mean",
+    "dispatch_stats__q_boiler_mw__mean",
+    "dispatch_stats__q_abs_cool_mw__mean",
+    "dispatch_stats__q_ech_cool_mw__mean",
+    "dispatch_stats__gt_active_rate",
+    "dispatch_stats__boiler_active_rate",
+    "dispatch_stats__abs_active_rate",
+    "dispatch_stats__ech_active_rate",
+    "dispatch_stats__cooling_supply_abs_share",
+    "dispatch_stats__cooling_supply_ech_share",
+    "projection_stats__projection_gap_l1__mean",
+    "projection_stats__projection_gap_l2__mean",
+    "projection_stats__projection_gap_max__mean",
+    "projection_stats__projection_adjusted_step_rate",
 )
 
 
@@ -60,6 +78,21 @@ def _find_eval_summaries(runs_root: str | Path) -> list[Path]:
     return summaries
 
 
+def _read_metric_mapping_csv(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        metric_df = pd.read_csv(path)
+    except Exception:
+        return {}
+    if not {"metric", "value"}.issubset(metric_df.columns):
+        return {}
+    return {
+        str(metric): value
+        for metric, value in zip(metric_df["metric"].tolist(), metric_df["value"].tolist())
+    }
+
+
 def collect_run_summaries(*, runs_root: str | Path) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     for summary_path in _find_eval_summaries(runs_root):
@@ -70,6 +103,10 @@ def collect_run_summaries(*, runs_root: str | Path) -> pd.DataFrame:
         eval_dir = summary_path.parent
         run_dir = eval_dir.parent
         row = flatten_mapping(summary)
+        for metric_name in ("projection_stats", "dispatch_stats"):
+            metric_mapping = _read_metric_mapping_csv(eval_dir / f"{metric_name}.csv")
+            if metric_mapping:
+                row.update(flatten_mapping({metric_name: metric_mapping}))
         row["run_name"] = str(run_dir.name)
         row["run_dir"] = str(run_dir).replace("\\", "/")
         row["eval_dir"] = str(eval_dir).replace("\\", "/")

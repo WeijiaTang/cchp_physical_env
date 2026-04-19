@@ -86,6 +86,99 @@ TRAINING_DEFAULTS: dict[str, Any] = {
     "sb3_plateau_lr_decay_factor": 0.5,
     "sb3_plateau_min_lr": 5e-5,
     "sb3_plateau_early_stop_patience_evals": 999,
+    # Task-012：PAFC-TD3 通用 train/eval 路由默认项
+    "pafc_projection_surrogate_checkpoint": "",
+    "pafc_episode_days": 7,
+    "pafc_total_env_steps": 4_096,
+    "pafc_warmup_steps": 512,
+    "pafc_replay_capacity": 50_000,
+    "pafc_batch_size": 128,
+    "pafc_updates_per_step": 1,
+    "pafc_gamma": 0.99,
+    "pafc_tau": 0.005,
+    "pafc_actor_lr": 1e-4,
+    "pafc_critic_lr": 3e-4,
+    "pafc_dual_lr": 5e-3,
+    "pafc_dual_warmup_steps": 1024,
+    "pafc_actor_delay": 2,
+    "pafc_exploration_noise_std": 0.08,
+    "pafc_target_policy_noise_std": 0.08,
+    "pafc_target_noise_clip": 0.15,
+    "pafc_gap_penalty_coef": 0.5,
+    "pafc_exec_action_anchor_coef": 5.0,
+    "pafc_exec_action_anchor_safe_floor": 0.2,
+    "pafc_gt_off_deadband_ratio": 0.0,
+    "pafc_abs_ready_focus_coef": 0.0,
+    "pafc_invalid_abs_penalty_coef": 0.0,
+    "pafc_economic_boiler_proxy_coef": 0.0,
+    "pafc_economic_abs_tradeoff_coef": 0.0,
+    "pafc_economic_gt_grid_proxy_coef": 0.25,
+    "pafc_economic_teacher_distill_coef": 0.0,
+    "pafc_economic_teacher_proxy_advantage_min": 0.02,
+    "pafc_economic_teacher_gt_proxy_advantage_min": 0.01,
+    "pafc_economic_teacher_bes_proxy_advantage_min": 0.002,
+    "pafc_economic_teacher_max_safe_abs_risk_gap": 0.05,
+    "pafc_economic_teacher_projection_gap_max": 0.20,
+    "pafc_economic_teacher_gt_projection_gap_max": 1.0,
+    "pafc_economic_teacher_bes_price_opportunity_min": 0.10,
+    "pafc_economic_teacher_bes_anchor_preserve_scale": 0.85,
+    "pafc_economic_teacher_warm_start_weight": 4.0,
+    "pafc_economic_teacher_prefill_replay_boost": 2,
+    "pafc_economic_teacher_gt_action_weight": 2.0,
+    "pafc_economic_teacher_bes_action_weight": 1.5,
+    "pafc_economic_teacher_tes_action_weight": 0.5,
+    "pafc_economic_teacher_full_year_warm_start_samples": 4096,
+    "pafc_economic_teacher_full_year_warm_start_epochs": 4,
+    "pafc_economic_bes_distill_coef": 0.0,
+    "pafc_economic_bes_prior_u": 0.35,
+    "pafc_economic_bes_charge_u_scale": 1.8,
+    "pafc_economic_bes_discharge_u_scale": 1.0,
+    "pafc_economic_bes_charge_weight": 2.0,
+    "pafc_economic_bes_discharge_weight": 1.0,
+    "pafc_economic_bes_charge_pressure_bonus": 1.0,
+    "pafc_economic_bes_charge_soc_ceiling": 0.75,
+    "pafc_economic_bes_discharge_soc_floor": 0.35,
+    "pafc_economic_bes_full_year_warm_start_samples": 4096,
+    "pafc_economic_bes_full_year_warm_start_epochs": 2,
+    "pafc_economic_bes_full_year_warm_start_u_weight": 4.0,
+    "pafc_economic_bes_teacher_selection_priority_boost": 0.75,
+    "pafc_economic_bes_economic_source_priority_bonus": 0.10,
+    "pafc_economic_bes_economic_source_min_share": 0.75,
+    "pafc_economic_bes_idle_economic_source_min_share": 0.75,
+    "pafc_economic_bes_teacher_target_min_share": 0.0,
+    "pafc_state_feasible_action_shaping_enabled": False,
+    "pafc_abs_min_on_gate_th": 0.75,
+    "pafc_abs_min_on_u_margin": 0.02,
+    "pafc_expert_prefill_policy": "easy_rule_abs",
+    "pafc_expert_prefill_checkpoint_path": "",
+    "pafc_expert_prefill_economic_policy": "checkpoint",
+    "pafc_expert_prefill_economic_checkpoint_path": "",
+    "pafc_expert_prefill_steps": 1024,
+    "pafc_expert_prefill_cooling_bias": 0.5,
+    "pafc_expert_prefill_abs_replay_boost": 0,
+    "pafc_expert_prefill_abs_exec_threshold": 0.05,
+    "pafc_expert_prefill_abs_window_mining_candidates": 4,
+    "pafc_dual_abs_margin_k": 1.25,
+    "pafc_dual_qc_ratio_th": 0.55,
+    "pafc_dual_heat_backup_ratio_th": 0.10,
+    "pafc_dual_safe_abs_u_th": 0.60,
+    "pafc_actor_warm_start_epochs": 2,
+    "pafc_actor_warm_start_batch_size": 256,
+    "pafc_actor_warm_start_lr": 1e-4,
+    "pafc_checkpoint_interval_steps": 0,
+    "pafc_eval_window_pool_size": 12,
+    "pafc_eval_window_count": 4,
+    "pafc_best_gate_enabled": True,
+    "pafc_best_gate_electric_min": 1.0,
+    "pafc_best_gate_heat_min": 0.99,
+    "pafc_best_gate_cool_min": 0.99,
+    "pafc_plateau_control_enabled": False,
+    "pafc_plateau_patience_evals": 2,
+    "pafc_plateau_lr_decay_factor": 0.5,
+    "pafc_plateau_min_actor_lr": 5e-5,
+    "pafc_plateau_min_critic_lr": 1e-4,
+    "pafc_plateau_early_stop_patience_evals": 2,
+    "pafc_hidden_dims": [256, 256],
 }
 
 # env 参数校验规则表：
@@ -355,6 +448,23 @@ def _validate_env_numeric_range(key: str, numeric_value: float) -> None:
         raise ValueError(error_message)
 
 
+def _normalize_hidden_dims_value(value: Any, *, key: str) -> tuple[int, ...]:
+    if value is None:
+        raise ValueError(f"{key} 不能为空。")
+    if isinstance(value, str):
+        tokens = [token.strip() for token in value.replace(";", ",").split(",") if token.strip()]
+    elif isinstance(value, (list, tuple)):
+        tokens = list(value)
+    else:
+        raise ValueError(f"{key} 必须是逗号分隔字符串或整数列表。")
+    if not tokens:
+        raise ValueError(f"{key} 不能为空。")
+    dims = tuple(int(token) for token in tokens)
+    if any(dim <= 0 for dim in dims):
+        raise ValueError(f"{key} 必须全部 > 0。")
+    return dims
+
+
 def load_yaml_config(path: str | Path) -> dict[str, Any]:
     file_path = Path(path)
     if not file_path.exists():
@@ -483,6 +593,9 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
         "sb3_offpolicy_prefill_enabled",
         "sb3_best_gate_enabled",
         "sb3_plateau_control_enabled",
+        "pafc_state_feasible_action_shaping_enabled",
+        "pafc_best_gate_enabled",
+        "pafc_plateau_control_enabled",
     }
     int_keys = {
         "seed",
@@ -508,6 +621,28 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
         "sb3_gradient_steps",
         "sb3_plateau_patience_evals",
         "sb3_plateau_early_stop_patience_evals",
+        "pafc_episode_days",
+        "pafc_total_env_steps",
+        "pafc_replay_capacity",
+        "pafc_batch_size",
+        "pafc_updates_per_step",
+        "pafc_dual_warmup_steps",
+        "pafc_actor_delay",
+        "pafc_expert_prefill_steps",
+        "pafc_expert_prefill_abs_replay_boost",
+        "pafc_economic_teacher_prefill_replay_boost",
+        "pafc_expert_prefill_abs_window_mining_candidates",
+        "pafc_economic_teacher_full_year_warm_start_samples",
+        "pafc_economic_teacher_full_year_warm_start_epochs",
+        "pafc_economic_bes_full_year_warm_start_samples",
+        "pafc_economic_bes_full_year_warm_start_epochs",
+        "pafc_actor_warm_start_epochs",
+        "pafc_actor_warm_start_batch_size",
+        "pafc_checkpoint_interval_steps",
+        "pafc_eval_window_pool_size",
+        "pafc_eval_window_count",
+        "pafc_plateau_patience_evals",
+        "pafc_plateau_early_stop_patience_evals",
     }
     for key, value in overrides.items():
         if key in {
@@ -517,9 +652,25 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
             "sb3_dqn_action_mode",
             "sb3_offpolicy_prefill_policy",
             "sb3_residual_policy",
+            "pafc_expert_prefill_policy",
+            "pafc_expert_prefill_economic_policy",
         }:
             if len(str(value).strip()) == 0:
                 raise ValueError(f"{key} 不能为空。")
+            continue
+        if key in {
+            "pafc_expert_prefill_checkpoint_path",
+            "pafc_expert_prefill_economic_checkpoint_path",
+        }:
+            if not isinstance(value, str):
+                raise ValueError(f"{key} 必须是字符串路径。")
+            continue
+        if key == "pafc_projection_surrogate_checkpoint":
+            if not isinstance(value, str):
+                raise ValueError("pafc_projection_surrogate_checkpoint 必须是字符串路径。")
+            continue
+        if key == "pafc_hidden_dims":
+            _normalize_hidden_dims_value(value, key=key)
             continue
         if key in {"sb3_algo"}:
             if len(str(value).strip()) == 0:
@@ -550,10 +701,40 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
                         int(raw)
                     except (ValueError, TypeError):
                         raise ValueError(f"{key} 必须是整数类型。")
-                    if int(raw) <= 0:
+                    if key in {
+                        "pafc_expert_prefill_abs_replay_boost",
+                        "pafc_economic_teacher_prefill_replay_boost",
+                        "pafc_expert_prefill_abs_window_mining_candidates",
+                        "pafc_economic_teacher_full_year_warm_start_samples",
+                        "pafc_economic_teacher_full_year_warm_start_epochs",
+                        "pafc_economic_bes_full_year_warm_start_samples",
+                        "pafc_economic_bes_full_year_warm_start_epochs",
+                        "pafc_actor_warm_start_epochs",
+                        "pafc_checkpoint_interval_steps",
+                        "pafc_eval_window_pool_size",
+                        "pafc_eval_window_count",
+                    }:
+                        if int(raw) < 0:
+                            raise ValueError(f"{key} 必须 >= 0。")
+                    elif int(raw) <= 0:
                         raise ValueError(f"{key} 必须 > 0。")
             else:
-                if int(value) <= 0 and key != "seed":
+                if key in {
+                    "pafc_expert_prefill_abs_replay_boost",
+                    "pafc_economic_teacher_prefill_replay_boost",
+                    "pafc_expert_prefill_abs_window_mining_candidates",
+                    "pafc_economic_teacher_full_year_warm_start_samples",
+                    "pafc_economic_teacher_full_year_warm_start_epochs",
+                    "pafc_economic_bes_full_year_warm_start_samples",
+                    "pafc_economic_bes_full_year_warm_start_epochs",
+                    "pafc_actor_warm_start_epochs",
+                    "pafc_checkpoint_interval_steps",
+                    "pafc_eval_window_pool_size",
+                    "pafc_eval_window_count",
+                }:
+                    if int(value) < 0:
+                        raise ValueError(f"{key} 必须 >= 0。")
+                elif int(value) <= 0 and key != "seed":
                     raise ValueError(f"{key} 必须 > 0。")
             continue
         if key in {"lr", "sb3_learning_rate", "sb3_plateau_min_lr"}:
@@ -580,11 +761,24 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
             if int(value) < 0:
                 raise ValueError(f"{key} 必须 >= 0。")
             continue
+        if key in {"pafc_warmup_steps"}:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{key} 必须是整数类型。")
+            if int(value) < 0:
+                raise ValueError(f"{key} 必须 >= 0。")
+            continue
         if key in {"sb3_eval_window_pool_size", "sb3_eval_window_count"}:
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ValueError(f"{key} 必须是整数类型。")
             if int(value) < 0:
                 raise ValueError(f"{key} 必须 >= 0。")
+            continue
+        if key == "pafc_gamma":
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError("pafc_gamma 必须是数值类型。")
+            numeric = float(value)
+            if not (0.0 <= numeric <= 1.0):
+                raise ValueError("pafc_gamma 必须在 [0,1]。")
             continue
         if key == "sb3_gamma":
             if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -593,12 +787,110 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
             if not (0.0 < numeric <= 1.0):
                 raise ValueError("sb3_gamma 必须在 (0,1]。")
             continue
+        if key == "pafc_tau":
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError("pafc_tau 必须是数值类型。")
+            numeric = float(value)
+            if not (0.0 < numeric <= 1.0):
+                raise ValueError("pafc_tau 必须在 (0,1]。")
+            continue
         if key == "sb3_ppo_gae_lambda":
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ValueError("sb3_ppo_gae_lambda 必须是数值类型。")
             numeric = float(value)
             if not (0.0 < numeric <= 1.0):
                 raise ValueError("sb3_ppo_gae_lambda 必须在 (0,1]。")
+            continue
+        if key in {"pafc_actor_lr", "pafc_critic_lr"}:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{key} 必须是数值类型。")
+            if float(value) <= 0.0:
+                raise ValueError(f"{key} 必须 > 0。")
+            continue
+        if key in {
+            "pafc_dual_lr",
+            "pafc_exploration_noise_std",
+            "pafc_target_policy_noise_std",
+            "pafc_target_noise_clip",
+            "pafc_gap_penalty_coef",
+            "pafc_exec_action_anchor_coef",
+            "pafc_exec_action_anchor_safe_floor",
+            "pafc_gt_off_deadband_ratio",
+            "pafc_abs_ready_focus_coef",
+            "pafc_invalid_abs_penalty_coef",
+            "pafc_economic_boiler_proxy_coef",
+            "pafc_economic_abs_tradeoff_coef",
+            "pafc_economic_gt_grid_proxy_coef",
+            "pafc_economic_teacher_distill_coef",
+            "pafc_economic_teacher_proxy_advantage_min",
+            "pafc_economic_teacher_gt_proxy_advantage_min",
+            "pafc_economic_teacher_bes_proxy_advantage_min",
+            "pafc_economic_teacher_max_safe_abs_risk_gap",
+            "pafc_economic_teacher_projection_gap_max",
+            "pafc_economic_teacher_gt_projection_gap_max",
+            "pafc_economic_teacher_bes_price_opportunity_min",
+            "pafc_economic_teacher_bes_anchor_preserve_scale",
+            "pafc_economic_teacher_warm_start_weight",
+            "pafc_economic_teacher_gt_action_weight",
+            "pafc_economic_teacher_bes_action_weight",
+            "pafc_economic_teacher_tes_action_weight",
+            "pafc_economic_teacher_full_year_warm_start_samples",
+            "pafc_economic_teacher_full_year_warm_start_epochs",
+            "pafc_economic_bes_distill_coef",
+            "pafc_economic_bes_prior_u",
+            "pafc_economic_bes_charge_u_scale",
+            "pafc_economic_bes_discharge_u_scale",
+            "pafc_economic_bes_charge_weight",
+            "pafc_economic_bes_discharge_weight",
+            "pafc_economic_bes_charge_pressure_bonus",
+            "pafc_economic_bes_charge_soc_ceiling",
+            "pafc_economic_bes_discharge_soc_floor",
+            "pafc_economic_bes_full_year_warm_start_u_weight",
+            "pafc_economic_bes_teacher_selection_priority_boost",
+            "pafc_economic_bes_economic_source_priority_bonus",
+            "pafc_economic_bes_economic_source_min_share",
+            "pafc_economic_bes_idle_economic_source_min_share",
+            "pafc_economic_bes_teacher_target_min_share",
+            "pafc_abs_min_on_gate_th",
+            "pafc_abs_min_on_u_margin",
+            "pafc_expert_prefill_cooling_bias",
+            "pafc_expert_prefill_abs_exec_threshold",
+            "pafc_dual_abs_margin_k",
+            "pafc_dual_qc_ratio_th",
+            "pafc_dual_heat_backup_ratio_th",
+            "pafc_dual_safe_abs_u_th",
+            "pafc_actor_warm_start_lr",
+            "pafc_plateau_lr_decay_factor",
+            "pafc_plateau_min_actor_lr",
+            "pafc_plateau_min_critic_lr",
+        }:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{key} 必须是数值类型。")
+            numeric = float(value)
+            if key in {
+                "pafc_expert_prefill_cooling_bias",
+                "pafc_expert_prefill_abs_exec_threshold",
+                "pafc_abs_min_on_gate_th",
+                "pafc_dual_safe_abs_u_th",
+                "pafc_exec_action_anchor_safe_floor",
+                "pafc_gt_off_deadband_ratio",
+                "pafc_economic_teacher_proxy_advantage_min",
+                "pafc_economic_teacher_gt_proxy_advantage_min",
+                "pafc_economic_teacher_bes_proxy_advantage_min",
+                "pafc_economic_teacher_max_safe_abs_risk_gap",
+                "pafc_economic_teacher_bes_price_opportunity_min",
+                "pafc_economic_teacher_bes_anchor_preserve_scale",
+                "pafc_economic_bes_prior_u",
+                "pafc_economic_bes_charge_soc_ceiling",
+                "pafc_economic_bes_discharge_soc_floor",
+                "pafc_economic_bes_economic_source_min_share",
+                "pafc_economic_bes_idle_economic_source_min_share",
+                "pafc_economic_bes_teacher_target_min_share",
+            }:
+                if not (0.0 <= numeric <= 1.0):
+                    raise ValueError(f"{key} 必须在 [0,1]。")
+            elif numeric < 0.0:
+                raise ValueError(f"{key} 必须 >= 0。")
             continue
         if key == "sb3_dqn_exploration_fraction":
             if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -649,11 +941,11 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
     sb3_enabled_flag = bool(overrides.get("sb3_enabled", TRAINING_DEFAULTS.get("sb3_enabled", False)))
     if sb3_enabled_flag:
         # sb3_enabled=true 时，policy 仅作记录，但仍需要校验以避免拼写错误污染实验口径。
-        if policy not in {"rule", "easy_rule", "random", "sequence_rule", "milp_mpc", "ga_mpc", "sb3"}:
-            raise ValueError("training.policy 仅支持 rule/easy_rule/random/sequence_rule/milp_mpc/ga_mpc/sb3（sb3_enabled=true 时该字段仅作备注，不参与路由）。")
+        if policy not in {"rule", "easy_rule", "random", "sequence_rule", "milp_mpc", "ga_mpc", "sb3", "pafc_td3"}:
+            raise ValueError("training.policy 仅支持 rule/easy_rule/random/sequence_rule/milp_mpc/ga_mpc/sb3/pafc_td3（sb3_enabled=true 时该字段仅作备注，不参与路由）。")
     else:
-        if policy not in {"rule", "easy_rule", "random", "sequence_rule", "milp_mpc", "ga_mpc"}:
-            raise ValueError("training.policy 仅支持 rule/easy_rule/random/sequence_rule/milp_mpc/ga_mpc（sb3_enabled=false）。")
+        if policy not in {"rule", "easy_rule", "random", "sequence_rule", "milp_mpc", "ga_mpc", "pafc_td3"}:
+            raise ValueError("training.policy 仅支持 rule/easy_rule/random/sequence_rule/milp_mpc/ga_mpc/pafc_td3（sb3_enabled=false）。")
     sequence_adapter = str(
         overrides.get("sequence_adapter", TRAINING_DEFAULTS["sequence_adapter"])
     ).strip().lower()
@@ -681,6 +973,21 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
         raise ValueError("sb3_eval_window_pool_size=0 时，sb3_eval_window_count 也必须为 0。")
     if eval_window_pool_size > 0 and eval_window_count > eval_window_pool_size:
         raise ValueError("sb3_eval_window_count 不能大于 sb3_eval_window_pool_size。")
+    pafc_eval_window_pool_size = int(
+        overrides.get("pafc_eval_window_pool_size", TRAINING_DEFAULTS["pafc_eval_window_pool_size"])
+    )
+    pafc_eval_window_count = int(
+        overrides.get("pafc_eval_window_count", TRAINING_DEFAULTS["pafc_eval_window_count"])
+    )
+    if pafc_eval_window_pool_size == 0 and pafc_eval_window_count != 0:
+        raise ValueError("pafc_eval_window_pool_size=0 时，pafc_eval_window_count 也必须为 0。")
+    if pafc_eval_window_pool_size > 0 and pafc_eval_window_count > pafc_eval_window_pool_size:
+        raise ValueError("pafc_eval_window_count 不能大于 pafc_eval_window_pool_size。")
+    pafc_checkpoint_interval_steps = int(
+        overrides.get("pafc_checkpoint_interval_steps", TRAINING_DEFAULTS["pafc_checkpoint_interval_steps"])
+    )
+    if pafc_checkpoint_interval_steps < 0:
+        raise ValueError("pafc_checkpoint_interval_steps 必须 >= 0（0 表示自动）。")
     residual_policy = str(
         overrides.get("sb3_residual_policy", TRAINING_DEFAULTS["sb3_residual_policy"])
     ).strip().lower().replace("-", "_")
@@ -704,6 +1011,61 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
     ).strip().lower().replace("-", "_")
     if offpolicy_prefill_policy not in {"easy_rule", "rule"}:
         raise ValueError("training.sb3_offpolicy_prefill_policy 当前仅支持 easy_rule/rule。")
+    pafc_prefill_policy = str(
+        overrides.get(
+            "pafc_expert_prefill_policy",
+            TRAINING_DEFAULTS["pafc_expert_prefill_policy"],
+        )
+    ).strip().lower().replace("-", "_")
+    if pafc_prefill_policy not in {
+        "easy_rule",
+        "rule",
+        "easy_rule_abs",
+        "checkpoint",
+        "checkpoint_dual",
+    }:
+        raise ValueError(
+            "training.pafc_expert_prefill_policy 当前仅支持 "
+            "easy_rule/rule/easy_rule_abs/checkpoint/checkpoint_dual。"
+        )
+    pafc_prefill_economic_policy = str(
+        overrides.get(
+            "pafc_expert_prefill_economic_policy",
+            TRAINING_DEFAULTS["pafc_expert_prefill_economic_policy"],
+        )
+    ).strip().lower().replace("-", "_")
+    if pafc_prefill_economic_policy not in {"checkpoint", "milp_mpc", "ga_mpc"}:
+        raise ValueError(
+            "training.pafc_expert_prefill_economic_policy 当前仅支持 "
+            "checkpoint/milp_mpc/ga_mpc。"
+        )
+    pafc_prefill_checkpoint_path = str(
+        overrides.get(
+            "pafc_expert_prefill_checkpoint_path",
+            TRAINING_DEFAULTS["pafc_expert_prefill_checkpoint_path"],
+        )
+    ).strip()
+    if pafc_prefill_policy in {"checkpoint", "checkpoint_dual"} and len(pafc_prefill_checkpoint_path) == 0:
+        raise ValueError(
+            "training.pafc_expert_prefill_policy=checkpoint/checkpoint_dual 时必须提供 "
+            "pafc_expert_prefill_checkpoint_path。"
+        )
+    pafc_prefill_economic_checkpoint_path = str(
+        overrides.get(
+            "pafc_expert_prefill_economic_checkpoint_path",
+            TRAINING_DEFAULTS["pafc_expert_prefill_economic_checkpoint_path"],
+        )
+    ).strip()
+    if (
+        pafc_prefill_policy == "checkpoint_dual"
+        and pafc_prefill_economic_policy == "checkpoint"
+        and len(pafc_prefill_economic_checkpoint_path) == 0
+    ):
+        raise ValueError(
+            "training.pafc_expert_prefill_policy=checkpoint_dual 且 "
+            "training.pafc_expert_prefill_economic_policy=checkpoint 时必须提供 "
+            "pafc_expert_prefill_economic_checkpoint_path。"
+        )
     dqn_initial_eps = float(
         overrides.get(
             "sb3_dqn_exploration_initial_eps",
@@ -722,10 +1084,39 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
         gate_value = float(overrides.get(key, TRAINING_DEFAULTS[key]))
         if gate_value < 0.0 or gate_value > 1.0:
             raise ValueError(f"{key} 必须在 [0,1]。")
+    for key in ("pafc_best_gate_electric_min", "pafc_best_gate_heat_min", "pafc_best_gate_cool_min"):
+        gate_value = float(overrides.get(key, TRAINING_DEFAULTS[key]))
+        if gate_value < 0.0 or gate_value > 1.0:
+            raise ValueError(f"{key} 必须在 [0,1]。")
+    pafc_plateau_lr_decay_factor = float(
+        overrides.get("pafc_plateau_lr_decay_factor", TRAINING_DEFAULTS["pafc_plateau_lr_decay_factor"])
+    )
+    if pafc_plateau_lr_decay_factor <= 0.0 or pafc_plateau_lr_decay_factor > 1.0:
+        raise ValueError("pafc_plateau_lr_decay_factor 必须在 (0,1]。")
+    pafc_plateau_min_actor_lr = float(
+        overrides.get("pafc_plateau_min_actor_lr", TRAINING_DEFAULTS["pafc_plateau_min_actor_lr"])
+    )
+    pafc_plateau_min_critic_lr = float(
+        overrides.get("pafc_plateau_min_critic_lr", TRAINING_DEFAULTS["pafc_plateau_min_critic_lr"])
+    )
+    if pafc_plateau_min_actor_lr <= 0.0 or pafc_plateau_min_critic_lr <= 0.0:
+        raise ValueError("pafc_plateau_min_actor_lr / pafc_plateau_min_critic_lr 必须 > 0。")
+    pafc_actor_lr = float(overrides.get("pafc_actor_lr", TRAINING_DEFAULTS["pafc_actor_lr"]))
+    pafc_critic_lr = float(overrides.get("pafc_critic_lr", TRAINING_DEFAULTS["pafc_critic_lr"]))
+    if pafc_plateau_min_actor_lr > pafc_actor_lr:
+        raise ValueError("pafc_plateau_min_actor_lr 不能大于 pafc_actor_lr。")
+    if pafc_plateau_min_critic_lr > pafc_critic_lr:
+        raise ValueError("pafc_plateau_min_critic_lr 不能大于 pafc_critic_lr。")
     plateau_min_lr = float(overrides.get("sb3_plateau_min_lr", TRAINING_DEFAULTS["sb3_plateau_min_lr"]))
     learning_rate = float(overrides.get("sb3_learning_rate", TRAINING_DEFAULTS["sb3_learning_rate"]))
     if plateau_min_lr > learning_rate:
         raise ValueError("sb3_plateau_min_lr 不能大于 sb3_learning_rate。")
+    pafc_hidden_dims = _normalize_hidden_dims_value(
+        overrides.get("pafc_hidden_dims", TRAINING_DEFAULTS["pafc_hidden_dims"]),
+        key="pafc_hidden_dims",
+    )
+    if not pafc_hidden_dims:
+        raise ValueError("pafc_hidden_dims 不能为空。")
 
 
 def build_training_options(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -810,5 +1201,188 @@ def build_training_options(overrides: dict[str, Any] | None = None) -> dict[str,
     normalized["sb3_plateau_min_lr"] = float(normalized["sb3_plateau_min_lr"])
     normalized["sb3_plateau_early_stop_patience_evals"] = int(
         normalized["sb3_plateau_early_stop_patience_evals"]
+    )
+    normalized["pafc_projection_surrogate_checkpoint"] = str(
+        normalized["pafc_projection_surrogate_checkpoint"]
+    ).strip()
+    normalized["pafc_episode_days"] = int(normalized["pafc_episode_days"])
+    normalized["pafc_total_env_steps"] = int(normalized["pafc_total_env_steps"])
+    normalized["pafc_warmup_steps"] = int(normalized["pafc_warmup_steps"])
+    normalized["pafc_replay_capacity"] = int(normalized["pafc_replay_capacity"])
+    normalized["pafc_batch_size"] = int(normalized["pafc_batch_size"])
+    normalized["pafc_updates_per_step"] = int(normalized["pafc_updates_per_step"])
+    normalized["pafc_gamma"] = float(normalized["pafc_gamma"])
+    normalized["pafc_tau"] = float(normalized["pafc_tau"])
+    normalized["pafc_actor_lr"] = float(normalized["pafc_actor_lr"])
+    normalized["pafc_critic_lr"] = float(normalized["pafc_critic_lr"])
+    normalized["pafc_dual_lr"] = float(normalized["pafc_dual_lr"])
+    normalized["pafc_dual_warmup_steps"] = int(normalized["pafc_dual_warmup_steps"])
+    normalized["pafc_actor_delay"] = int(normalized["pafc_actor_delay"])
+    normalized["pafc_exploration_noise_std"] = float(normalized["pafc_exploration_noise_std"])
+    normalized["pafc_target_policy_noise_std"] = float(normalized["pafc_target_policy_noise_std"])
+    normalized["pafc_target_noise_clip"] = float(normalized["pafc_target_noise_clip"])
+    normalized["pafc_gap_penalty_coef"] = float(normalized["pafc_gap_penalty_coef"])
+    normalized["pafc_exec_action_anchor_coef"] = float(normalized["pafc_exec_action_anchor_coef"])
+    normalized["pafc_exec_action_anchor_safe_floor"] = float(
+        normalized["pafc_exec_action_anchor_safe_floor"]
+    )
+    normalized["pafc_gt_off_deadband_ratio"] = float(normalized["pafc_gt_off_deadband_ratio"])
+    normalized["pafc_abs_ready_focus_coef"] = float(normalized["pafc_abs_ready_focus_coef"])
+    normalized["pafc_invalid_abs_penalty_coef"] = float(normalized["pafc_invalid_abs_penalty_coef"])
+    normalized["pafc_economic_boiler_proxy_coef"] = float(normalized["pafc_economic_boiler_proxy_coef"])
+    normalized["pafc_economic_abs_tradeoff_coef"] = float(normalized["pafc_economic_abs_tradeoff_coef"])
+    normalized["pafc_economic_gt_grid_proxy_coef"] = float(
+        normalized["pafc_economic_gt_grid_proxy_coef"]
+    )
+    normalized["pafc_economic_teacher_distill_coef"] = float(
+        normalized["pafc_economic_teacher_distill_coef"]
+    )
+    normalized["pafc_economic_teacher_proxy_advantage_min"] = float(
+        normalized["pafc_economic_teacher_proxy_advantage_min"]
+    )
+    normalized["pafc_economic_teacher_gt_proxy_advantage_min"] = float(
+        normalized["pafc_economic_teacher_gt_proxy_advantage_min"]
+    )
+    normalized["pafc_economic_teacher_bes_proxy_advantage_min"] = float(
+        normalized["pafc_economic_teacher_bes_proxy_advantage_min"]
+    )
+    normalized["pafc_economic_teacher_max_safe_abs_risk_gap"] = float(
+        normalized["pafc_economic_teacher_max_safe_abs_risk_gap"]
+    )
+    normalized["pafc_economic_teacher_projection_gap_max"] = float(
+        normalized["pafc_economic_teacher_projection_gap_max"]
+    )
+    normalized["pafc_economic_teacher_gt_projection_gap_max"] = float(
+        normalized["pafc_economic_teacher_gt_projection_gap_max"]
+    )
+    normalized["pafc_economic_teacher_bes_price_opportunity_min"] = float(
+        normalized["pafc_economic_teacher_bes_price_opportunity_min"]
+    )
+    normalized["pafc_economic_teacher_bes_anchor_preserve_scale"] = float(
+        normalized["pafc_economic_teacher_bes_anchor_preserve_scale"]
+    )
+    normalized["pafc_economic_teacher_warm_start_weight"] = float(
+        normalized["pafc_economic_teacher_warm_start_weight"]
+    )
+    normalized["pafc_economic_teacher_prefill_replay_boost"] = int(
+        normalized["pafc_economic_teacher_prefill_replay_boost"]
+    )
+    normalized["pafc_economic_teacher_gt_action_weight"] = float(
+        normalized["pafc_economic_teacher_gt_action_weight"]
+    )
+    normalized["pafc_economic_teacher_bes_action_weight"] = float(
+        normalized["pafc_economic_teacher_bes_action_weight"]
+    )
+    normalized["pafc_economic_teacher_tes_action_weight"] = float(
+        normalized["pafc_economic_teacher_tes_action_weight"]
+    )
+    normalized["pafc_economic_teacher_full_year_warm_start_samples"] = int(
+        normalized["pafc_economic_teacher_full_year_warm_start_samples"]
+    )
+    normalized["pafc_economic_teacher_full_year_warm_start_epochs"] = int(
+        normalized["pafc_economic_teacher_full_year_warm_start_epochs"]
+    )
+    normalized["pafc_economic_bes_distill_coef"] = float(
+        normalized["pafc_economic_bes_distill_coef"]
+    )
+    normalized["pafc_economic_bes_prior_u"] = float(normalized["pafc_economic_bes_prior_u"])
+    normalized["pafc_economic_bes_charge_u_scale"] = float(
+        normalized["pafc_economic_bes_charge_u_scale"]
+    )
+    normalized["pafc_economic_bes_discharge_u_scale"] = float(
+        normalized["pafc_economic_bes_discharge_u_scale"]
+    )
+    normalized["pafc_economic_bes_charge_weight"] = float(
+        normalized["pafc_economic_bes_charge_weight"]
+    )
+    normalized["pafc_economic_bes_discharge_weight"] = float(
+        normalized["pafc_economic_bes_discharge_weight"]
+    )
+    normalized["pafc_economic_bes_charge_pressure_bonus"] = float(
+        normalized["pafc_economic_bes_charge_pressure_bonus"]
+    )
+    normalized["pafc_economic_bes_charge_soc_ceiling"] = float(
+        normalized["pafc_economic_bes_charge_soc_ceiling"]
+    )
+    normalized["pafc_economic_bes_discharge_soc_floor"] = float(
+        normalized["pafc_economic_bes_discharge_soc_floor"]
+    )
+    normalized["pafc_economic_bes_full_year_warm_start_samples"] = int(
+        normalized["pafc_economic_bes_full_year_warm_start_samples"]
+    )
+    normalized["pafc_economic_bes_full_year_warm_start_epochs"] = int(
+        normalized["pafc_economic_bes_full_year_warm_start_epochs"]
+    )
+    normalized["pafc_economic_bes_full_year_warm_start_u_weight"] = float(
+        normalized["pafc_economic_bes_full_year_warm_start_u_weight"]
+    )
+    normalized["pafc_economic_bes_teacher_selection_priority_boost"] = float(
+        normalized["pafc_economic_bes_teacher_selection_priority_boost"]
+    )
+    normalized["pafc_economic_bes_economic_source_priority_bonus"] = float(
+        normalized["pafc_economic_bes_economic_source_priority_bonus"]
+    )
+    normalized["pafc_economic_bes_economic_source_min_share"] = float(
+        normalized["pafc_economic_bes_economic_source_min_share"]
+    )
+    normalized["pafc_economic_bes_idle_economic_source_min_share"] = float(
+        normalized["pafc_economic_bes_idle_economic_source_min_share"]
+    )
+    normalized["pafc_economic_bes_teacher_target_min_share"] = float(
+        normalized["pafc_economic_bes_teacher_target_min_share"]
+    )
+    normalized["pafc_state_feasible_action_shaping_enabled"] = bool(
+        normalized["pafc_state_feasible_action_shaping_enabled"]
+    )
+    normalized["pafc_abs_min_on_gate_th"] = float(normalized["pafc_abs_min_on_gate_th"])
+    normalized["pafc_abs_min_on_u_margin"] = float(normalized["pafc_abs_min_on_u_margin"])
+    normalized["pafc_expert_prefill_policy"] = (
+        str(normalized["pafc_expert_prefill_policy"]).strip().lower().replace("-", "_")
+    )
+    normalized["pafc_expert_prefill_checkpoint_path"] = str(
+        normalized["pafc_expert_prefill_checkpoint_path"]
+    ).strip()
+    normalized["pafc_expert_prefill_economic_policy"] = (
+        str(normalized["pafc_expert_prefill_economic_policy"]).strip().lower().replace("-", "_")
+    )
+    normalized["pafc_expert_prefill_economic_checkpoint_path"] = str(
+        normalized["pafc_expert_prefill_economic_checkpoint_path"]
+    ).strip()
+    normalized["pafc_expert_prefill_steps"] = int(normalized["pafc_expert_prefill_steps"])
+    normalized["pafc_expert_prefill_cooling_bias"] = float(normalized["pafc_expert_prefill_cooling_bias"])
+    normalized["pafc_expert_prefill_abs_replay_boost"] = int(normalized["pafc_expert_prefill_abs_replay_boost"])
+    normalized["pafc_expert_prefill_abs_exec_threshold"] = float(normalized["pafc_expert_prefill_abs_exec_threshold"])
+    normalized["pafc_expert_prefill_abs_window_mining_candidates"] = int(
+        normalized["pafc_expert_prefill_abs_window_mining_candidates"]
+    )
+    normalized["pafc_dual_abs_margin_k"] = float(normalized["pafc_dual_abs_margin_k"])
+    normalized["pafc_dual_qc_ratio_th"] = float(normalized["pafc_dual_qc_ratio_th"])
+    normalized["pafc_dual_heat_backup_ratio_th"] = float(
+        normalized["pafc_dual_heat_backup_ratio_th"]
+    )
+    normalized["pafc_dual_safe_abs_u_th"] = float(normalized["pafc_dual_safe_abs_u_th"])
+    normalized["pafc_actor_warm_start_epochs"] = int(normalized["pafc_actor_warm_start_epochs"])
+    normalized["pafc_actor_warm_start_batch_size"] = int(
+        normalized["pafc_actor_warm_start_batch_size"]
+    )
+    normalized["pafc_actor_warm_start_lr"] = float(normalized["pafc_actor_warm_start_lr"])
+    normalized["pafc_checkpoint_interval_steps"] = int(normalized["pafc_checkpoint_interval_steps"])
+    normalized["pafc_eval_window_pool_size"] = int(normalized["pafc_eval_window_pool_size"])
+    normalized["pafc_eval_window_count"] = int(normalized["pafc_eval_window_count"])
+    normalized["pafc_best_gate_enabled"] = bool(normalized["pafc_best_gate_enabled"])
+    normalized["pafc_best_gate_electric_min"] = float(normalized["pafc_best_gate_electric_min"])
+    normalized["pafc_best_gate_heat_min"] = float(normalized["pafc_best_gate_heat_min"])
+    normalized["pafc_best_gate_cool_min"] = float(normalized["pafc_best_gate_cool_min"])
+    normalized["pafc_plateau_control_enabled"] = bool(normalized["pafc_plateau_control_enabled"])
+    normalized["pafc_plateau_patience_evals"] = int(normalized["pafc_plateau_patience_evals"])
+    normalized["pafc_plateau_lr_decay_factor"] = float(normalized["pafc_plateau_lr_decay_factor"])
+    normalized["pafc_plateau_min_actor_lr"] = float(normalized["pafc_plateau_min_actor_lr"])
+    normalized["pafc_plateau_min_critic_lr"] = float(normalized["pafc_plateau_min_critic_lr"])
+    normalized["pafc_plateau_early_stop_patience_evals"] = int(
+        normalized["pafc_plateau_early_stop_patience_evals"]
+    )
+    normalized["pafc_hidden_dims"] = _normalize_hidden_dims_value(
+        normalized["pafc_hidden_dims"],
+        key="pafc_hidden_dims",
     )
     return normalized
