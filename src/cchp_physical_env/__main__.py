@@ -153,6 +153,13 @@ TRAINING_OPTION_KEYS = (
     "pafc_economic_gt_grid_proxy_coef",
     "pafc_economic_gt_distill_coef",
     "pafc_economic_teacher_distill_coef",
+    "pafc_economic_teacher_safe_preserve_coef",
+    "pafc_economic_teacher_safe_preserve_low_margin_boost",
+    "pafc_economic_teacher_safe_preserve_high_cooling_boost",
+    "pafc_economic_teacher_safe_preserve_joint_boost",
+    "pafc_economic_teacher_mismatch_focus_coef",
+    "pafc_economic_teacher_mismatch_focus_min_scale",
+    "pafc_economic_teacher_mismatch_focus_max_scale",
     "pafc_economic_teacher_proxy_advantage_min",
     "pafc_economic_teacher_gt_proxy_advantage_min",
     "pafc_economic_teacher_bes_proxy_advantage_min",
@@ -188,6 +195,8 @@ TRAINING_OPTION_KEYS = (
     "pafc_economic_bes_economic_source_min_share",
     "pafc_economic_bes_idle_economic_source_min_share",
     "pafc_economic_bes_teacher_target_min_share",
+    "pafc_surrogate_actor_trust_coef",
+    "pafc_surrogate_actor_trust_min_scale",
     "pafc_state_feasible_action_shaping_enabled",
     "pafc_abs_min_on_gate_th",
     "pafc_abs_min_on_u_margin",
@@ -573,6 +582,7 @@ def _command_train(args: argparse.Namespace) -> None:
                 "pafc_gap_penalty_coef",
                 "pafc_exec_action_anchor_coef",
                 "pafc_exec_action_anchor_safe_floor",
+                "pafc_gt_off_deadband_ratio",
                 "pafc_abs_ready_focus_coef",
                 "pafc_invalid_abs_penalty_coef",
                 "pafc_economic_boiler_proxy_coef",
@@ -580,14 +590,28 @@ def _command_train(args: argparse.Namespace) -> None:
                 "pafc_economic_gt_grid_proxy_coef",
                 "pafc_economic_gt_distill_coef",
                 "pafc_economic_teacher_distill_coef",
+                "pafc_economic_teacher_safe_preserve_coef",
+                "pafc_economic_teacher_safe_preserve_low_margin_boost",
+                "pafc_economic_teacher_safe_preserve_high_cooling_boost",
+                "pafc_economic_teacher_safe_preserve_joint_boost",
+                "pafc_economic_teacher_mismatch_focus_coef",
+                "pafc_economic_teacher_mismatch_focus_min_scale",
+                "pafc_economic_teacher_mismatch_focus_max_scale",
                 "pafc_economic_teacher_proxy_advantage_min",
+                "pafc_economic_teacher_gt_proxy_advantage_min",
                 "pafc_economic_teacher_bes_proxy_advantage_min",
                 "pafc_economic_teacher_max_safe_abs_risk_gap",
                 "pafc_economic_teacher_projection_gap_max",
+                "pafc_economic_teacher_gt_projection_gap_max",
                 "pafc_economic_teacher_bes_price_opportunity_min",
                 "pafc_economic_teacher_bes_anchor_preserve_scale",
                 "pafc_economic_teacher_warm_start_weight",
                 "pafc_economic_teacher_prefill_replay_boost",
+                "pafc_economic_teacher_gt_action_weight",
+                "pafc_economic_teacher_bes_action_weight",
+                "pafc_economic_teacher_tes_action_weight",
+                "pafc_economic_teacher_full_year_warm_start_samples",
+                "pafc_economic_teacher_full_year_warm_start_epochs",
                 "pafc_economic_bes_distill_coef",
                 "pafc_economic_bes_prior_u",
                 "pafc_economic_bes_charge_u_scale",
@@ -608,6 +632,8 @@ def _command_train(args: argparse.Namespace) -> None:
                 "pafc_economic_bes_economic_source_min_share",
                 "pafc_economic_bes_idle_economic_source_min_share",
                 "pafc_economic_bes_teacher_target_min_share",
+                "pafc_surrogate_actor_trust_coef",
+                "pafc_surrogate_actor_trust_min_scale",
                 "pafc_state_feasible_action_shaping_enabled",
                 "pafc_abs_min_on_gate_th",
                 "pafc_abs_min_on_u_margin",
@@ -694,6 +720,27 @@ def _command_train(args: argparse.Namespace) -> None:
                 ),
                 economic_teacher_distill_coef=float(
                     current_options["pafc_economic_teacher_distill_coef"]
+                ),
+                economic_teacher_safe_preserve_coef=float(
+                    current_options["pafc_economic_teacher_safe_preserve_coef"]
+                ),
+                economic_teacher_safe_preserve_low_margin_boost=float(
+                    current_options["pafc_economic_teacher_safe_preserve_low_margin_boost"]
+                ),
+                economic_teacher_safe_preserve_high_cooling_boost=float(
+                    current_options["pafc_economic_teacher_safe_preserve_high_cooling_boost"]
+                ),
+                economic_teacher_safe_preserve_joint_boost=float(
+                    current_options["pafc_economic_teacher_safe_preserve_joint_boost"]
+                ),
+                economic_teacher_mismatch_focus_coef=float(
+                    current_options["pafc_economic_teacher_mismatch_focus_coef"]
+                ),
+                economic_teacher_mismatch_focus_min_scale=float(
+                    current_options["pafc_economic_teacher_mismatch_focus_min_scale"]
+                ),
+                economic_teacher_mismatch_focus_max_scale=float(
+                    current_options["pafc_economic_teacher_mismatch_focus_max_scale"]
                 ),
                 economic_teacher_proxy_advantage_min=float(
                     current_options["pafc_economic_teacher_proxy_advantage_min"]
@@ -797,6 +844,12 @@ def _command_train(args: argparse.Namespace) -> None:
                 ),
                 economic_bes_teacher_target_min_share=float(
                     current_options["pafc_economic_bes_teacher_target_min_share"]
+                ),
+                surrogate_actor_trust_coef=float(
+                    current_options["pafc_surrogate_actor_trust_coef"]
+                ),
+                surrogate_actor_trust_min_scale=float(
+                    current_options["pafc_surrogate_actor_trust_min_scale"]
                 ),
                 state_feasible_action_shaping_enabled=bool(
                     current_options["pafc_state_feasible_action_shaping_enabled"]
@@ -1279,11 +1332,11 @@ def _command_pafc_train(args: argparse.Namespace) -> None:
     for seed in seed_values:
         config = PAFCTD3TrainConfig(
             projection_surrogate_checkpoint_path=args.projection_surrogate_checkpoint,
-            episode_days=int(_arg_or_training_default("episode_days", "pafc_episode_days", 7)),
-            total_env_steps=int(_arg_or_training_default("total_env_steps", "pafc_total_env_steps", 4096)),
-            warmup_steps=int(_arg_or_training_default("warmup_steps", "pafc_warmup_steps", 512)),
-            replay_capacity=int(_arg_or_training_default("replay_capacity", "pafc_replay_capacity", 50_000)),
-            batch_size=int(_arg_or_training_default("batch_size", "pafc_batch_size", 128)),
+            episode_days=int(_arg_or_training_default("episode_days", "pafc_episode_days", 14)),
+            total_env_steps=int(_arg_or_training_default("total_env_steps", "pafc_total_env_steps", 262_144)),
+            warmup_steps=int(_arg_or_training_default("warmup_steps", "pafc_warmup_steps", 4_096)),
+            replay_capacity=int(_arg_or_training_default("replay_capacity", "pafc_replay_capacity", 100_000)),
+            batch_size=int(_arg_or_training_default("batch_size", "pafc_batch_size", 256)),
             updates_per_step=int(_arg_or_training_default("updates_per_step", "pafc_updates_per_step", 1)),
             gamma=float(_arg_or_training_default("gamma", "pafc_gamma", 0.99)),
             tau=float(_arg_or_training_default("tau", "pafc_tau", 0.005)),
@@ -1291,21 +1344,21 @@ def _command_pafc_train(args: argparse.Namespace) -> None:
             critic_lr=float(_arg_or_training_default("critic_lr", "pafc_critic_lr", 3e-4)),
             dual_lr=float(_arg_or_training_default("dual_lr", "pafc_dual_lr", 5e-3)),
             dual_warmup_steps=int(
-                _arg_or_training_default("dual_warmup_steps", "pafc_dual_warmup_steps", 1024)
+                _arg_or_training_default("dual_warmup_steps", "pafc_dual_warmup_steps", 8_192)
             ),
             actor_delay=int(_arg_or_training_default("actor_delay", "pafc_actor_delay", 2)),
-            exploration_noise_std=float(_arg_or_training_default("exploration_noise_std", "pafc_exploration_noise_std", 0.08)),
-            target_policy_noise_std=float(_arg_or_training_default("target_policy_noise_std", "pafc_target_policy_noise_std", 0.08)),
-            target_noise_clip=float(_arg_or_training_default("target_noise_clip", "pafc_target_noise_clip", 0.15)),
-            gap_penalty_coef=float(_arg_or_training_default("gap_penalty_coef", "pafc_gap_penalty_coef", 0.5)),
+            exploration_noise_std=float(_arg_or_training_default("exploration_noise_std", "pafc_exploration_noise_std", 0.06)),
+            target_policy_noise_std=float(_arg_or_training_default("target_policy_noise_std", "pafc_target_policy_noise_std", 0.06)),
+            target_noise_clip=float(_arg_or_training_default("target_noise_clip", "pafc_target_noise_clip", 0.12)),
+            gap_penalty_coef=float(_arg_or_training_default("gap_penalty_coef", "pafc_gap_penalty_coef", 0.2)),
             exec_action_anchor_coef=float(
-                _arg_or_training_default("exec_action_anchor_coef", "pafc_exec_action_anchor_coef", 5.0)
+                _arg_or_training_default("exec_action_anchor_coef", "pafc_exec_action_anchor_coef", 1.5)
             ),
             exec_action_anchor_safe_floor=float(
                 _arg_or_training_default(
                     "exec_action_anchor_safe_floor",
                     "pafc_exec_action_anchor_safe_floor",
-                    0.2,
+                    0.05,
                 )
             ),
             gt_off_deadband_ratio=float(
@@ -1316,44 +1369,93 @@ def _command_pafc_train(args: argparse.Namespace) -> None:
                 )
             ),
             abs_ready_focus_coef=float(
-                _arg_or_training_default("abs_ready_focus_coef", "pafc_abs_ready_focus_coef", 0.0)
+                _arg_or_training_default("abs_ready_focus_coef", "pafc_abs_ready_focus_coef", 0.25)
             ),
             invalid_abs_penalty_coef=float(
-                _arg_or_training_default("invalid_abs_penalty_coef", "pafc_invalid_abs_penalty_coef", 0.0)
+                _arg_or_training_default("invalid_abs_penalty_coef", "pafc_invalid_abs_penalty_coef", 0.25)
             ),
             economic_boiler_proxy_coef=float(
                 _arg_or_training_default(
                     "economic_boiler_proxy_coef",
                     "pafc_economic_boiler_proxy_coef",
-                    0.0,
+                    0.10,
                 )
             ),
             economic_abs_tradeoff_coef=float(
                 _arg_or_training_default(
                     "economic_abs_tradeoff_coef",
                     "pafc_economic_abs_tradeoff_coef",
-                    0.0,
+                    0.05,
                 )
             ),
             economic_gt_grid_proxy_coef=float(
                 _arg_or_training_default(
                     "economic_gt_grid_proxy_coef",
                     "pafc_economic_gt_grid_proxy_coef",
-                    0.25,
+                    0.50,
                 )
             ),
             economic_gt_distill_coef=float(
                 _arg_or_training_default(
                     "economic_gt_distill_coef",
                     "pafc_economic_gt_distill_coef",
-                    0.0,
+                    0.10,
                 )
             ),
             economic_teacher_distill_coef=float(
                 _arg_or_training_default(
                     "economic_teacher_distill_coef",
                     "pafc_economic_teacher_distill_coef",
+                    0.25,
+                )
+            ),
+            economic_teacher_safe_preserve_coef=float(
+                _arg_or_training_default(
+                    "economic_teacher_safe_preserve_coef",
+                    "pafc_economic_teacher_safe_preserve_coef",
+                    1.0,
+                )
+            ),
+            economic_teacher_safe_preserve_low_margin_boost=float(
+                _arg_or_training_default(
+                    "economic_teacher_safe_preserve_low_margin_boost",
+                    "pafc_economic_teacher_safe_preserve_low_margin_boost",
+                    0.75,
+                )
+            ),
+            economic_teacher_safe_preserve_high_cooling_boost=float(
+                _arg_or_training_default(
+                    "economic_teacher_safe_preserve_high_cooling_boost",
+                    "pafc_economic_teacher_safe_preserve_high_cooling_boost",
+                    1.0,
+                )
+            ),
+            economic_teacher_safe_preserve_joint_boost=float(
+                _arg_or_training_default(
+                    "economic_teacher_safe_preserve_joint_boost",
+                    "pafc_economic_teacher_safe_preserve_joint_boost",
+                    1.0,
+                )
+            ),
+            economic_teacher_mismatch_focus_coef=float(
+                _arg_or_training_default(
+                    "economic_teacher_mismatch_focus_coef",
+                    "pafc_economic_teacher_mismatch_focus_coef",
                     0.0,
+                )
+            ),
+            economic_teacher_mismatch_focus_min_scale=float(
+                _arg_or_training_default(
+                    "economic_teacher_mismatch_focus_min_scale",
+                    "pafc_economic_teacher_mismatch_focus_min_scale",
+                    0.75,
+                )
+            ),
+            economic_teacher_mismatch_focus_max_scale=float(
+                _arg_or_training_default(
+                    "economic_teacher_mismatch_focus_max_scale",
+                    "pafc_economic_teacher_mismatch_focus_max_scale",
+                    2.5,
                 )
             ),
             economic_teacher_proxy_advantage_min=float(
@@ -1486,7 +1588,7 @@ def _command_pafc_train(args: argparse.Namespace) -> None:
                 _arg_or_training_default(
                     "economic_bes_distill_coef",
                     "pafc_economic_bes_distill_coef",
-                    0.0,
+                    0.15,
                 )
             ),
             economic_bes_prior_u=float(
@@ -1597,11 +1699,25 @@ def _command_pafc_train(args: argparse.Namespace) -> None:
                     0.0,
                 )
             ),
+            surrogate_actor_trust_coef=float(
+                _arg_or_training_default(
+                    "surrogate_actor_trust_coef",
+                    "pafc_surrogate_actor_trust_coef",
+                    0.60,
+                )
+            ),
+            surrogate_actor_trust_min_scale=float(
+                _arg_or_training_default(
+                    "surrogate_actor_trust_min_scale",
+                    "pafc_surrogate_actor_trust_min_scale",
+                    0.10,
+                )
+            ),
             state_feasible_action_shaping_enabled=bool(
                 _arg_or_training_default(
                     "state_feasible_action_shaping_enabled",
                     "pafc_state_feasible_action_shaping_enabled",
-                    False,
+                    True,
                 )
             ),
             abs_min_on_gate_th=float(
@@ -1611,7 +1727,7 @@ def _command_pafc_train(args: argparse.Namespace) -> None:
                 _arg_or_training_default("abs_min_on_u_margin", "pafc_abs_min_on_u_margin", 0.02)
             ),
             expert_prefill_policy=str(
-                _arg_or_training_default("expert_prefill_policy", "pafc_expert_prefill_policy", "easy_rule")
+                _arg_or_training_default("expert_prefill_policy", "pafc_expert_prefill_policy", "easy_rule_abs")
             ),
             expert_prefill_checkpoint_path=str(
                 _arg_or_training_default(
@@ -1635,7 +1751,7 @@ def _command_pafc_train(args: argparse.Namespace) -> None:
                 )
             ),
             expert_prefill_steps=int(
-                _arg_or_training_default("expert_prefill_steps", "pafc_expert_prefill_steps", 1024)
+                _arg_or_training_default("expert_prefill_steps", "pafc_expert_prefill_steps", 4_096)
             ),
             expert_prefill_cooling_bias=float(
                 _arg_or_training_default("expert_prefill_cooling_bias", "pafc_expert_prefill_cooling_bias", 0.5)
@@ -1650,7 +1766,7 @@ def _command_pafc_train(args: argparse.Namespace) -> None:
                 _arg_or_training_default(
                     "expert_prefill_abs_window_mining_candidates",
                     "pafc_expert_prefill_abs_window_mining_candidates",
-                    4,
+                    8,
                 )
             ),
             dual_abs_margin_k=float(
@@ -1670,7 +1786,7 @@ def _command_pafc_train(args: argparse.Namespace) -> None:
                 _arg_or_training_default("dual_safe_abs_u_th", "pafc_dual_safe_abs_u_th", 0.60)
             ),
             actor_warm_start_epochs=int(
-                _arg_or_training_default("actor_warm_start_epochs", "pafc_actor_warm_start_epochs", 2)
+                _arg_or_training_default("actor_warm_start_epochs", "pafc_actor_warm_start_epochs", 4)
             ),
             actor_warm_start_batch_size=int(
                 _arg_or_training_default("actor_warm_start_batch_size", "pafc_actor_warm_start_batch_size", 256)
@@ -1679,13 +1795,13 @@ def _command_pafc_train(args: argparse.Namespace) -> None:
                 _arg_or_training_default("actor_warm_start_lr", "pafc_actor_warm_start_lr", 1e-4)
             ),
             checkpoint_interval_steps=int(
-                _arg_or_training_default("checkpoint_interval_steps", "pafc_checkpoint_interval_steps", 0)
+                _arg_or_training_default("checkpoint_interval_steps", "pafc_checkpoint_interval_steps", 16_384)
             ),
             eval_window_pool_size=int(
-                _arg_or_training_default("eval_window_pool_size", "pafc_eval_window_pool_size", 12)
+                _arg_or_training_default("eval_window_pool_size", "pafc_eval_window_pool_size", 16)
             ),
             eval_window_count=int(
-                _arg_or_training_default("eval_window_count", "pafc_eval_window_count", 4)
+                _arg_or_training_default("eval_window_count", "pafc_eval_window_count", 8)
             ),
             best_gate_enabled=bool(
                 _arg_or_training_default("best_gate_enabled", "pafc_best_gate_enabled", True)
@@ -1700,16 +1816,16 @@ def _command_pafc_train(args: argparse.Namespace) -> None:
                 _arg_or_training_default("best_gate_cool_min", "pafc_best_gate_cool_min", 0.99)
             ),
             plateau_control_enabled=bool(
-                _arg_or_training_default("plateau_control_enabled", "pafc_plateau_control_enabled", False)
+                _arg_or_training_default("plateau_control_enabled", "pafc_plateau_control_enabled", True)
             ),
             plateau_patience_evals=int(
-                _arg_or_training_default("plateau_patience_evals", "pafc_plateau_patience_evals", 2)
+                _arg_or_training_default("plateau_patience_evals", "pafc_plateau_patience_evals", 4)
             ),
             plateau_lr_decay_factor=float(
                 _arg_or_training_default("plateau_lr_decay_factor", "pafc_plateau_lr_decay_factor", 0.5)
             ),
             plateau_min_actor_lr=float(
-                _arg_or_training_default("plateau_min_actor_lr", "pafc_plateau_min_actor_lr", 5e-5)
+                _arg_or_training_default("plateau_min_actor_lr", "pafc_plateau_min_actor_lr", 2.5e-5)
             ),
             plateau_min_critic_lr=float(
                 _arg_or_training_default("plateau_min_critic_lr", "pafc_plateau_min_critic_lr", 1e-4)
@@ -1718,11 +1834,11 @@ def _command_pafc_train(args: argparse.Namespace) -> None:
                 _arg_or_training_default(
                     "plateau_early_stop_patience_evals",
                     "pafc_plateau_early_stop_patience_evals",
-                    2,
+                    8,
                 )
             ),
             hidden_dims=_parse_hidden_dims(
-                _arg_or_training_default("hidden_dims", "pafc_hidden_dims", (256, 256))
+                _arg_or_training_default("hidden_dims", "pafc_hidden_dims", (256, 256, 256))
             ),
             seed=int(seed),
             device=str(_arg_or_training_default("device", "device", "auto")),
@@ -2257,6 +2373,22 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--pafc-economic-gt-grid-proxy-coef", type=float, default=argparse.SUPPRESS)
     train_parser.add_argument("--pafc-economic-gt-distill-coef", type=float, default=argparse.SUPPRESS)
     train_parser.add_argument("--pafc-economic-teacher-distill-coef", type=float, default=argparse.SUPPRESS)
+    train_parser.add_argument("--pafc-economic-teacher-safe-preserve-coef", type=float, default=argparse.SUPPRESS)
+    train_parser.add_argument(
+        "--pafc-economic-teacher-safe-preserve-low-margin-boost",
+        type=float,
+        default=argparse.SUPPRESS,
+    )
+    train_parser.add_argument(
+        "--pafc-economic-teacher-safe-preserve-high-cooling-boost",
+        type=float,
+        default=argparse.SUPPRESS,
+    )
+    train_parser.add_argument(
+        "--pafc-economic-teacher-safe-preserve-joint-boost",
+        type=float,
+        default=argparse.SUPPRESS,
+    )
     train_parser.add_argument("--pafc-economic-teacher-proxy-advantage-min", type=float, default=argparse.SUPPRESS)
     train_parser.add_argument("--pafc-economic-teacher-gt-proxy-advantage-min", type=float, default=argparse.SUPPRESS)
     train_parser.add_argument("--pafc-economic-teacher-bes-proxy-advantage-min", type=float, default=argparse.SUPPRESS)
@@ -2348,6 +2480,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=argparse.SUPPRESS,
     )
+    train_parser.add_argument("--pafc-surrogate-actor-trust-coef", type=float, default=argparse.SUPPRESS)
+    train_parser.add_argument("--pafc-surrogate-actor-trust-min-scale", type=float, default=argparse.SUPPRESS)
     train_parser.add_argument(
         "--pafc-state-feasible-action-shaping-enabled",
         action="store_true",
@@ -2732,10 +2866,39 @@ def build_parser() -> argparse.ArgumentParser:
     pafc_train_parser.add_argument("--economic-gt-grid-proxy-coef", type=float, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--economic-gt-distill-coef", type=float, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--economic-teacher-distill-coef", type=float, default=argparse.SUPPRESS)
+    pafc_train_parser.add_argument("--economic-teacher-safe-preserve-coef", type=float, default=argparse.SUPPRESS)
+    pafc_train_parser.add_argument(
+        "--economic-teacher-safe-preserve-low-margin-boost",
+        type=float,
+        default=argparse.SUPPRESS,
+    )
+    pafc_train_parser.add_argument(
+        "--economic-teacher-safe-preserve-high-cooling-boost",
+        type=float,
+        default=argparse.SUPPRESS,
+    )
+    pafc_train_parser.add_argument(
+        "--economic-teacher-safe-preserve-joint-boost",
+        type=float,
+        default=argparse.SUPPRESS,
+    )
+    pafc_train_parser.add_argument("--economic-teacher-mismatch-focus-coef", type=float, default=argparse.SUPPRESS)
+    pafc_train_parser.add_argument(
+        "--economic-teacher-mismatch-focus-min-scale",
+        type=float,
+        default=argparse.SUPPRESS,
+    )
+    pafc_train_parser.add_argument(
+        "--economic-teacher-mismatch-focus-max-scale",
+        type=float,
+        default=argparse.SUPPRESS,
+    )
     pafc_train_parser.add_argument("--economic-teacher-proxy-advantage-min", type=float, default=argparse.SUPPRESS)
+    pafc_train_parser.add_argument("--economic-teacher-gt-proxy-advantage-min", type=float, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--economic-teacher-bes-proxy-advantage-min", type=float, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--economic-teacher-max-safe-abs-risk-gap", type=float, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--economic-teacher-projection-gap-max", type=float, default=argparse.SUPPRESS)
+    pafc_train_parser.add_argument("--economic-teacher-gt-projection-gap-max", type=float, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--economic-teacher-bes-price-opportunity-min", type=float, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--economic-teacher-bes-anchor-preserve-scale", type=float, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--economic-teacher-warm-start-weight", type=float, default=argparse.SUPPRESS)
@@ -2817,6 +2980,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=argparse.SUPPRESS,
     )
+    pafc_train_parser.add_argument("--surrogate-actor-trust-coef", type=float, default=argparse.SUPPRESS)
+    pafc_train_parser.add_argument("--surrogate-actor-trust-min-scale", type=float, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--actor-warm-start-epochs", type=int, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--actor-warm-start-batch-size", type=int, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--actor-warm-start-lr", type=float, default=argparse.SUPPRESS)

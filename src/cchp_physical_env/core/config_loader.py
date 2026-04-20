@@ -87,34 +87,43 @@ TRAINING_DEFAULTS: dict[str, Any] = {
     "sb3_plateau_min_lr": 5e-5,
     "sb3_plateau_early_stop_patience_evals": 999,
     # Task-012：PAFC-TD3 通用 train/eval 路由默认项
+    # 这里默认切到“强经济性”配置：更长预算、较弱保守锚定、
+    # 更强经济引导、以及更稳的 checkpoint 验证。
     "pafc_projection_surrogate_checkpoint": "",
-    "pafc_episode_days": 7,
-    "pafc_total_env_steps": 4_096,
-    "pafc_warmup_steps": 512,
-    "pafc_replay_capacity": 50_000,
-    "pafc_batch_size": 128,
+    "pafc_episode_days": 14,
+    "pafc_total_env_steps": 262_144,
+    "pafc_warmup_steps": 4_096,
+    "pafc_replay_capacity": 100_000,
+    "pafc_batch_size": 256,
     "pafc_updates_per_step": 1,
     "pafc_gamma": 0.99,
     "pafc_tau": 0.005,
     "pafc_actor_lr": 1e-4,
     "pafc_critic_lr": 3e-4,
     "pafc_dual_lr": 5e-3,
-    "pafc_dual_warmup_steps": 1024,
+    "pafc_dual_warmup_steps": 8_192,
     "pafc_actor_delay": 2,
-    "pafc_exploration_noise_std": 0.08,
-    "pafc_target_policy_noise_std": 0.08,
-    "pafc_target_noise_clip": 0.15,
-    "pafc_gap_penalty_coef": 0.5,
-    "pafc_exec_action_anchor_coef": 5.0,
-    "pafc_exec_action_anchor_safe_floor": 0.2,
+    "pafc_exploration_noise_std": 0.06,
+    "pafc_target_policy_noise_std": 0.06,
+    "pafc_target_noise_clip": 0.12,
+    "pafc_gap_penalty_coef": 0.2,
+    "pafc_exec_action_anchor_coef": 1.5,
+    "pafc_exec_action_anchor_safe_floor": 0.05,
     "pafc_gt_off_deadband_ratio": 0.0,
-    "pafc_abs_ready_focus_coef": 0.0,
-    "pafc_invalid_abs_penalty_coef": 0.0,
-    "pafc_economic_boiler_proxy_coef": 0.0,
-    "pafc_economic_abs_tradeoff_coef": 0.0,
-    "pafc_economic_gt_grid_proxy_coef": 0.25,
-    "pafc_economic_gt_distill_coef": 0.0,
-    "pafc_economic_teacher_distill_coef": 0.0,
+    "pafc_abs_ready_focus_coef": 0.25,
+    "pafc_invalid_abs_penalty_coef": 0.25,
+    "pafc_economic_boiler_proxy_coef": 0.10,
+    "pafc_economic_abs_tradeoff_coef": 0.05,
+    "pafc_economic_gt_grid_proxy_coef": 0.50,
+    "pafc_economic_gt_distill_coef": 0.10,
+    "pafc_economic_teacher_distill_coef": 0.25,
+    "pafc_economic_teacher_safe_preserve_coef": 1.0,
+    "pafc_economic_teacher_safe_preserve_low_margin_boost": 0.75,
+    "pafc_economic_teacher_safe_preserve_high_cooling_boost": 1.0,
+    "pafc_economic_teacher_safe_preserve_joint_boost": 1.0,
+    "pafc_economic_teacher_mismatch_focus_coef": 0.0,
+    "pafc_economic_teacher_mismatch_focus_min_scale": 0.75,
+    "pafc_economic_teacher_mismatch_focus_max_scale": 2.5,
     "pafc_economic_teacher_proxy_advantage_min": 0.02,
     "pafc_economic_teacher_gt_proxy_advantage_min": 0.01,
     "pafc_economic_teacher_bes_proxy_advantage_min": 0.002,
@@ -133,7 +142,7 @@ TRAINING_DEFAULTS: dict[str, Any] = {
     "pafc_economic_gt_full_year_warm_start_samples": 0,
     "pafc_economic_gt_full_year_warm_start_epochs": 0,
     "pafc_economic_gt_full_year_warm_start_u_weight": 0.0,
-    "pafc_economic_bes_distill_coef": 0.0,
+    "pafc_economic_bes_distill_coef": 0.15,
     "pafc_economic_bes_prior_u": 0.35,
     "pafc_economic_bes_charge_u_scale": 1.8,
     "pafc_economic_bes_discharge_u_scale": 1.0,
@@ -150,39 +159,41 @@ TRAINING_DEFAULTS: dict[str, Any] = {
     "pafc_economic_bes_economic_source_min_share": 0.75,
     "pafc_economic_bes_idle_economic_source_min_share": 0.75,
     "pafc_economic_bes_teacher_target_min_share": 0.0,
-    "pafc_state_feasible_action_shaping_enabled": False,
+    "pafc_surrogate_actor_trust_coef": 0.60,
+    "pafc_surrogate_actor_trust_min_scale": 0.10,
+    "pafc_state_feasible_action_shaping_enabled": True,
     "pafc_abs_min_on_gate_th": 0.75,
     "pafc_abs_min_on_u_margin": 0.02,
     "pafc_expert_prefill_policy": "easy_rule_abs",
     "pafc_expert_prefill_checkpoint_path": "",
     "pafc_expert_prefill_economic_policy": "checkpoint",
     "pafc_expert_prefill_economic_checkpoint_path": "",
-    "pafc_expert_prefill_steps": 1024,
+    "pafc_expert_prefill_steps": 4_096,
     "pafc_expert_prefill_cooling_bias": 0.5,
     "pafc_expert_prefill_abs_replay_boost": 0,
     "pafc_expert_prefill_abs_exec_threshold": 0.05,
-    "pafc_expert_prefill_abs_window_mining_candidates": 4,
+    "pafc_expert_prefill_abs_window_mining_candidates": 8,
     "pafc_dual_abs_margin_k": 1.25,
     "pafc_dual_qc_ratio_th": 0.55,
     "pafc_dual_heat_backup_ratio_th": 0.10,
     "pafc_dual_safe_abs_u_th": 0.60,
-    "pafc_actor_warm_start_epochs": 2,
+    "pafc_actor_warm_start_epochs": 4,
     "pafc_actor_warm_start_batch_size": 256,
     "pafc_actor_warm_start_lr": 1e-4,
-    "pafc_checkpoint_interval_steps": 0,
-    "pafc_eval_window_pool_size": 12,
-    "pafc_eval_window_count": 4,
+    "pafc_checkpoint_interval_steps": 16_384,
+    "pafc_eval_window_pool_size": 16,
+    "pafc_eval_window_count": 8,
     "pafc_best_gate_enabled": True,
     "pafc_best_gate_electric_min": 1.0,
     "pafc_best_gate_heat_min": 0.99,
     "pafc_best_gate_cool_min": 0.99,
-    "pafc_plateau_control_enabled": False,
-    "pafc_plateau_patience_evals": 2,
+    "pafc_plateau_control_enabled": True,
+    "pafc_plateau_patience_evals": 4,
     "pafc_plateau_lr_decay_factor": 0.5,
-    "pafc_plateau_min_actor_lr": 5e-5,
+    "pafc_plateau_min_actor_lr": 2.5e-5,
     "pafc_plateau_min_critic_lr": 1e-4,
-    "pafc_plateau_early_stop_patience_evals": 2,
-    "pafc_hidden_dims": [256, 256],
+    "pafc_plateau_early_stop_patience_evals": 8,
+    "pafc_hidden_dims": [256, 256, 256],
 }
 
 # env 参数校验规则表：
@@ -833,6 +844,13 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
             "pafc_economic_gt_grid_proxy_coef",
             "pafc_economic_gt_distill_coef",
             "pafc_economic_teacher_distill_coef",
+            "pafc_economic_teacher_safe_preserve_coef",
+            "pafc_economic_teacher_safe_preserve_low_margin_boost",
+            "pafc_economic_teacher_safe_preserve_high_cooling_boost",
+            "pafc_economic_teacher_safe_preserve_joint_boost",
+            "pafc_economic_teacher_mismatch_focus_coef",
+            "pafc_economic_teacher_mismatch_focus_min_scale",
+            "pafc_economic_teacher_mismatch_focus_max_scale",
             "pafc_economic_teacher_proxy_advantage_min",
             "pafc_economic_teacher_gt_proxy_advantage_min",
             "pafc_economic_teacher_bes_proxy_advantage_min",
@@ -865,6 +883,8 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
             "pafc_economic_bes_economic_source_min_share",
             "pafc_economic_bes_idle_economic_source_min_share",
             "pafc_economic_bes_teacher_target_min_share",
+            "pafc_surrogate_actor_trust_coef",
+            "pafc_surrogate_actor_trust_min_scale",
             "pafc_abs_min_on_gate_th",
             "pafc_abs_min_on_u_margin",
             "pafc_expert_prefill_cooling_bias",
@@ -900,6 +920,7 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
                 "pafc_economic_bes_economic_source_min_share",
                 "pafc_economic_bes_idle_economic_source_min_share",
                 "pafc_economic_bes_teacher_target_min_share",
+                "pafc_surrogate_actor_trust_min_scale",
             }:
                 if not (0.0 <= numeric <= 1.0):
                     raise ValueError(f"{key} 必须在 [0,1]。")
@@ -1254,6 +1275,27 @@ def build_training_options(overrides: dict[str, Any] | None = None) -> dict[str,
     normalized["pafc_economic_teacher_distill_coef"] = float(
         normalized["pafc_economic_teacher_distill_coef"]
     )
+    normalized["pafc_economic_teacher_safe_preserve_coef"] = float(
+        normalized["pafc_economic_teacher_safe_preserve_coef"]
+    )
+    normalized["pafc_economic_teacher_safe_preserve_low_margin_boost"] = float(
+        normalized["pafc_economic_teacher_safe_preserve_low_margin_boost"]
+    )
+    normalized["pafc_economic_teacher_safe_preserve_high_cooling_boost"] = float(
+        normalized["pafc_economic_teacher_safe_preserve_high_cooling_boost"]
+    )
+    normalized["pafc_economic_teacher_safe_preserve_joint_boost"] = float(
+        normalized["pafc_economic_teacher_safe_preserve_joint_boost"]
+    )
+    normalized["pafc_economic_teacher_mismatch_focus_coef"] = float(
+        normalized["pafc_economic_teacher_mismatch_focus_coef"]
+    )
+    normalized["pafc_economic_teacher_mismatch_focus_min_scale"] = float(
+        normalized["pafc_economic_teacher_mismatch_focus_min_scale"]
+    )
+    normalized["pafc_economic_teacher_mismatch_focus_max_scale"] = float(
+        normalized["pafc_economic_teacher_mismatch_focus_max_scale"]
+    )
     normalized["pafc_economic_teacher_proxy_advantage_min"] = float(
         normalized["pafc_economic_teacher_proxy_advantage_min"]
     )
@@ -1356,6 +1398,12 @@ def build_training_options(overrides: dict[str, Any] | None = None) -> dict[str,
     )
     normalized["pafc_economic_bes_teacher_target_min_share"] = float(
         normalized["pafc_economic_bes_teacher_target_min_share"]
+    )
+    normalized["pafc_surrogate_actor_trust_coef"] = float(
+        normalized["pafc_surrogate_actor_trust_coef"]
+    )
+    normalized["pafc_surrogate_actor_trust_min_scale"] = float(
+        normalized["pafc_surrogate_actor_trust_min_scale"]
     )
     normalized["pafc_state_feasible_action_shaping_enabled"] = bool(
         normalized["pafc_state_feasible_action_shaping_enabled"]

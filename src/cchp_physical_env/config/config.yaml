@@ -312,11 +312,12 @@ training:
   # - projection surrogate checkpoint 建议优先通过 CLI 显式传入：
   #   uv run python -m cchp_physical_env train --policy pafc_td3 --pafc-projection-surrogate-checkpoint ...
   pafc_projection_surrogate_checkpoint: ""
-  pafc_episode_days: 7
-  pafc_total_env_steps: 4096
-  pafc_warmup_steps: 512
-  pafc_replay_capacity: 50000
-  pafc_batch_size: 128
+  # 默认切到“强版 PAFC”：更长训练预算、较弱保守锚定、更强经济蒸馏与更稳的评估/早停。
+  pafc_episode_days: 14
+  pafc_total_env_steps: 262144
+  pafc_warmup_steps: 4096
+  pafc_replay_capacity: 100000
+  pafc_batch_size: 256
   pafc_updates_per_step: 1
   pafc_gamma: 0.99
   pafc_tau: 0.005
@@ -324,27 +325,36 @@ training:
   pafc_critic_lr: 0.0003
   pafc_dual_lr: 0.005
   # dual 先给 reward/teacher 一段适应时间，再逐步拉起可靠性乘子，避免过早塌到保守 fallback
-  pafc_dual_warmup_steps: 1024
+  pafc_dual_warmup_steps: 8192
   pafc_actor_delay: 2
-  pafc_exploration_noise_std: 0.08
-  pafc_target_policy_noise_std: 0.08
-  pafc_target_noise_clip: 0.15
-  pafc_gap_penalty_coef: 0.5
-  pafc_exec_action_anchor_coef: 5.0
+  pafc_exploration_noise_std: 0.06
+  pafc_target_policy_noise_std: 0.06
+  pafc_target_noise_clip: 0.12
+  pafc_gap_penalty_coef: 0.2
+  pafc_exec_action_anchor_coef: 1.5
   # 风险低时放松 executed-action 锚定，给 actor 经济改进空间；风险高时自动恢复强锚定
-  pafc_exec_action_anchor_safe_floor: 0.2
+  pafc_exec_action_anchor_safe_floor: 0.05
   # GT 小正请求若低于最小出力的一定比例，直接解释为“关机”；默认关闭，只在专项调参时打开
   pafc_gt_off_deadband_ratio: 0.0
-  pafc_abs_ready_focus_coef: 0.0
-  pafc_invalid_abs_penalty_coef: 0.0
-  pafc_economic_boiler_proxy_coef: 0.0
-  pafc_economic_abs_tradeoff_coef: 0.0
+  pafc_abs_ready_focus_coef: 0.25
+  pafc_invalid_abs_penalty_coef: 0.25
+  pafc_economic_boiler_proxy_coef: 0.10
+  pafc_economic_abs_tradeoff_coef: 0.05
   # 价格高且系统有余量时，抑制“全买电”保守动作，鼓励 GT/联供侧承担更多经济调节
-  pafc_economic_gt_grid_proxy_coef: 0.25
+  pafc_economic_gt_grid_proxy_coef: 0.50
   # GT 专项经济蒸馏：直接把同信息集下的“高价高净负荷开机、低价低需求停机”先验写入 actor 的 u_gt
-  pafc_economic_gt_distill_coef: 0.0
-  # 经济教师蒸馏默认关闭；启用时使用 economic checkpoint 在安全窗口内教 actor 学习更省钱的调度
-  pafc_economic_teacher_distill_coef: 0.0
+  pafc_economic_gt_distill_coef: 0.10
+  # 默认开启适中强度的经济教师蒸馏，在安全窗口内把更省钱的调度写入 actor。
+  pafc_economic_teacher_distill_coef: 0.25
+  # 经济教师在线蒸馏时，对非 teacher 维保留 safe 执行动作，避免省钱动作把冷/热链路拉塌
+  pafc_economic_teacher_safe_preserve_coef: 1.0
+  pafc_economic_teacher_safe_preserve_low_margin_boost: 0.75
+  pafc_economic_teacher_safe_preserve_high_cooling_boost: 1.0
+  pafc_economic_teacher_safe_preserve_joint_boost: 1.0
+  # surrogate 失配聚焦保留为可选增强，但当前短预算对照未显示额外降本收益，因此默认关闭
+  pafc_economic_teacher_mismatch_focus_coef: 0.0
+  pafc_economic_teacher_mismatch_focus_min_scale: 0.75
+  pafc_economic_teacher_mismatch_focus_max_scale: 2.5
   # 经济教师只有在单步代理经济性至少优于 safe teacher 一定比例时，才写入 replay
   pafc_economic_teacher_proxy_advantage_min: 0.02
   # 对 GT 维单独放宽经济优势门槛；GT 替网的收益往往体现在整段负荷窗口，而不是单步超大代理差
@@ -377,7 +387,7 @@ training:
   pafc_economic_gt_full_year_warm_start_epochs: 0
   pafc_economic_gt_full_year_warm_start_u_weight: 0.0
   # 持续 BES 经济蒸馏：仅约束 u_bes，利用同信息集电价与 SOC 保持峰谷套利行为不在 RL 过程中塌缩
-  pafc_economic_bes_distill_coef: 0.0
+  pafc_economic_bes_distill_coef: 0.15
   # BES 经济调度先验：仅基于同信息集电价与 SOC，帮助 PAFC-TD3 学出基本的峰谷套利
   pafc_economic_bes_prior_u: 0.35
   # 充电侧使用更强的 raw-u 幅值和权重，缓解“全年更愿意放电、不愿意低价充电”的保守偏置
@@ -402,7 +412,10 @@ training:
   pafc_economic_bes_idle_economic_source_min_share: 0.75
   # 若需要进一步突出真实 economic teacher 动作，可为“已采用 teacher target 的样本”设置最小占比
   pafc_economic_bes_teacher_target_min_share: 0.0
-  pafc_state_feasible_action_shaping_enabled: false
+  # surrogate 在 executed-action 近似误差较大的动作维上，降低 actor 对其梯度依赖；误差低的维保持正常优化
+  pafc_surrogate_actor_trust_coef: 0.60
+  pafc_surrogate_actor_trust_min_scale: 0.10
+  pafc_state_feasible_action_shaping_enabled: true
   pafc_abs_min_on_gate_th: 0.75
   pafc_abs_min_on_u_margin: 0.02
   pafc_expert_prefill_policy: easy_rule_abs
@@ -419,34 +432,34 @@ training:
   # --pafc-expert-prefill-economic-policy checkpoint
   # --pafc-expert-prefill-economic-checkpoint-path <economic sb3/pafc json>
   pafc_expert_prefill_economic_checkpoint_path: ""
-  pafc_expert_prefill_steps: 1024
+  pafc_expert_prefill_steps: 4096
   pafc_expert_prefill_cooling_bias: 0.5
   pafc_expert_prefill_abs_replay_boost: 0
   pafc_expert_prefill_abs_exec_threshold: 0.05
-  pafc_expert_prefill_abs_window_mining_candidates: 4
+  pafc_expert_prefill_abs_window_mining_candidates: 8
   pafc_dual_abs_margin_k: 1.25
   pafc_dual_qc_ratio_th: 0.55
   pafc_dual_heat_backup_ratio_th: 0.10
   pafc_dual_safe_abs_u_th: 0.60
-  pafc_actor_warm_start_epochs: 2
+  pafc_actor_warm_start_epochs: 4
   pafc_actor_warm_start_batch_size: 256
   pafc_actor_warm_start_lr: 0.0001
-  # 训练期 retained checkpoint / validation 间隔；0 表示自动使用总步数的四等分（带上下限）
-  pafc_checkpoint_interval_steps: 0
+  # 训练期 retained checkpoint / validation 间隔；强版默认固定保存，避免长预算训练只在尾部挑点。
+  pafc_checkpoint_interval_steps: 16384
   # PAFC best checkpoint 选择：
   # - 训练期固定 2024 验证窗口，先看可靠性门槛，再看平均总成本，最后看 reward
-  # - 默认保持与 SB3 一致的 12->4 多窗口协议；若设为 0/0，则退化为固定尾窗
-  pafc_eval_window_pool_size: 12
-  pafc_eval_window_count: 4
+  # - 强版默认使用更大的 16->8 多窗口协议；若设为 0/0，则退化为固定尾窗
+  pafc_eval_window_pool_size: 16
+  pafc_eval_window_count: 8
   pafc_best_gate_enabled: true
   pafc_best_gate_electric_min: 1.0
   pafc_best_gate_heat_min: 0.99
   pafc_best_gate_cool_min: 0.99
-  # plateau 控制默认关闭；启用后会在验证长期不改进时先降学习率，再按 patience 提前停止
-  pafc_plateau_control_enabled: false
-  pafc_plateau_patience_evals: 2
+  # plateau 控制默认开启；验证长期不改进时先降学习率，再按 patience 提前停止。
+  pafc_plateau_control_enabled: true
+  pafc_plateau_patience_evals: 4
   pafc_plateau_lr_decay_factor: 0.5
-  pafc_plateau_min_actor_lr: 0.00005
+  pafc_plateau_min_actor_lr: 0.000025
   pafc_plateau_min_critic_lr: 0.0001
-  pafc_plateau_early_stop_patience_evals: 2
-  pafc_hidden_dims: [256, 256]
+  pafc_plateau_early_stop_patience_evals: 8
+  pafc_hidden_dims: [256, 256, 256]

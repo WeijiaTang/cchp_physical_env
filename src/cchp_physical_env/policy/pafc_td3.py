@@ -56,6 +56,15 @@ def _json_payload_from_path(path: str | Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _blend_surrogate_action_proxy(
+    *,
+    action_exec_hat,
+    fallback_action,
+    trust_weight,
+):
+    return trust_weight * action_exec_hat + (1.0 - trust_weight) * fallback_action
+
+
 def _extract_year(df: pd.DataFrame) -> int:
     years = sorted({int(value.year) for value in pd.to_datetime(df["timestamp"])})
     if len(years) != 1:
@@ -622,6 +631,21 @@ def _bes_full_year_selection_priority_np(
     return float(priority)
 
 
+def _bes_warm_start_cooling_guard_active_np(
+    *,
+    abs_drive_margin_k: float,
+    qc_dem_mw: float,
+    q_total_cooling_cap_mw: float,
+    abs_margin_guard_k: float,
+    qc_ratio_guard: float,
+) -> bool:
+    qc_ratio = max(0.0, float(qc_dem_mw)) / max(_NORM_EPS, float(q_total_cooling_cap_mw))
+    return bool(
+        float(abs_drive_margin_k) <= float(abs_margin_guard_k)
+        and qc_ratio >= float(qc_ratio_guard)
+    )
+
+
 def _allocate_bes_warm_start_mode_counts(
     *,
     requested_total: int,
@@ -798,6 +822,136 @@ def _select_temporal_priority_indices(
         best_idx = int(chunk[int(np.argmax(chunk_scores))])
         selected.append(best_idx)
     return selected
+
+
+def _select_temporal_priority_indices_by_season(
+    *,
+    indices: Sequence[int],
+    priorities: Sequence[float],
+    season_by_index: Mapping[int, str],
+    target_count: int,
+) -> list[int]:
+    target_total = max(0, int(target_count))
+    if target_total <= 0:
+        return []
+    unique_indices = sorted({int(idx) for idx in indices if int(idx) >= 0})
+    if len(unique_indices) <= target_total:
+        return unique_indices
+
+    season_groups: dict[str, list[int]] = {
+        season: []
+        for season in ("winter", "spring", "summer", "autumn")
+    }
+    for idx in unique_indices:
+        season = str(season_by_index.get(int(idx), "summer")).strip().lower()
+        if season not in season_groups:
+            season = "summer"
+        season_groups[season].append(int(idx))
+    counts = _allocate_eval_window_season_counts(
+        requested_total=target_total,
+        available_by_season={season: len(values) for season, values in season_groups.items()},
+    )
+    selected: list[int] = []
+    selected_set: set[int] = set()
+    for season in ("summer", "winter", "spring", "autumn"):
+        season_selected = _select_temporal_priority_indices(
+            indices=season_groups[season],
+            priorities=priorities,
+            target_count=int(counts.get(season, 0)),
+        )
+        for idx in season_selected:
+            idx_int = int(idx)
+            if idx_int in selected_set:
+                continue
+            selected.append(idx_int)
+            selected_set.add(idx_int)
+    if len(selected) < target_total:
+        remaining = [
+            int(idx)
+            for idx in unique_indices
+            if int(idx) not in selected_set
+        ]
+        top_up = _select_temporal_priority_indices(
+            indices=remaining,
+            priorities=priorities,
+            target_count=int(target_total - len(selected)),
+        )
+        for idx in top_up:
+            idx_int = int(idx)
+            if idx_int in selected_set:
+                continue
+            selected.append(idx_int)
+            selected_set.add(idx_int)
+    return sorted(selected)
+
+
+def _allocate_economic_teacher_action_counts(
+    *,
+    requested_total: int,
+    gt_available: int,
+    bes_available: int,
+    tes_available: int,
+) -> dict[str, int]:
+    requested = max(0, int(requested_total))
+    available = {
+        "gt": max(0, int(gt_available)),
+        "bes": max(0, int(bes_available)),
+        "tes": max(0, int(tes_available)),
+    }
+    selected = {key: 0 for key in available}
+    if requested <= 0:
+        return selected
+
+    if available["bes"] > 0:
+        bes_floor = min(
+            available["bes"],
+            max(
+                1,
+                int(round(float(requested) * 0.25)),
+            ),
+        )
+        selected["bes"] = int(bes_floor)
+    if available["tes"] > 0:
+        tes_floor = min(
+            available["tes"],
+            max(
+                1,
+                int(round(float(requested) * 0.10)),
+            ),
+        )
+        selected["tes"] = int(tes_floor)
+    selected["gt"] = min(
+        available["gt"],
+        max(0, requested - selected["bes"] - selected["tes"]),
+    )
+
+    total_selected = int(sum(selected.values()))
+    if total_selected > requested:
+        overflow = int(total_selected - requested)
+        for key in ("gt", "tes", "bes"):
+            if overflow <= 0:
+                break
+            reducible = min(int(selected[key]), int(overflow))
+            selected[key] -= reducible
+            overflow -= reducible
+
+    remaining = max(0, requested - int(sum(selected.values())))
+    while remaining > 0:
+        progressed = False
+        for key in ("gt", "bes", "tes"):
+            if int(selected[key]) >= int(available[key]):
+                continue
+            selected[key] += 1
+            remaining -= 1
+            progressed = True
+            if remaining <= 0:
+                break
+        if not progressed:
+            break
+    return {
+        key: int(value)
+        for key, value in selected.items()
+    }
 
 
 def _gt_anchor_relax_signal_np(
@@ -1149,6 +1303,12 @@ def _build_mixed_economic_teacher_target_np(
                 float(gt_projection_gap_max),
             )
         if key == "u_bes":
+            if (
+                abs_margin_k <= float(gt_abs_margin_guard_k)
+                and qc_ratio >= float(gt_qc_ratio_guard)
+                and economic_value < -_NORM_EPS
+            ):
+                continue
             local_min_proxy_advantage = min(
                 float(min_proxy_advantage_ratio),
                 float(max(0.0, bes_proxy_advantage_ratio_min)),
@@ -1228,6 +1388,197 @@ def _economic_teacher_safe_preserve_weights_np(
     return weights
 
 
+def _build_surrogate_audit_report(
+    *,
+    obs_batch: np.ndarray,
+    predicted_exec_batch: np.ndarray,
+    actual_exec_batch: np.ndarray,
+    observation_index: Mapping[str, int],
+    action_keys: Sequence[str],
+    low_abs_margin_threshold: float,
+    high_cooling_ratio_threshold: float,
+    q_total_cooling_cap_mw: float,
+) -> tuple[dict[str, Any], pd.DataFrame]:
+    obs_np = np.asarray(obs_batch, dtype=np.float32)
+    predicted_np = np.asarray(predicted_exec_batch, dtype=np.float32)
+    actual_np = np.asarray(actual_exec_batch, dtype=np.float32)
+    if (
+        obs_np.ndim != 2
+        or predicted_np.ndim != 2
+        or actual_np.ndim != 2
+        or len(obs_np) <= 0
+        or predicted_np.shape != actual_np.shape
+        or predicted_np.shape[0] != obs_np.shape[0]
+    ):
+        return {}, pd.DataFrame()
+
+    action_key_list = tuple(str(key) for key in action_keys)
+    signed_error = predicted_np - actual_np
+    abs_error = np.abs(signed_error)
+    step_gap_l1 = abs_error.sum(axis=1)
+    step_gap_l2 = np.sqrt(np.square(signed_error).sum(axis=1))
+    step_gap_max = abs_error.max(axis=1)
+
+    total_count = int(obs_np.shape[0])
+    segment_masks: dict[str, np.ndarray] = {
+        "overall": np.ones((total_count,), dtype=bool),
+    }
+    threshold_summary: dict[str, float] = {}
+    low_margin_mask: np.ndarray | None = None
+    high_cooling_mask: np.ndarray | None = None
+    if "abs_drive_margin_k" in observation_index:
+        low_margin_mask = (
+            obs_np[:, int(observation_index["abs_drive_margin_k"])]
+            <= float(low_abs_margin_threshold)
+        )
+        segment_masks["low_abs_margin"] = low_margin_mask
+        threshold_summary["low_abs_margin_k"] = float(low_abs_margin_threshold)
+    if "qc_dem_mw" in observation_index and q_total_cooling_cap_mw > _NORM_EPS:
+        qc_ratio = (
+            obs_np[:, int(observation_index["qc_dem_mw"])]
+            / max(_NORM_EPS, float(q_total_cooling_cap_mw))
+        )
+        high_cooling_mask = qc_ratio >= float(high_cooling_ratio_threshold)
+        segment_masks["high_cooling_ratio"] = high_cooling_mask
+        threshold_summary["high_cooling_ratio"] = float(high_cooling_ratio_threshold)
+    if low_margin_mask is not None and high_cooling_mask is not None:
+        segment_masks["low_abs_margin_high_cooling"] = low_margin_mask & high_cooling_mask
+
+    segment_rows: list[dict[str, Any]] = []
+    segment_summary: dict[str, Any] = {}
+    for segment_name, mask in segment_masks.items():
+        count = int(mask.sum())
+        if count <= 0:
+            continue
+        row: dict[str, Any] = {
+            "segment": str(segment_name),
+            "sample_count": count,
+            "sample_rate": float(count / max(1, total_count)),
+            "surrogate_gap_l1__mean": float(step_gap_l1[mask].mean()),
+            "surrogate_gap_l2__mean": float(step_gap_l2[mask].mean()),
+            "surrogate_gap_max__mean": float(step_gap_max[mask].mean()),
+        }
+        mae_by_action: dict[str, float] = {}
+        rmse_by_action: dict[str, float] = {}
+        bias_by_action: dict[str, float] = {}
+        for action_index, action_key in enumerate(action_key_list):
+            mae = float(abs_error[mask, action_index].mean())
+            rmse = float(np.sqrt(np.square(signed_error[mask, action_index]).mean()))
+            bias = float(signed_error[mask, action_index].mean())
+            row[f"{action_key}__mae"] = mae
+            row[f"{action_key}__rmse"] = rmse
+            row[f"{action_key}__bias"] = bias
+            mae_by_action[str(action_key)] = mae
+            rmse_by_action[str(action_key)] = rmse
+            bias_by_action[str(action_key)] = bias
+        segment_rows.append(row)
+        worst_action = max(mae_by_action.items(), key=lambda item: float(item[1]))[0]
+        segment_summary[str(segment_name)] = {
+            "sample_count": count,
+            "sample_rate": float(count / max(1, total_count)),
+            "surrogate_gap_l1_mean": float(row["surrogate_gap_l1__mean"]),
+            "surrogate_gap_l2_mean": float(row["surrogate_gap_l2__mean"]),
+            "surrogate_gap_max_mean": float(row["surrogate_gap_max__mean"]),
+            "mae_by_action": mae_by_action,
+            "rmse_by_action": rmse_by_action,
+            "bias_by_action": bias_by_action,
+            "worst_action_by_mae": str(worst_action),
+        }
+
+    overall_summary = segment_summary.get("overall", {})
+    focused_summary = (
+        segment_summary.get("low_abs_margin_high_cooling")
+        or segment_summary.get("high_cooling_ratio")
+        or segment_summary.get("low_abs_margin")
+        or {}
+    )
+    return (
+        {
+            "sample_count": total_count,
+            "thresholds": threshold_summary,
+            "segments": segment_summary,
+            "overall_worst_action_by_mae": str(
+                overall_summary.get("worst_action_by_mae", "")
+            ),
+            "focused_worst_action_by_mae": str(
+                focused_summary.get("worst_action_by_mae", "")
+            ),
+            "overall_mae_by_action": dict(overall_summary.get("mae_by_action", {})),
+            "focused_mae_by_action": dict(focused_summary.get("mae_by_action", {})),
+        },
+        pd.DataFrame(segment_rows),
+    )
+
+
+def _build_surrogate_actor_trust_scale_np(
+    *,
+    action_keys: Sequence[str],
+    overall_mae_by_action: Mapping[str, float] | None,
+    focused_mae_by_action: Mapping[str, float] | None,
+    trust_coef: float,
+    trust_min_scale: float,
+    focused_mix: float = 0.5,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    action_key_list = tuple(str(key) for key in action_keys)
+    ones = np.ones((1, len(action_key_list)), dtype=np.float32)
+    coef = max(0.0, float(trust_coef))
+    min_scale = float(np.clip(float(trust_min_scale), 0.0, 1.0))
+    focus_weight = float(np.clip(float(focused_mix), 0.0, 1.0))
+    if coef <= 0.0 or len(action_key_list) <= 0:
+        return (
+            ones,
+            {
+                "enabled": False,
+                "status": "disabled",
+                "coef": float(coef),
+                "min_scale": float(min_scale),
+                "focused_mix": float(focus_weight),
+                "mae_by_action": {key: 0.0 for key in action_key_list},
+                "trust_by_action": {key: 1.0 for key in action_key_list},
+            },
+        )
+
+    overall = dict(overall_mae_by_action or {})
+    focused = dict(focused_mae_by_action or {})
+    overall_vector = np.asarray(
+        [max(0.0, float(overall.get(key, 0.0))) for key in action_key_list],
+        dtype=np.float32,
+    )
+    if focused:
+        focused_vector = np.asarray(
+            [max(0.0, float(focused.get(key, overall.get(key, 0.0)))) for key in action_key_list],
+            dtype=np.float32,
+        )
+        blended_mae = (1.0 - focus_weight) * overall_vector + focus_weight * focused_vector
+    else:
+        blended_mae = overall_vector
+    raw_scale = 1.0 - coef * blended_mae
+    clipped_scale = np.clip(raw_scale, min_scale, 1.0).astype(np.float32, copy=False)
+    if not np.isfinite(clipped_scale).all():
+        clipped_scale = np.ones((len(action_key_list),), dtype=np.float32)
+    scale_matrix = clipped_scale.reshape(1, -1)
+    weakest_action = ""
+    if len(action_key_list) > 0:
+        weakest_action = str(action_key_list[int(np.argmin(clipped_scale))])
+    return (
+        scale_matrix,
+        {
+            "enabled": True,
+            "status": "applied",
+            "coef": float(coef),
+            "min_scale": float(min_scale),
+            "focused_mix": float(focus_weight),
+            "mae_by_action": {
+                key: float(value) for key, value in zip(action_key_list, blended_mae.tolist())
+            },
+            "trust_by_action": {
+                key: float(value) for key, value in zip(action_key_list, clipped_scale.tolist())
+            },
+            "weakest_action_by_trust": str(weakest_action),
+        },
+    )
+
+
 def _build_observation_norm(
     *,
     feature_keys: Sequence[str],
@@ -1303,33 +1654,40 @@ def _build_observation_norm(
 @dataclass(slots=True)
 class PAFCTD3TrainConfig:
     projection_surrogate_checkpoint_path: str | Path
-    episode_days: int = 7
-    total_env_steps: int = 4096
-    warmup_steps: int = 512
-    replay_capacity: int = 50_000
-    batch_size: int = 128
+    episode_days: int = 14
+    total_env_steps: int = 262_144
+    warmup_steps: int = 4_096
+    replay_capacity: int = 100_000
+    batch_size: int = 256
     updates_per_step: int = 1
     gamma: float = 0.99
     tau: float = 0.005
     actor_lr: float = 1e-4
     critic_lr: float = 3e-4
     dual_lr: float = 5e-3
-    dual_warmup_steps: int = 1024
+    dual_warmup_steps: int = 8_192
     actor_delay: int = 2
-    exploration_noise_std: float = 0.08
-    target_policy_noise_std: float = 0.08
-    target_noise_clip: float = 0.15
-    gap_penalty_coef: float = 0.5
-    exec_action_anchor_coef: float = 5.0
-    exec_action_anchor_safe_floor: float = 0.2
+    exploration_noise_std: float = 0.06
+    target_policy_noise_std: float = 0.06
+    target_noise_clip: float = 0.12
+    gap_penalty_coef: float = 0.2
+    exec_action_anchor_coef: float = 1.5
+    exec_action_anchor_safe_floor: float = 0.05
     gt_off_deadband_ratio: float = 0.0
-    abs_ready_focus_coef: float = 0.0
-    invalid_abs_penalty_coef: float = 0.0
-    economic_boiler_proxy_coef: float = 0.0
-    economic_abs_tradeoff_coef: float = 0.0
-    economic_gt_grid_proxy_coef: float = 0.25
-    economic_gt_distill_coef: float = 0.0
-    economic_teacher_distill_coef: float = 0.0
+    abs_ready_focus_coef: float = 0.25
+    invalid_abs_penalty_coef: float = 0.25
+    economic_boiler_proxy_coef: float = 0.10
+    economic_abs_tradeoff_coef: float = 0.05
+    economic_gt_grid_proxy_coef: float = 0.50
+    economic_gt_distill_coef: float = 0.10
+    economic_teacher_distill_coef: float = 0.25
+    economic_teacher_safe_preserve_coef: float = 1.0
+    economic_teacher_safe_preserve_low_margin_boost: float = 0.75
+    economic_teacher_safe_preserve_high_cooling_boost: float = 1.0
+    economic_teacher_safe_preserve_joint_boost: float = 1.0
+    economic_teacher_mismatch_focus_coef: float = 0.0
+    economic_teacher_mismatch_focus_min_scale: float = 0.75
+    economic_teacher_mismatch_focus_max_scale: float = 2.5
     economic_teacher_proxy_advantage_min: float = 0.02
     economic_teacher_gt_proxy_advantage_min: float = 0.01
     economic_teacher_bes_proxy_advantage_min: float = 0.002
@@ -1348,7 +1706,7 @@ class PAFCTD3TrainConfig:
     economic_gt_full_year_warm_start_samples: int = 0
     economic_gt_full_year_warm_start_epochs: int = 0
     economic_gt_full_year_warm_start_u_weight: float = 0.0
-    economic_bes_distill_coef: float = 0.0
+    economic_bes_distill_coef: float = 0.15
     economic_bes_prior_u: float = 0.35
     economic_bes_charge_u_scale: float = 1.8
     economic_bes_discharge_u_scale: float = 1.0
@@ -1365,39 +1723,41 @@ class PAFCTD3TrainConfig:
     economic_bes_economic_source_min_share: float = 0.75
     economic_bes_idle_economic_source_min_share: float = 0.75
     economic_bes_teacher_target_min_share: float = 0.0
-    state_feasible_action_shaping_enabled: bool = False
+    surrogate_actor_trust_coef: float = 0.60
+    surrogate_actor_trust_min_scale: float = 0.10
+    state_feasible_action_shaping_enabled: bool = True
     abs_min_on_gate_th: float = 0.75
     abs_min_on_u_margin: float = 0.02
     expert_prefill_policy: str = "easy_rule_abs"
     expert_prefill_checkpoint_path: str | Path = ""
     expert_prefill_economic_policy: str = "checkpoint"
     expert_prefill_economic_checkpoint_path: str | Path = ""
-    expert_prefill_steps: int = 1024
-    actor_warm_start_epochs: int = 2
+    expert_prefill_steps: int = 4_096
+    actor_warm_start_epochs: int = 4
     actor_warm_start_batch_size: int = 256
     actor_warm_start_lr: float = 1e-4
     expert_prefill_cooling_bias: float = 0.5
     expert_prefill_abs_replay_boost: int = 0
     expert_prefill_abs_exec_threshold: float = 0.05
-    expert_prefill_abs_window_mining_candidates: int = 4
+    expert_prefill_abs_window_mining_candidates: int = 8
     dual_abs_margin_k: float = 1.25
     dual_qc_ratio_th: float = 0.55
     dual_heat_backup_ratio_th: float = 0.10
     dual_safe_abs_u_th: float = 0.60
-    checkpoint_interval_steps: int = 0
-    eval_window_pool_size: int = 12
-    eval_window_count: int = 4
+    checkpoint_interval_steps: int = 16_384
+    eval_window_pool_size: int = 16
+    eval_window_count: int = 8
     best_gate_enabled: bool = True
     best_gate_electric_min: float = 1.0
     best_gate_heat_min: float = 0.99
     best_gate_cool_min: float = 0.99
-    plateau_control_enabled: bool = False
-    plateau_patience_evals: int = 2
+    plateau_control_enabled: bool = True
+    plateau_patience_evals: int = 4
     plateau_lr_decay_factor: float = 0.5
-    plateau_min_actor_lr: float = 5e-5
+    plateau_min_actor_lr: float = 2.5e-5
     plateau_min_critic_lr: float = 1e-4
-    plateau_early_stop_patience_evals: int = 2
-    hidden_dims: tuple[int, ...] = (256, 256)
+    plateau_early_stop_patience_evals: int = 8
+    hidden_dims: tuple[int, ...] = (256, 256, 256)
     seed: int = 42
     device: str = "auto"
     observation_keys: tuple[str, ...] = field(default_factory=tuple)
@@ -1435,6 +1795,25 @@ class PAFCTD3TrainConfig:
         self.economic_gt_grid_proxy_coef = float(self.economic_gt_grid_proxy_coef)
         self.economic_gt_distill_coef = float(self.economic_gt_distill_coef)
         self.economic_teacher_distill_coef = float(self.economic_teacher_distill_coef)
+        self.economic_teacher_safe_preserve_coef = float(self.economic_teacher_safe_preserve_coef)
+        self.economic_teacher_safe_preserve_low_margin_boost = float(
+            self.economic_teacher_safe_preserve_low_margin_boost
+        )
+        self.economic_teacher_safe_preserve_high_cooling_boost = float(
+            self.economic_teacher_safe_preserve_high_cooling_boost
+        )
+        self.economic_teacher_safe_preserve_joint_boost = float(
+            self.economic_teacher_safe_preserve_joint_boost
+        )
+        self.economic_teacher_mismatch_focus_coef = float(
+            self.economic_teacher_mismatch_focus_coef
+        )
+        self.economic_teacher_mismatch_focus_min_scale = float(
+            self.economic_teacher_mismatch_focus_min_scale
+        )
+        self.economic_teacher_mismatch_focus_max_scale = float(
+            self.economic_teacher_mismatch_focus_max_scale
+        )
         self.economic_teacher_proxy_advantage_min = float(
             self.economic_teacher_proxy_advantage_min
         )
@@ -1521,6 +1900,10 @@ class PAFCTD3TrainConfig:
         )
         self.economic_bes_teacher_target_min_share = float(
             self.economic_bes_teacher_target_min_share
+        )
+        self.surrogate_actor_trust_coef = float(self.surrogate_actor_trust_coef)
+        self.surrogate_actor_trust_min_scale = float(
+            self.surrogate_actor_trust_min_scale
         )
         self.state_feasible_action_shaping_enabled = bool(self.state_feasible_action_shaping_enabled)
         self.abs_min_on_gate_th = float(self.abs_min_on_gate_th)
@@ -1609,6 +1992,22 @@ class PAFCTD3TrainConfig:
             raise ValueError("economic_gt_distill_coef 必须 >= 0。")
         if self.economic_teacher_distill_coef < 0.0:
             raise ValueError("economic_teacher_distill_coef 必须 >= 0。")
+        if self.economic_teacher_safe_preserve_coef < 0.0:
+            raise ValueError("economic_teacher_safe_preserve_coef 必须 >= 0。")
+        if self.economic_teacher_safe_preserve_low_margin_boost < 0.0:
+            raise ValueError("economic_teacher_safe_preserve_low_margin_boost 必须 >= 0。")
+        if self.economic_teacher_safe_preserve_high_cooling_boost < 0.0:
+            raise ValueError("economic_teacher_safe_preserve_high_cooling_boost 必须 >= 0。")
+        if self.economic_teacher_safe_preserve_joint_boost < 0.0:
+            raise ValueError("economic_teacher_safe_preserve_joint_boost 必须 >= 0。")
+        if self.economic_teacher_mismatch_focus_coef < 0.0:
+            raise ValueError("economic_teacher_mismatch_focus_coef 必须 >= 0。")
+        if self.economic_teacher_mismatch_focus_min_scale <= 0.0:
+            raise ValueError("economic_teacher_mismatch_focus_min_scale 必须 > 0。")
+        if self.economic_teacher_mismatch_focus_max_scale < self.economic_teacher_mismatch_focus_min_scale:
+            raise ValueError(
+                "economic_teacher_mismatch_focus_max_scale 不能小于 economic_teacher_mismatch_focus_min_scale。"
+            )
         if (
             self.economic_teacher_proxy_advantage_min < 0.0
             or self.economic_teacher_proxy_advantage_min > 1.0
@@ -1710,6 +2109,13 @@ class PAFCTD3TrainConfig:
             or self.economic_bes_teacher_target_min_share > 1.0
         ):
             raise ValueError("economic_bes_teacher_target_min_share 必须在 [0,1]。")
+        if self.surrogate_actor_trust_coef < 0.0:
+            raise ValueError("surrogate_actor_trust_coef 必须 >= 0。")
+        if (
+            self.surrogate_actor_trust_min_scale < 0.0
+            or self.surrogate_actor_trust_min_scale > 1.0
+        ):
+            raise ValueError("surrogate_actor_trust_min_scale 必须在 [0,1]。")
         if self.abs_min_on_gate_th < 0.0 or self.abs_min_on_gate_th > 1.0:
             raise ValueError("abs_min_on_gate_th 必须在 [0,1]。")
         if self.abs_min_on_u_margin < 0.0 or self.abs_min_on_u_margin > 1.0:
@@ -2198,8 +2604,218 @@ def _build_fixed_eval_episode_df(
     if len(train_df) < steps:
         raise ValueError(
             f"训练集长度不足以截取固定评估片段：需要 {steps} 步，当前仅 {len(train_df)} 步。"
-        )
+    )
     return train_df.tail(steps).reset_index(drop=True)
+
+
+def _calendar_season_from_month(month: int) -> str:
+    normalized_month = int(month)
+    if normalized_month in {12, 1, 2}:
+        return "winter"
+    if normalized_month in {3, 4, 5}:
+        return "spring"
+    if normalized_month in {6, 7, 8}:
+        return "summer"
+    return "autumn"
+
+
+def _calendar_season_from_timestamp_value(value: object) -> str:
+    try:
+        timestamp = pd.to_datetime(value)
+    except Exception:
+        return "summer"
+    if pd.isna(timestamp):
+        return "summer"
+    return _calendar_season_from_month(int(timestamp.month))
+
+
+def _allocate_eval_window_season_counts(
+    *,
+    requested_total: int,
+    available_by_season: Mapping[str, int],
+) -> dict[str, int]:
+    preferred_order = ("summer", "winter", "spring", "autumn")
+    counts = {season: 0 for season in preferred_order}
+    remaining = max(0, int(requested_total))
+    active_seasons = [
+        season
+        for season in preferred_order
+        if int(available_by_season.get(season, 0)) > 0
+    ]
+    if remaining <= 0 or not active_seasons:
+        return counts
+
+    for season in active_seasons:
+        if remaining <= 0:
+            break
+        counts[season] += 1
+        remaining -= 1
+
+    while remaining > 0:
+        progressed = False
+        for season in active_seasons:
+            if counts[season] >= int(available_by_season.get(season, 0)):
+                continue
+            counts[season] += 1
+            remaining -= 1
+            progressed = True
+            if remaining <= 0:
+                break
+        if not progressed:
+            break
+    return counts
+
+
+def _select_eval_window_records_temporally(
+    records: Sequence[dict[str, Any]],
+    *,
+    target_count: int,
+) -> list[dict[str, Any]]:
+    unique_by_start = {
+        int(record["start_idx"]): dict(record)
+        for record in records
+    }
+    ordered_records = sorted(unique_by_start.values(), key=lambda item: int(item["start_idx"]))
+    target_total = max(0, int(target_count))
+    if target_total <= 0:
+        return []
+    if len(ordered_records) <= target_total:
+        return ordered_records
+    if target_total == 1:
+        return [
+            max(
+                ordered_records,
+                key=lambda item: (
+                    float(item["validation_score"]),
+                    float(item["cooling_peak_mw"]),
+                    int(item["start_idx"]),
+                ),
+            )
+        ]
+
+    selected: list[dict[str, Any]] = []
+    for block in np.array_split(np.arange(len(ordered_records), dtype=int), target_total):
+        if len(block) == 0:
+            continue
+        block_records = [ordered_records[int(index)] for index in block.tolist()]
+        best_record = max(
+            block_records,
+            key=lambda item: (
+                float(item["validation_score"]),
+                float(item["cooling_peak_mw"]),
+                int(item["start_idx"]),
+            ),
+        )
+        selected.append(best_record)
+    selected_unique = {
+        int(record["start_idx"]): record
+        for record in selected
+    }
+    return sorted(selected_unique.values(), key=lambda item: int(item["start_idx"]))
+
+
+def _select_eval_window_records_season_balanced(
+    records: Sequence[dict[str, Any]],
+    *,
+    target_count: int,
+) -> list[dict[str, Any]]:
+    unique_by_start = {
+        int(record["start_idx"]): dict(record)
+        for record in records
+    }
+    ordered_records = sorted(unique_by_start.values(), key=lambda item: int(item["start_idx"]))
+    target_total = max(0, int(target_count))
+    if target_total <= 0:
+        return []
+    if len(ordered_records) <= target_total:
+        return ordered_records
+    if target_total == 1:
+        return _select_eval_window_records_temporally(
+            ordered_records,
+            target_count=1,
+        )
+
+    season_groups: dict[str, list[dict[str, Any]]] = {
+        season: []
+        for season in ("winter", "spring", "summer", "autumn")
+    }
+    for record in ordered_records:
+        season_groups[str(record["season"])].append(record)
+    counts = _allocate_eval_window_season_counts(
+        requested_total=target_total,
+        available_by_season={season: len(items) for season, items in season_groups.items()},
+    )
+
+    selected: list[dict[str, Any]] = []
+    selected_start_indices: set[int] = set()
+    for season in ("summer", "winter", "spring", "autumn"):
+        season_selected = _select_eval_window_records_temporally(
+            season_groups[season],
+            target_count=int(counts.get(season, 0)),
+        )
+        for record in season_selected:
+            start_idx = int(record["start_idx"])
+            if start_idx in selected_start_indices:
+                continue
+            selected.append(record)
+            selected_start_indices.add(start_idx)
+
+    if len(selected) < target_total:
+        remaining_records = [
+            record
+            for record in ordered_records
+            if int(record["start_idx"]) not in selected_start_indices
+        ]
+        top_up = _select_eval_window_records_temporally(
+            remaining_records,
+            target_count=int(target_total - len(selected)),
+        )
+        for record in top_up:
+            start_idx = int(record["start_idx"])
+            if start_idx in selected_start_indices:
+                continue
+            selected.append(record)
+            selected_start_indices.add(start_idx)
+
+    return sorted(selected, key=lambda item: int(item["start_idx"]))
+
+
+def _build_eval_window_candidate_records(
+    *,
+    train_df: pd.DataFrame,
+    candidate_starts: Sequence[int],
+    steps: int,
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for start_idx in candidate_starts:
+        end_idx = int(start_idx + steps)
+        episode_df = train_df.iloc[int(start_idx):end_idx].reset_index(drop=True)
+        timestamp_series = pd.to_datetime(episode_df["timestamp"])
+        qc_series = pd.to_numeric(episode_df["qc_dem_mw"], errors="coerce").fillna(0.0)
+        qh_series = pd.to_numeric(episode_df["qh_dem_mw"], errors="coerce").fillna(0.0)
+        cooling_mean = float(qc_series.mean()) if len(qc_series) > 0 else 0.0
+        cooling_peak = float(qc_series.max()) if len(qc_series) > 0 else 0.0
+        heating_mean = float(qh_series.mean()) if len(qh_series) > 0 else 0.0
+        validation_score = float(
+            cooling_mean
+            + 0.10 * cooling_peak
+            + 0.05 * heating_mean
+        )
+        records.append(
+            {
+                "start_idx": int(start_idx),
+                "end_idx": int(end_idx),
+                "start_timestamp": str(timestamp_series.iloc[0].isoformat()),
+                "end_timestamp": str(timestamp_series.iloc[-1].isoformat()),
+                "season": _calendar_season_from_month(int(timestamp_series.iloc[0].month)),
+                "cooling_mean_mw": cooling_mean,
+                "cooling_peak_mw": cooling_peak,
+                "heating_mean_mw": heating_mean,
+                "validation_score": validation_score,
+                "episode_df": episode_df,
+            }
+        )
+    return records
 
 
 def _build_eval_window_pool(
@@ -2230,56 +2846,66 @@ def _build_eval_window_pool(
     if not candidate_starts:
         raise ValueError("无法从训练集构建验证窗口候选集。")
 
+    candidate_records = _build_eval_window_candidate_records(
+        train_df=train_df,
+        candidate_starts=candidate_starts,
+        steps=steps,
+    )
     pool_target_size = min(int(pool_size), len(candidate_starts))
-    pool_positions = np.linspace(0, len(candidate_starts) - 1, num=pool_target_size)
-    pool_candidate_indices = sorted({int(round(value)) for value in pool_positions})
-    pool_indices = [candidate_starts[index] for index in pool_candidate_indices]
+    pool_records = _select_eval_window_records_season_balanced(
+        candidate_records,
+        target_count=pool_target_size,
+    )
 
-    window_target_count = min(int(window_count), len(pool_indices))
-    pool_index_blocks = np.array_split(np.arange(len(pool_indices), dtype=int), window_target_count)
-    rng = np.random.default_rng(int(seed))
-    selected_pool_positions: list[int] = []
-    for block in pool_index_blocks:
-        if len(block) == 0:
-            continue
-        if len(block) == 1:
-            selected_pool_positions.append(int(block[0]))
-            continue
-        choice = int(rng.integers(0, len(block)))
-        selected_pool_positions.append(int(block[choice]))
-    selected_pool_positions = sorted(set(selected_pool_positions))
-    if not selected_pool_positions:
-        selected_pool_positions = [0]
+    window_target_count = min(int(window_count), len(pool_records))
+    selected_records = _select_eval_window_records_season_balanced(
+        pool_records,
+        target_count=window_target_count,
+    )
+    selected_start_indices = {
+        int(record["start_idx"])
+        for record in selected_records
+    }
 
     windows_payload: list[dict[str, Any]] = []
     episode_dfs: list[pd.DataFrame] = []
     selected_indices: list[int] = []
-    for window_index, start_idx in enumerate(pool_indices):
-        end_idx = int(start_idx + steps)
-        episode_df = train_df.iloc[start_idx:end_idx].reset_index(drop=True)
-        selected = int(window_index) in selected_pool_positions
+    season_counts = {season: 0 for season in ("winter", "spring", "summer", "autumn")}
+    selected_season_counts = {season: 0 for season in ("winter", "spring", "summer", "autumn")}
+    for window_index, record in enumerate(pool_records):
+        selected = int(record["start_idx"]) in selected_start_indices
+        season = str(record["season"])
+        season_counts[season] = int(season_counts[season] + 1)
         if selected:
-            episode_dfs.append(episode_df)
+            episode_dfs.append(record["episode_df"])
             selected_indices.append(int(window_index))
+            selected_season_counts[season] = int(selected_season_counts[season] + 1)
         windows_payload.append(
             {
                 "window_index": int(window_index),
-                "start_idx": int(start_idx),
-                "end_idx": int(end_idx),
-                "start_timestamp": str(pd.to_datetime(episode_df["timestamp"].iloc[0]).isoformat()),
-                "end_timestamp": str(pd.to_datetime(episode_df["timestamp"].iloc[-1]).isoformat()),
+                "start_idx": int(record["start_idx"]),
+                "end_idx": int(record["end_idx"]),
+                "start_timestamp": str(record["start_timestamp"]),
+                "end_timestamp": str(record["end_timestamp"]),
+                "season": season,
+                "cooling_mean_mw": float(record["cooling_mean_mw"]),
+                "cooling_peak_mw": float(record["cooling_peak_mw"]),
+                "heating_mean_mw": float(record["heating_mean_mw"]),
+                "validation_score": float(record["validation_score"]),
                 "selected_for_eval": bool(selected),
             }
         )
 
     return {
-        "mode": "fixed_multi_window_pool_v1",
-        "pool_size": int(len(pool_indices)),
+        "mode": "season_balanced_multi_window_pool_v2",
+        "pool_size": int(len(pool_records)),
         "window_count": int(len(selected_indices)),
         "seed": int(seed),
         "episode_steps": int(steps),
         "episode_days": int(eval_episode_days),
         "selected_window_indices": selected_indices,
+        "pool_season_counts": {key: int(value) for key, value in season_counts.items()},
+        "selected_season_counts": {key: int(value) for key, value in selected_season_counts.items()},
         "windows": windows_payload,
         "episode_dfs": tuple(episode_dfs),
     }
@@ -2539,6 +3165,34 @@ class PAFCTD3Trainer:
             dtype=self.torch.float32,
             device=self.device,
         )
+        self.economic_teacher_mismatch_focus_weight_np = np.ones(
+            (1, len(self.action_keys)),
+            dtype=np.float32,
+        )
+        self.economic_teacher_mismatch_focus_weight = self.torch.as_tensor(
+            self.economic_teacher_mismatch_focus_weight_np,
+            dtype=self.torch.float32,
+            device=self.device,
+        )
+        self.economic_teacher_mismatch_focus_summary: dict[str, Any] = {
+            "enabled": bool(float(self.config.economic_teacher_mismatch_focus_coef) > 0.0),
+            "status": "not_run",
+            "scale_by_action": {str(key): 1.0 for key in self.action_keys},
+        }
+        self.surrogate_actor_trust_weight_np = np.ones(
+            (1, len(self.action_keys)),
+            dtype=np.float32,
+        )
+        self.surrogate_actor_trust_weight = self.torch.as_tensor(
+            self.surrogate_actor_trust_weight_np,
+            dtype=self.torch.float32,
+            device=self.device,
+        )
+        self.surrogate_actor_trust_summary: dict[str, Any] = {
+            "enabled": bool(float(self.config.surrogate_actor_trust_coef) > 0.0),
+            "status": "not_run",
+            "trust_by_action": {str(key): 1.0 for key in self.action_keys},
+        }
         (
             self.bes_price_low_threshold,
             self.bes_price_high_threshold,
@@ -2755,6 +3409,11 @@ class PAFCTD3Trainer:
             "epochs": int(self.config.economic_teacher_full_year_warm_start_epochs),
             "status": "not_run",
         }
+        self.economic_teacher_mismatch_focus_summary.update(
+            {
+                "prefill_replay_size": int(self.replay.size),
+            }
+        )
         self.actor_gt_warm_start_summary: dict[str, Any] = {
             "enabled": bool(
                 int(self.config.economic_gt_full_year_warm_start_samples) > 0
@@ -2891,6 +3550,15 @@ class PAFCTD3Trainer:
                 role="economic_safe_compare",
             )
             summary["safe_teacher"] = dict(safe_info)
+        else:
+            prefill_policy = str(self.config.expert_prefill_policy).strip().lower()
+            if prefill_policy in {"easy_rule_abs", "easy_rule", "rule"}:
+                safe_policy, safe_info = self._build_expert_policy()
+                summary["safe_teacher"] = {
+                    **dict(safe_info),
+                    "role": "economic_safe_compare",
+                    "source": "expert_prefill_policy",
+                }
         summary["status"] = "ready"
         summary["teacher"] = dict(teacher_info)
         return teacher_policy, safe_policy, summary
@@ -3773,10 +4441,20 @@ class PAFCTD3Trainer:
             vec_normalizer.training = False
             vec_normalizer.norm_reward = False
             model_env = vec_normalizer
+        load_custom_objects: dict[str, Any] | None = None
+        if algo in {"sac", "td3", "ddpg", "dqn"}:
+            # Teacher checkpoints are only used for deterministic inference here.
+            # Shrink replay-related state on load to avoid allocating the original
+            # training buffer, which can otherwise dominate memory during PAFC init.
+            load_custom_objects = {
+                "buffer_size": 1,
+                "learning_starts": 0,
+            }
         model = algo_cls.load(
             str(resolved_model_path),
             env=model_env,
             device="cpu",
+            custom_objects=load_custom_objects,
         )
 
         class _SB3CheckpointPrefillPolicy:
@@ -5125,6 +5803,10 @@ class PAFCTD3Trainer:
         priorities = np.zeros((len(transitions),), dtype=np.float32)
         sample_weights = np.zeros((len(transitions), 1), dtype=np.float32)
         candidate_indices: list[int] = []
+        gt_candidate_indices: list[int] = []
+        bes_candidate_indices: list[int] = []
+        tes_candidate_indices: list[int] = []
+        season_by_index: dict[int, str] = {}
         gt_available_count = 0
         bes_available_count = 0
         tes_available_count = 0
@@ -5154,15 +5836,21 @@ class PAFCTD3Trainer:
             priorities[row_index] = float(row_stats["priority"])
             sample_weights[row_index, 0] = float(row_stats["sample_weight"])
             candidate_indices.append(int(row_index))
+            season_by_index[int(row_index)] = _calendar_season_from_timestamp_value(
+                self.train_df["timestamp"].iloc[int(row_index)]
+            )
             dim_weight_sum += float(row_stats["dim_weight"])
             delta_mean_sum += float(row_stats["delta_mean"])
             gt_bonus_sum += float(row_stats["gt_bonus"])
             if "u_gt" in self.action_index and active_mask[int(self.action_index["u_gt"])]:
                 gt_available_count += 1
+                gt_candidate_indices.append(int(row_index))
             if "u_bes" in self.action_index and active_mask[int(self.action_index["u_bes"])]:
                 bes_available_count += 1
+                bes_candidate_indices.append(int(row_index))
             if "u_tes" in self.action_index and active_mask[int(self.action_index["u_tes"])]:
                 tes_available_count += 1
+                tes_candidate_indices.append(int(row_index))
 
         if not candidate_indices:
             summary["status"] = "no_teacher_targets"
@@ -5175,14 +5863,53 @@ class PAFCTD3Trainer:
                 summary,
             )
 
-        selected_indices = _select_temporal_priority_indices(
-            indices=candidate_indices,
-            priorities=priorities,
-            target_count=min(
-                int(self.config.economic_teacher_full_year_warm_start_samples),
-                len(candidate_indices),
-            ),
+        requested_samples = min(
+            int(self.config.economic_teacher_full_year_warm_start_samples),
+            len(candidate_indices),
         )
+        action_counts = _allocate_economic_teacher_action_counts(
+            requested_total=requested_samples,
+            gt_available=len(gt_candidate_indices),
+            bes_available=len(bes_candidate_indices),
+            tes_available=len(tes_candidate_indices),
+        )
+        selected_indices: list[int] = []
+        selected_index_set: set[int] = set()
+        for key, source_indices in (
+            ("bes", bes_candidate_indices),
+            ("tes", tes_candidate_indices),
+            ("gt", gt_candidate_indices),
+        ):
+            group_selected = _select_temporal_priority_indices_by_season(
+                indices=source_indices,
+                priorities=priorities,
+                season_by_index=season_by_index,
+                target_count=int(action_counts.get(key, 0)),
+            )
+            for idx in group_selected:
+                idx_int = int(idx)
+                if idx_int in selected_index_set:
+                    continue
+                selected_indices.append(idx_int)
+                selected_index_set.add(idx_int)
+        if len(selected_indices) < requested_samples:
+            top_up = _select_temporal_priority_indices_by_season(
+                indices=[
+                    int(idx)
+                    for idx in candidate_indices
+                    if int(idx) not in selected_index_set
+                ],
+                priorities=priorities,
+                season_by_index=season_by_index,
+                target_count=int(requested_samples - len(selected_indices)),
+            )
+            for idx in top_up:
+                idx_int = int(idx)
+                if idx_int in selected_index_set:
+                    continue
+                selected_indices.append(idx_int)
+                selected_index_set.add(idx_int)
+        selected_indices = sorted({int(idx) for idx in selected_indices})
         obs_rows = np.asarray(
             [transitions[idx]["obs"] for idx in selected_indices],
             dtype=np.float32,
@@ -5203,6 +5930,14 @@ class PAFCTD3Trainer:
             [sample_weights[idx] for idx in selected_indices],
             dtype=np.float32,
         ).reshape(-1, 1)
+        available_season_counts = {season: 0 for season in ("winter", "spring", "summer", "autumn")}
+        sampled_season_counts = {season: 0 for season in ("winter", "spring", "summer", "autumn")}
+        for idx in candidate_indices:
+            season = str(season_by_index.get(int(idx), "summer"))
+            available_season_counts[season] = int(available_season_counts[season] + 1)
+        for idx in selected_indices:
+            season = str(season_by_index.get(int(idx), "summer"))
+            sampled_season_counts[season] = int(sampled_season_counts[season] + 1)
         summary.update(
             {
                 "status": "ready",
@@ -5211,6 +5946,9 @@ class PAFCTD3Trainer:
                 "available_gt_count": int(gt_available_count),
                 "available_bes_count": int(bes_available_count),
                 "available_tes_count": int(tes_available_count),
+                "requested_gt_count": int(action_counts["gt"]),
+                "requested_bes_count": int(action_counts["bes"]),
+                "requested_tes_count": int(action_counts["tes"]),
                 "sampled_gt_count": int(
                     (teacher_mask_rows[:, int(self.action_index["u_gt"])] > 0.5).sum()
                 )
@@ -5241,6 +5979,12 @@ class PAFCTD3Trainer:
                 "teacher_target_dim_rate": float(teacher_mask_rows.mean())
                 if teacher_mask_rows.size > 0
                 else 0.0,
+                "available_season_counts": {
+                    key: int(value) for key, value in available_season_counts.items()
+                },
+                "sampled_season_counts": {
+                    key: int(value) for key, value in sampled_season_counts.items()
+                },
             }
         )
         return (
@@ -5414,12 +6158,17 @@ class PAFCTD3Trainer:
                     )
                     / weighted_safe_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
                 ).mean()
+                weighted_teacher_mask = (
+                    batch_teacher_mask
+                    * self.economic_teacher_action_weight
+                    * self.economic_teacher_mismatch_focus_weight
+                )
                 teacher_sq = (
-                    ((prediction - batch_teacher_target).pow(2) * batch_teacher_mask).sum(
+                    ((prediction - batch_teacher_target).pow(2) * weighted_teacher_mask).sum(
                         dim=1,
                         keepdim=True,
                     )
-                    / batch_teacher_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+                    / weighted_teacher_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
                 )
                 teacher_loss = (
                     (batch_sample_weight * teacher_sq).sum()
@@ -5452,6 +6201,13 @@ class PAFCTD3Trainer:
                     for key, value in zip(
                         self.action_keys,
                         _economic_teacher_safe_preserve_weights_np(action_keys=self.action_keys),
+                    )
+                },
+                "surrogate_mismatch_focus_weights": {
+                    str(key): float(value)
+                    for key, value in zip(
+                        self.action_keys,
+                        self.economic_teacher_mismatch_focus_weight_np.reshape(-1),
                     )
                 },
             }
@@ -5533,6 +6289,8 @@ class PAFCTD3Trainer:
         sample_weights = np.ones((len(transitions), 1), dtype=np.float32)
         sampled_modes_all: list[str] = []
         sampled_sources_all: list[str] = []
+        season_by_index: dict[int, str] = {}
+        train_timestamps = self.train_df["timestamp"] if "timestamp" in self.train_df.columns else None
         teacher_target_count = 0
         teacher_target_on_count = 0
         teacher_target_off_count = 0
@@ -5541,6 +6299,12 @@ class PAFCTD3Trainer:
         prior_fallback_off_count = 0
         prior_fallback_idle_count = 0
         for idx, transition in enumerate(transitions):
+            if train_timestamps is not None and int(idx) < len(train_timestamps):
+                season_by_index[int(idx)] = _calendar_season_from_timestamp_value(
+                    train_timestamps.iloc[int(idx)]
+                )
+            else:
+                season_by_index[int(idx)] = "summer"
             obs_vector = np.asarray(transition["obs"], dtype=np.float32).reshape(-1)
             action_exec = np.asarray(transition["action_exec"], dtype=np.float32).reshape(-1)
             teacher_action_exec = np.asarray(
@@ -5653,38 +6417,43 @@ class PAFCTD3Trainer:
         desired_off = int(mode_counts["off"])
         desired_idle = int(mode_counts["idle"])
         selected_indices: list[int] = []
-        teacher_selected_on = _select_temporal_priority_indices(
+        teacher_selected_on = _select_temporal_priority_indices_by_season(
             indices=teacher_on_indices,
             priorities=priorities,
+            season_by_index=season_by_index,
             target_count=min(desired_on, len(teacher_on_indices)),
         )
         selected_indices.extend(teacher_selected_on)
-        teacher_selected_off = _select_temporal_priority_indices(
+        teacher_selected_off = _select_temporal_priority_indices_by_season(
             indices=teacher_off_indices,
             priorities=priorities,
+            season_by_index=season_by_index,
             target_count=min(desired_off, len(teacher_off_indices)),
         )
         selected_indices.extend(teacher_selected_off)
         remaining_on = max(0, desired_on - len(teacher_selected_on))
         remaining_off = max(0, desired_off - len(teacher_selected_off))
         selected_indices.extend(
-            _select_temporal_priority_indices(
+            _select_temporal_priority_indices_by_season(
                 indices=prior_on_indices,
                 priorities=priorities,
+                season_by_index=season_by_index,
                 target_count=remaining_on,
             )
         )
         selected_indices.extend(
-            _select_temporal_priority_indices(
+            _select_temporal_priority_indices_by_season(
                 indices=prior_off_indices,
                 priorities=priorities,
+                season_by_index=season_by_index,
                 target_count=remaining_off,
             )
         )
         selected_indices.extend(
-            _select_temporal_priority_indices(
+            _select_temporal_priority_indices_by_season(
                 indices=idle_indices,
                 priorities=priorities,
+                season_by_index=season_by_index,
                 target_count=desired_idle,
             )
         )
@@ -5695,17 +6464,19 @@ class PAFCTD3Trainer:
             if int(idx) not in selected_set and sampled_sources_all[int(idx)] == "teacher"
         ]
         if len(selected_set) < requested_samples:
-            fill_teacher_indices = _select_temporal_priority_indices(
+            fill_teacher_indices = _select_temporal_priority_indices_by_season(
                 indices=remaining_teacher_indices,
                 priorities=priorities,
+                season_by_index=season_by_index,
                 target_count=int(requested_samples - len(selected_set)),
             )
             selected_set.update(int(idx) for idx in fill_teacher_indices)
         remaining_indices = [idx for idx in range(len(transitions)) if int(idx) not in selected_set]
         if len(selected_set) < requested_samples:
-            fill_indices = _select_temporal_priority_indices(
+            fill_indices = _select_temporal_priority_indices_by_season(
                 indices=remaining_indices,
                 priorities=priorities,
+                season_by_index=season_by_index,
                 target_count=int(requested_samples - len(selected_set)),
             )
             selected_set.update(int(idx) for idx in fill_indices)
@@ -5754,6 +6525,14 @@ class PAFCTD3Trainer:
 
         selected_indices_np = np.asarray(selected_indices, dtype=np.int64)
         selected_weights = np.asarray(sample_weights[selected_indices_np], dtype=np.float32).reshape(-1, 1)
+        available_season_counts = {season: 0 for season in ("winter", "spring", "summer", "autumn")}
+        sampled_season_counts = {season: 0 for season in ("winter", "spring", "summer", "autumn")}
+        for idx in range(len(transitions)):
+            season = str(season_by_index.get(int(idx), "summer"))
+            available_season_counts[season] = int(available_season_counts[season] + 1)
+        for idx in selected_indices:
+            season = str(season_by_index.get(int(idx), "summer"))
+            sampled_season_counts[season] = int(sampled_season_counts[season] + 1)
         summary.update(
             {
                 "status": "ready",
@@ -5786,6 +6565,12 @@ class PAFCTD3Trainer:
                 "replay_augmented_steps": int(replay_augmented_steps),
                 "price_low_threshold": float(self.bes_price_low_threshold),
                 "price_high_threshold": float(self.bes_price_high_threshold),
+                "available_season_counts": {
+                    key: int(value) for key, value in available_season_counts.items()
+                },
+                "sampled_season_counts": {
+                    key: int(value) for key, value in sampled_season_counts.items()
+                },
             }
         )
         return (
@@ -5944,7 +6729,9 @@ class PAFCTD3Trainer:
         all_transitions: list[dict[str, Any]] = []
         transition_source_labels: list[str] = []
         transition_anchor_weights: list[float] = []
+        transition_seasons: list[str] = []
         source_rollouts: dict[str, dict[str, Any]] = {}
+        train_timestamps = self.train_df["timestamp"] if "timestamp" in self.train_df.columns else None
 
         def _append_rollout(
             *,
@@ -5971,10 +6758,18 @@ class PAFCTD3Trainer:
                 "bes_prior_discharge_count": int(rollout.get("bes_prior_discharge_count", 0)),
                 "anchor_weight": float(source_anchor_weight),
             }
-            for transition in transitions:
+            for local_step_index, transition in enumerate(transitions):
                 all_transitions.append(dict(transition))
                 transition_source_labels.append(str(source_label))
                 transition_anchor_weights.append(float(source_anchor_weight))
+                if train_timestamps is not None and int(local_step_index) < len(train_timestamps):
+                    transition_seasons.append(
+                        _calendar_season_from_timestamp_value(
+                            train_timestamps.iloc[int(local_step_index)]
+                        )
+                    )
+                else:
+                    transition_seasons.append("summer")
             return rollout
 
         safe_policy, safe_policy_info = self._build_bes_full_year_warm_start_policy()
@@ -6056,12 +6851,22 @@ class PAFCTD3Trainer:
             "discharge": {"teacher": [], "other": []},
             "idle": {"teacher": [], "other": []},
         }
+        q_total_cooling_cap_mw = max(
+            _NORM_EPS,
+            float(self.env_config.q_abs_cool_cap_mw) + float(self.env_config.q_ech_cap_mw),
+        )
         opportunity_scores = np.zeros((total_available,), dtype=np.float32)
         selection_priorities = np.zeros((total_available,), dtype=np.float32)
         target_u_rows = np.zeros((total_available, 1), dtype=np.float32)
         economic_teacher_override_flags = np.zeros((total_available,), dtype=np.float32)
+        cooling_guard_flags = np.zeros((total_available,), dtype=np.float32)
         economic_teacher_override_count = 0
         economic_teacher_idle_override_count = 0
+        economic_cooling_guard_count = 0
+        season_by_index = {
+            int(idx): str(transition_seasons[int(idx)])
+            for idx in range(min(total_available, len(transition_seasons)))
+        }
         for idx, transition in enumerate(all_transitions):
             obs_vector = np.asarray(transition["obs"], dtype=np.float32).reshape(-1)
             prior = _bes_price_prior_target_np(
@@ -6076,8 +6881,21 @@ class PAFCTD3Trainer:
                 charge_u=float(charge_u),
                 discharge_u=float(discharge_u),
             )
+            cooling_guard_active = _bes_warm_start_cooling_guard_active_np(
+                abs_drive_margin_k=float(obs_vector[self.observation_index["abs_drive_margin_k"]]),
+                qc_dem_mw=float(obs_vector[self.observation_index["qc_dem_mw"]]),
+                q_total_cooling_cap_mw=float(q_total_cooling_cap_mw),
+                abs_margin_guard_k=float(self.config.dual_abs_margin_k),
+                qc_ratio_guard=float(self.config.dual_qc_ratio_th),
+            )
+            cooling_guard_flags[idx] = 1.0 if cooling_guard_active else 0.0
+            original_source_label = str(transition_source_labels[int(idx)])
+            guarded_source_label = original_source_label
+            if cooling_guard_active and original_source_label.strip().lower().startswith("economic"):
+                guarded_source_label = "cooling_guard_safe"
+                economic_cooling_guard_count += 1
             target_choice = _select_bes_full_year_target_np(
-                source_label=str(transition_source_labels[int(idx)]),
+                source_label=guarded_source_label,
                 prior_target_u_bes=float(prior["target_u_bes"]),
                 prior_opportunity=float(prior["opportunity"]),
                 teacher_u_bes=float(
@@ -6091,7 +6909,10 @@ class PAFCTD3Trainer:
             mode_indices[mode].append(int(idx))
             source_bucket = (
                 "economic"
-                if str(transition_source_labels[int(idx)]).strip().lower().startswith("economic")
+                if (
+                    original_source_label.strip().lower().startswith("economic")
+                    and not cooling_guard_active
+                )
                 else "other"
             )
             source_mode_indices[mode][source_bucket].append(int(idx))
@@ -6108,10 +6929,12 @@ class PAFCTD3Trainer:
                 float(base_priority),
                 float(target_choice["weight_bonus"]),
             )
+            if cooling_guard_active and original_source_label.strip().lower().startswith("economic"):
+                base_priority *= 0.25
             opportunity_scores[idx] = float(base_priority)
             selection_priorities[idx] = _bes_full_year_selection_priority_np(
                 base_priority=float(base_priority),
-                source_label=str(transition_source_labels[int(idx)]),
+                source_label=guarded_source_label,
                 used_teacher=bool(target_choice["used_teacher"]),
                 teacher_priority_boost=float(
                     self.config.economic_bes_teacher_selection_priority_boost
@@ -6150,9 +6973,10 @@ class PAFCTD3Trainer:
                 ),
                 teacher_min_share=float(self.config.economic_bes_teacher_target_min_share),
             )
-            teacher_selected = _select_temporal_priority_indices(
+            teacher_selected = _select_temporal_priority_indices_by_season(
                 indices=teacher_mode_indices[mode]["teacher"],
                 priorities=selection_priorities,
+                season_by_index=season_by_index,
                 target_count=int(teacher_targets["teacher"]),
             )
             selected_indices.extend(teacher_selected)
@@ -6179,16 +7003,18 @@ class PAFCTD3Trainer:
                 economic_min_share=source_min_share,
             )
             selected_indices.extend(
-                _select_temporal_priority_indices(
+                _select_temporal_priority_indices_by_season(
                     indices=remaining_economic_indices,
                     priorities=selection_priorities,
+                    season_by_index=season_by_index,
                     target_count=int(source_targets["economic"]),
                 )
             )
             selected_indices.extend(
-                _select_temporal_priority_indices(
+                _select_temporal_priority_indices_by_season(
                     indices=remaining_other_indices,
                     priorities=selection_priorities,
+                    season_by_index=season_by_index,
                     target_count=int(source_targets["other"]),
                 )
             )
@@ -6197,9 +7023,10 @@ class PAFCTD3Trainer:
             remaining_indices = [
                 idx for idx in range(total_available) if int(idx) not in selected_set
             ]
-            fill_indices = _select_temporal_priority_indices(
+            fill_indices = _select_temporal_priority_indices_by_season(
                 indices=remaining_indices,
                 priorities=selection_priorities,
+                season_by_index=season_by_index,
                 target_count=int(requested_samples - len(selected_set)),
             )
             selected_set.update(int(idx) for idx in fill_indices)
@@ -6272,6 +7099,14 @@ class PAFCTD3Trainer:
                 dtype=np.float32,
             ).reshape(-1, 1)
         )
+        available_season_counts = {season: 0 for season in ("winter", "spring", "summer", "autumn")}
+        sampled_season_counts = {season: 0 for season in ("winter", "spring", "summer", "autumn")}
+        for idx in range(total_available):
+            season = str(season_by_index.get(int(idx), "summer"))
+            available_season_counts[season] = int(available_season_counts[season] + 1)
+        for idx in selected_indices:
+            season = str(season_by_index.get(int(idx), "summer"))
+            sampled_season_counts[season] = int(sampled_season_counts[season] + 1)
         summary.update(
             {
                 "status": "ready",
@@ -6287,6 +7122,11 @@ class PAFCTD3Trainer:
                 ),
                 "sampled_selection_priority_mean": float(
                     np.asarray(selection_priorities[selected_indices_np], dtype=np.float32).mean()
+                ),
+                "cooling_guard_count": int(np.asarray(cooling_guard_flags, dtype=np.float32).sum()),
+                "economic_cooling_guard_count": int(economic_cooling_guard_count),
+                "sampled_cooling_guard_count": int(
+                    np.asarray(cooling_guard_flags[selected_indices_np], dtype=np.float32).sum()
                 ),
                 "sampled_target_abs_mean": float(
                     np.asarray(np.abs(target_u_rows[selected_indices_np]), dtype=np.float32).mean()
@@ -6333,6 +7173,12 @@ class PAFCTD3Trainer:
                 "replay_augmented_steps": int(replay_augmented_steps),
                 "price_low_threshold": float(self.bes_price_low_threshold),
                 "price_high_threshold": float(self.bes_price_high_threshold),
+                "available_season_counts": {
+                    key: int(value) for key, value in available_season_counts.items()
+                },
+                "sampled_season_counts": {
+                    key: int(value) for key, value in sampled_season_counts.items()
+                },
             }
         )
         return (
@@ -7454,6 +8300,7 @@ class PAFCTD3Trainer:
     def _compute_economic_teacher_safe_preserve_loss(
         self,
         *,
+        obs_batch,
         action_exec_batch,
         teacher_action_exec_batch,
         teacher_action_mask_batch,
@@ -7461,7 +8308,9 @@ class PAFCTD3Trainer:
     ):
         teacher_row_mask = self.torch.clamp(teacher_available_batch, 0.0, 1.0)
         active_teacher_dims = (
-            teacher_action_mask_batch * self.economic_teacher_action_weight
+            teacher_action_mask_batch
+            * self.economic_teacher_action_weight
+            * self.economic_teacher_mismatch_focus_weight
         ).sum(dim=1, keepdim=True)
         teacher_row_mask = teacher_row_mask * (active_teacher_dims > 0.0).to(
             dtype=action_exec_batch.dtype
@@ -7473,10 +8322,190 @@ class PAFCTD3Trainer:
             0.0,
             1.0,
         ) * self.economic_teacher_safe_preserve_weight
+        row_weight = self.torch.ones_like(teacher_row_mask)
+        low_margin_mask = None
+        if "abs_drive_margin_k" in self.observation_index:
+            abs_margin_index = int(self.observation_index["abs_drive_margin_k"])
+            low_margin_mask = (
+                obs_batch[:, abs_margin_index : abs_margin_index + 1]
+                <= float(self.config.dual_abs_margin_k)
+            ).to(dtype=action_exec_batch.dtype)
+            row_weight = row_weight + (
+                low_margin_mask
+                * float(self.config.economic_teacher_safe_preserve_low_margin_boost)
+            )
+        high_cooling_mask = None
+        if "qc_dem_mw" in self.observation_index:
+            qc_index = int(self.observation_index["qc_dem_mw"])
+            q_total_cooling_cap_mw = max(
+                _NORM_EPS,
+                float(self.env_config.q_abs_cool_cap_mw)
+                + float(self.env_config.q_ech_cap_mw),
+            )
+            qc_ratio = obs_batch[:, qc_index : qc_index + 1] / q_total_cooling_cap_mw
+            high_cooling_mask = (
+                qc_ratio >= float(self.config.dual_qc_ratio_th)
+            ).to(dtype=action_exec_batch.dtype)
+            row_weight = row_weight + (
+                high_cooling_mask
+                * float(self.config.economic_teacher_safe_preserve_high_cooling_boost)
+            )
+        if low_margin_mask is not None and high_cooling_mask is not None:
+            row_weight = row_weight + (
+                low_margin_mask
+                * high_cooling_mask
+                * float(self.config.economic_teacher_safe_preserve_joint_boost)
+            )
         preserve_sq = (
             (action_exec_batch - teacher_action_exec_batch).pow(2) * preserve_mask
         ).sum(dim=1, keepdim=True) / preserve_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
-        return (teacher_row_mask * preserve_sq).sum() / teacher_row_mask.sum().clamp_min(1.0)
+        weighted_teacher_mask = teacher_row_mask * row_weight
+        return (weighted_teacher_mask * preserve_sq).sum() / weighted_teacher_mask.sum().clamp_min(1.0)
+
+    def _collect_surrogate_replay_audit(self) -> tuple[dict[str, Any], pd.DataFrame]:
+        if int(self.replay._size) <= 0:
+            return {}, pd.DataFrame()
+        sample_count = int(self.replay._size)
+        obs_batch = np.asarray(self.replay.obs[:sample_count], dtype=np.float32).copy()
+        action_raw_batch = np.asarray(
+            self.replay.action_raw[:sample_count], dtype=np.float32
+        ).copy()
+        action_exec_batch = np.asarray(
+            self.replay.action_exec[:sample_count], dtype=np.float32
+        ).copy()
+        predicted_exec_batch = np.zeros_like(action_exec_batch)
+        audit_batch_size = max(128, int(self.config.batch_size) * 4)
+        for start in range(0, sample_count, audit_batch_size):
+            end = min(sample_count, start + audit_batch_size)
+            obs_tensor = self.torch.as_tensor(
+                obs_batch[start:end],
+                dtype=self.torch.float32,
+                device=self.device,
+            )
+            action_tensor = self.torch.as_tensor(
+                action_raw_batch[start:end],
+                dtype=self.torch.float32,
+                device=self.device,
+            )
+            with self.torch.no_grad():
+                predicted_exec_batch[start:end] = (
+                    self.surrogate.project(obs_tensor, action_tensor)
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .astype(np.float32)
+                )
+        return _build_surrogate_audit_report(
+            obs_batch=obs_batch,
+            predicted_exec_batch=predicted_exec_batch,
+            actual_exec_batch=action_exec_batch,
+            observation_index=self.observation_index,
+            action_keys=self.action_keys,
+            low_abs_margin_threshold=float(self.config.dual_abs_margin_k),
+            high_cooling_ratio_threshold=float(self.config.dual_qc_ratio_th),
+            q_total_cooling_cap_mw=float(self.env_config.q_abs_cool_cap_mw)
+            + float(self.env_config.q_ech_cap_mw),
+        )
+
+    def _refresh_economic_teacher_mismatch_focus(self) -> dict[str, Any]:
+        ones = np.ones((1, len(self.action_keys)), dtype=np.float32)
+        if (
+            float(self.config.economic_teacher_mismatch_focus_coef) <= 0.0
+            or len(self.action_keys) <= 0
+        ):
+            self.economic_teacher_mismatch_focus_weight_np = ones
+            self.economic_teacher_mismatch_focus_weight = self.torch.as_tensor(
+                ones,
+                dtype=self.torch.float32,
+                device=self.device,
+            )
+            self.economic_teacher_mismatch_focus_summary = {
+                "enabled": False,
+                "status": "disabled",
+                "prefill_replay_size": int(self.replay.size),
+                "scale_by_action": {str(key): 1.0 for key in self.action_keys},
+            }
+            return dict(self.economic_teacher_mismatch_focus_summary)
+
+        audit_summary, _ = self._collect_surrogate_replay_audit()
+        overall_mae = dict(audit_summary.get("overall_mae_by_action") or {})
+        focused_mae = dict(audit_summary.get("focused_mae_by_action") or {})
+        mae_vector = np.asarray(
+            [float(overall_mae.get(str(key), 0.0)) for key in self.action_keys],
+            dtype=np.float32,
+        )
+        if focused_mae:
+            focused_vector = np.asarray(
+                [float(focused_mae.get(str(key), overall_mae.get(str(key), 0.0))) for key in self.action_keys],
+                dtype=np.float32,
+            )
+            mae_vector = 0.5 * mae_vector + 0.5 * focused_vector
+        positive_mae = mae_vector[mae_vector > 0.0]
+        reference_mae = float(np.mean(positive_mae)) if positive_mae.size > 0 else 1.0
+        raw_scale = 1.0 + float(self.config.economic_teacher_mismatch_focus_coef) * (
+            (mae_vector / max(_NORM_EPS, reference_mae)) - 1.0
+        )
+        clipped_scale = np.clip(
+            raw_scale,
+            float(self.config.economic_teacher_mismatch_focus_min_scale),
+            float(self.config.economic_teacher_mismatch_focus_max_scale),
+        ).astype(np.float32, copy=False)
+        if not np.isfinite(clipped_scale).all():
+            clipped_scale = np.ones((len(self.action_keys),), dtype=np.float32)
+        scale_matrix = clipped_scale.reshape(1, -1).astype(np.float32, copy=False)
+        self.economic_teacher_mismatch_focus_weight_np = scale_matrix.copy()
+        self.economic_teacher_mismatch_focus_weight = self.torch.as_tensor(
+            scale_matrix,
+            dtype=self.torch.float32,
+            device=self.device,
+        )
+        self.economic_teacher_mismatch_focus_summary = {
+            "enabled": True,
+            "status": "applied",
+            "prefill_replay_size": int(self.replay.size),
+            "coef": float(self.config.economic_teacher_mismatch_focus_coef),
+            "min_scale": float(self.config.economic_teacher_mismatch_focus_min_scale),
+            "max_scale": float(self.config.economic_teacher_mismatch_focus_max_scale),
+            "reference_mae": float(reference_mae),
+            "overall_worst_action_by_mae": str(audit_summary.get("overall_worst_action_by_mae", "")),
+            "focused_worst_action_by_mae": str(audit_summary.get("focused_worst_action_by_mae", "")),
+            "scale_by_action": {
+                str(key): float(value)
+                for key, value in zip(self.action_keys, clipped_scale)
+            },
+        }
+        return dict(self.economic_teacher_mismatch_focus_summary)
+
+    def _refresh_surrogate_actor_trust(self) -> dict[str, Any]:
+        audit_summary, _ = self._collect_surrogate_replay_audit()
+        scale_matrix, summary = _build_surrogate_actor_trust_scale_np(
+            action_keys=self.action_keys,
+            overall_mae_by_action=audit_summary.get("overall_mae_by_action"),
+            focused_mae_by_action=audit_summary.get("focused_mae_by_action"),
+            trust_coef=float(self.config.surrogate_actor_trust_coef),
+            trust_min_scale=float(self.config.surrogate_actor_trust_min_scale),
+            focused_mix=0.5,
+        )
+        self.surrogate_actor_trust_weight_np = np.asarray(
+            scale_matrix,
+            dtype=np.float32,
+        ).copy()
+        self.surrogate_actor_trust_weight = self.torch.as_tensor(
+            self.surrogate_actor_trust_weight_np,
+            dtype=self.torch.float32,
+            device=self.device,
+        )
+        self.surrogate_actor_trust_summary = {
+            **summary,
+            "prefill_replay_size": int(self.replay.size),
+            "overall_worst_action_by_mae": str(
+                audit_summary.get("overall_worst_action_by_mae", "")
+            ),
+            "focused_worst_action_by_mae": str(
+                audit_summary.get("focused_worst_action_by_mae", "")
+            ),
+        }
+        return dict(self.surrogate_actor_trust_summary)
 
     def _random_action(self) -> np.ndarray:
         return self.rng.uniform(
@@ -7516,6 +8545,17 @@ class PAFCTD3Trainer:
         tau = float(self.config.tau)
         for target_param, source_param in zip(target_model.parameters(), source_model.parameters()):
             target_param.data.mul_(1.0 - tau).add_(source_param.data, alpha=tau)
+
+    def _write_surrogate_replay_audit(self) -> dict[str, Any]:
+        summary, detail_df = self._collect_surrogate_replay_audit()
+        if detail_df.empty:
+            return summary
+        audit_path = self.run_dir / "train" / "surrogate_replay_audit.csv"
+        detail_df.to_csv(audit_path, index=False)
+        return {
+            **summary,
+            "csv_path": str(audit_path.resolve()).replace("\\", "/"),
+        }
 
     def _build_actor_metadata(
         self,
@@ -7585,6 +8625,27 @@ class PAFCTD3Trainer:
             "economic_gt_grid_proxy_coef": float(self.config.economic_gt_grid_proxy_coef),
             "economic_gt_distill_coef": float(self.config.economic_gt_distill_coef),
             "economic_teacher_distill_coef": float(self.config.economic_teacher_distill_coef),
+            "economic_teacher_safe_preserve_coef": float(
+                self.config.economic_teacher_safe_preserve_coef
+            ),
+            "economic_teacher_safe_preserve_low_margin_boost": float(
+                self.config.economic_teacher_safe_preserve_low_margin_boost
+            ),
+            "economic_teacher_safe_preserve_high_cooling_boost": float(
+                self.config.economic_teacher_safe_preserve_high_cooling_boost
+            ),
+            "economic_teacher_safe_preserve_joint_boost": float(
+                self.config.economic_teacher_safe_preserve_joint_boost
+            ),
+            "economic_teacher_mismatch_focus_coef": float(
+                self.config.economic_teacher_mismatch_focus_coef
+            ),
+            "economic_teacher_mismatch_focus_min_scale": float(
+                self.config.economic_teacher_mismatch_focus_min_scale
+            ),
+            "economic_teacher_mismatch_focus_max_scale": float(
+                self.config.economic_teacher_mismatch_focus_max_scale
+            ),
             "economic_teacher_proxy_advantage_min": float(
                 self.config.economic_teacher_proxy_advantage_min
             ),
@@ -7673,6 +8734,12 @@ class PAFCTD3Trainer:
             ),
             "economic_bes_teacher_target_min_share": float(
                 self.config.economic_bes_teacher_target_min_share
+            ),
+            "surrogate_actor_trust_coef": float(
+                self.config.surrogate_actor_trust_coef
+            ),
+            "surrogate_actor_trust_min_scale": float(
+                self.config.surrogate_actor_trust_min_scale
             ),
             "bes_price_low_threshold": float(self.bes_price_low_threshold),
             "bes_price_high_threshold": float(self.bes_price_high_threshold),
@@ -7837,7 +8904,12 @@ class PAFCTD3Trainer:
     def _resolve_checkpoint_interval_steps(self) -> int:
         if int(self.config.checkpoint_interval_steps) > 0:
             return int(self.config.checkpoint_interval_steps)
-        return max(1, min(2_000, max(500, int(self.config.total_env_steps // 4))))
+        total_env_steps = max(1, int(self.config.total_env_steps))
+        if total_env_steps <= 512:
+            # Small-budget PAFC runs can peak early; keep auto cadence dense enough
+            # to retain the mid-training checkpoint instead of only the final one.
+            return max(32, total_env_steps // 4)
+        return max(1, min(2_000, max(500, total_env_steps // 4)))
 
     def _evaluate_checkpoint_candidate(
         self,
@@ -8047,15 +9119,24 @@ class PAFCTD3Trainer:
                 action_batch=next_action_raw,
             )
             next_action_exec_hat = self.surrogate.project(next_obs, next_action_raw)
+            # For bootstrap targets we do not have a real executed next action in replay.
+            # Low-trust dimensions therefore fall back to the post-shaping raw action.
+            next_action_exec_for_target = _blend_surrogate_action_proxy(
+                action_exec_hat=next_action_exec_hat,
+                fallback_action=next_action_raw,
+                trust_weight=self.surrogate_actor_trust_weight,
+            )
             reward_target = reward + float(self.config.gamma) * (1.0 - done) * self.torch.minimum(
-                self.q1_target(next_obs_norm, next_action_exec_hat),
-                self.q2_target(next_obs_norm, next_action_exec_hat),
+                self.q1_target(next_obs_norm, next_action_exec_for_target),
+                self.q2_target(next_obs_norm, next_action_exec_for_target),
             )
             cost_targets = [
                 cost[:, idx : idx + 1]
                 + float(self.config.gamma)
                 * (1.0 - done)
-                * self.cost_target_critics[idx](next_obs_norm, next_action_exec_hat).clamp_min(0.0)
+                * self.cost_target_critics[idx](
+                    next_obs_norm, next_action_exec_for_target
+                ).clamp_min(0.0)
                 for idx in range(3)
             ]
 
@@ -8097,6 +9178,8 @@ class PAFCTD3Trainer:
         economic_bes_distill_weight_value = float("nan")
         reward_actor_value = float("nan")
         mean_constraint_value = float("nan")
+        surrogate_actor_trust_mean_value = float("nan")
+        surrogate_actor_trust_min_value = float("nan")
         dual_scale_value = float(
             min(
                 1.0,
@@ -8110,12 +9193,18 @@ class PAFCTD3Trainer:
                 action_batch=action_raw,
             )
             action_exec_hat = self.surrogate.project(obs, action_raw)
+            surrogate_actor_trust = self.surrogate_actor_trust_weight
+            action_exec_for_actor = _blend_surrogate_action_proxy(
+                action_exec_hat=action_exec_hat,
+                fallback_action=action_exec.detach(),
+                trust_weight=surrogate_actor_trust,
+            )
             reward_actor = self.torch.minimum(
-                self.q1(obs_norm, action_exec_hat),
-                self.q2(obs_norm, action_exec_hat),
+                self.q1(obs_norm, action_exec_for_actor),
+                self.q2(obs_norm, action_exec_for_actor),
             )
             constraint_predictions = self.torch.cat(
-                [critic(obs_norm, action_exec_hat) for critic in self.cost_critics],
+                [critic(obs_norm, action_exec_for_actor) for critic in self.cost_critics],
                 dim=1,
             ).clamp_min(0.0)
             lambda_tensor = self.torch.as_tensor(
@@ -8123,7 +9212,11 @@ class PAFCTD3Trainer:
                 dtype=self.torch.float32,
                 device=self.device,
             )
-            gap_loss = self.F.mse_loss(action_raw, action_exec_hat)
+            gap_weight = surrogate_actor_trust.expand_as(action_exec_hat)
+            gap_loss = (
+                (gap_weight * (action_raw - action_exec_hat).pow(2)).sum(dim=1, keepdim=True)
+                / gap_weight.sum(dim=1, keepdim=True).clamp_min(1.0)
+            ).mean()
             support_weight = self._compute_anchor_weight(
                 obs_batch=obs,
                 action_exec_batch=action_exec,
@@ -8137,12 +9230,14 @@ class PAFCTD3Trainer:
                 teacher_available_batch=teacher_available,
                 teacher_action_mask_batch=teacher_action_mask,
             )
+            trusted_anchor_scale = gt_anchor_dimension_scale * surrogate_actor_trust
             exec_anchor_loss = (
                 support_weight
                 * (
-                    gt_anchor_dimension_scale
+                    trusted_anchor_scale
                     * (action_exec_hat - action_exec).pow(2)
-                ).mean(dim=1, keepdim=True)
+                ).sum(dim=1, keepdim=True)
+                / trusted_anchor_scale.sum(dim=1, keepdim=True).clamp_min(1.0)
             ).mean()
             invalid_abs_penalty = self._compute_invalid_abs_request_penalty(
                 obs_batch=obs,
@@ -8150,27 +9245,31 @@ class PAFCTD3Trainer:
             )
             boiler_proxy_penalty = self._compute_boiler_economic_proxy_penalty(
                 obs_batch=obs,
-                action_exec_batch=action_exec_hat,
+                action_exec_batch=action_exec_for_actor,
             )
             abs_tradeoff_penalty = self._compute_abs_ech_tradeoff_proxy_penalty(
                 obs_batch=obs,
-                action_exec_batch=action_exec_hat,
+                action_exec_batch=action_exec_for_actor,
             )
             gt_grid_proxy_penalty = self._compute_gt_grid_economic_proxy_penalty(
                 obs_batch=obs,
-                action_exec_batch=action_exec_hat,
+                action_exec_batch=action_exec_for_actor,
             )
             economic_teacher_weight = self._compute_economic_teacher_weight(
                 obs_batch=obs,
-                action_exec_batch=action_exec_hat,
+                action_exec_batch=action_exec_for_actor,
                 teacher_action_exec_batch=teacher_action_exec,
                 teacher_action_mask_batch=teacher_action_mask,
                 gap_batch=gap,
                 teacher_available_batch=teacher_available,
             )
-            effective_teacher_mask = teacher_action_mask * self.economic_teacher_action_weight
+            effective_teacher_mask = (
+                teacher_action_mask
+                * self.economic_teacher_action_weight
+                * self.economic_teacher_mismatch_focus_weight
+            )
             economic_teacher_sq = (
-                (action_exec_hat - teacher_action_exec).pow(2) * effective_teacher_mask
+                (action_exec_for_actor - teacher_action_exec).pow(2) * effective_teacher_mask
             ).sum(dim=1, keepdim=True) / effective_teacher_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
             economic_teacher_weight_sum = economic_teacher_weight.sum()
             economic_teacher_selected_loss = (
@@ -8178,25 +9277,27 @@ class PAFCTD3Trainer:
                 / economic_teacher_weight_sum.clamp_min(1.0)
             )
             economic_teacher_safe_preserve_loss = self._compute_economic_teacher_safe_preserve_loss(
-                action_exec_batch=action_exec_hat,
+                obs_batch=obs,
+                action_exec_batch=action_exec_for_actor,
                 teacher_action_exec_batch=teacher_action_exec,
                 teacher_action_mask_batch=teacher_action_mask,
                 teacher_available_batch=teacher_available,
             )
             economic_teacher_loss = (
                 economic_teacher_selected_loss
-                + economic_teacher_safe_preserve_loss
+                + float(self.config.economic_teacher_safe_preserve_coef)
+                * economic_teacher_safe_preserve_loss
             )
             economic_bes_distill_loss, economic_bes_distill_weight = self._compute_bes_prior_distill_loss(
                 obs_batch=obs,
                 action_raw_batch=action_raw,
-                action_exec_batch=action_exec_hat,
+                action_exec_batch=action_exec_for_actor,
                 gap_batch=gap,
             )
             economic_gt_distill_loss, economic_gt_distill_weight = self._compute_gt_prior_distill_loss(
                 obs_batch=obs,
                 action_raw_batch=action_raw,
-                action_exec_batch=action_exec_hat,
+                action_exec_batch=action_exec_for_actor,
                 gap_batch=gap,
                 teacher_action_exec_batch=teacher_action_exec,
                 teacher_action_mask_batch=teacher_action_mask,
@@ -8285,6 +9386,12 @@ class PAFCTD3Trainer:
             )
             reward_actor_value = float(reward_actor.mean().detach().cpu().item())
             mean_constraint_value = float(constraint_predictions.mean().detach().cpu().item())
+            surrogate_actor_trust_mean_value = float(
+                surrogate_actor_trust.mean().detach().cpu().item()
+            )
+            surrogate_actor_trust_min_value = float(
+                surrogate_actor_trust.min().detach().cpu().item()
+            )
 
         return {
             "reward_critic_loss": float(reward_critic_loss.detach().cpu().item()),
@@ -8308,6 +9415,8 @@ class PAFCTD3Trainer:
             "actor_economic_gt_distill_weight": economic_gt_distill_weight_value,
             "actor_economic_bes_distill_loss": economic_bes_distill_loss_value,
             "actor_economic_bes_distill_weight": economic_bes_distill_weight_value,
+            "actor_surrogate_trust_mean": surrogate_actor_trust_mean_value,
+            "actor_surrogate_trust_min": surrogate_actor_trust_min_value,
             "actor_constraint_mean": mean_constraint_value,
             "dual_scale": float(dual_scale_value),
             "lambda_e": float(self.dual_lambdas[0]),
@@ -8334,6 +9443,8 @@ class PAFCTD3Trainer:
         self._warm_start_actor_from_economic_teacher_full_year()
         self._warm_start_actor_from_bes_full_year()
         self._warm_start_actor_from_gt_full_year()
+        self._refresh_economic_teacher_mismatch_focus()
+        self._refresh_surrogate_actor_trust()
         effective_warmup_steps = 0 if self.replay.size > 0 else int(self.config.warmup_steps)
 
         sampler = make_episode_sampler(
@@ -8579,6 +9690,7 @@ class PAFCTD3Trainer:
             }
         last_row = history_rows[-1] if history_rows else {}
         train_wall_time_s = float(time.perf_counter() - train_start_time)
+        surrogate_replay_audit = self._write_surrogate_replay_audit()
         summary = {
             "mode": "train",
             "policy": "pafc_td3",
@@ -8621,6 +9733,27 @@ class PAFCTD3Trainer:
             "economic_gt_grid_proxy_coef": float(self.config.economic_gt_grid_proxy_coef),
             "economic_gt_distill_coef": float(self.config.economic_gt_distill_coef),
             "economic_teacher_distill_coef": float(self.config.economic_teacher_distill_coef),
+            "economic_teacher_safe_preserve_coef": float(
+                self.config.economic_teacher_safe_preserve_coef
+            ),
+            "economic_teacher_safe_preserve_low_margin_boost": float(
+                self.config.economic_teacher_safe_preserve_low_margin_boost
+            ),
+            "economic_teacher_safe_preserve_high_cooling_boost": float(
+                self.config.economic_teacher_safe_preserve_high_cooling_boost
+            ),
+            "economic_teacher_safe_preserve_joint_boost": float(
+                self.config.economic_teacher_safe_preserve_joint_boost
+            ),
+            "economic_teacher_mismatch_focus_coef": float(
+                self.config.economic_teacher_mismatch_focus_coef
+            ),
+            "economic_teacher_mismatch_focus_min_scale": float(
+                self.config.economic_teacher_mismatch_focus_min_scale
+            ),
+            "economic_teacher_mismatch_focus_max_scale": float(
+                self.config.economic_teacher_mismatch_focus_max_scale
+            ),
             "economic_teacher_proxy_advantage_min": float(
                 self.config.economic_teacher_proxy_advantage_min
             ),
@@ -8709,6 +9842,12 @@ class PAFCTD3Trainer:
             ),
             "economic_bes_teacher_target_min_share": float(
                 self.config.economic_bes_teacher_target_min_share
+            ),
+            "surrogate_actor_trust_coef": float(
+                self.config.surrogate_actor_trust_coef
+            ),
+            "surrogate_actor_trust_min_scale": float(
+                self.config.surrogate_actor_trust_min_scale
             ),
             "state_feasible_action_shaping_enabled": bool(self.config.state_feasible_action_shaping_enabled),
             "abs_cooling_blend_enabled": True,
@@ -8804,11 +9943,16 @@ class PAFCTD3Trainer:
             },
             "expert_prefill": dict(self.expert_prefill_summary),
             "economic_teacher_distill": dict(self.economic_teacher_distill_summary),
+            "economic_teacher_mismatch_focus": dict(
+                self.economic_teacher_mismatch_focus_summary
+            ),
+            "surrogate_actor_trust": dict(self.surrogate_actor_trust_summary),
             "actor_init": dict(self.actor_init_summary),
             "actor_warm_start": dict(self.actor_warm_start_summary),
             "actor_teacher_gt_head_warm_start": dict(
                 self.actor_teacher_gt_head_warm_start_summary
             ),
+            "surrogate_replay_audit": dict(surrogate_replay_audit),
             "actor_teacher_full_year_warm_start": dict(
                 self.actor_teacher_full_year_warm_start_summary
             ),
@@ -9107,6 +10251,31 @@ def evaluate_pafc_td3(
         device=device,
         env_config=config,
     )
+    surrogate_audit = None
+    surrogate_audit_summary: dict[str, Any] = {}
+    surrogate_obs_rows: list[np.ndarray] = []
+    surrogate_exec_hat_rows: list[np.ndarray] = []
+    surrogate_exec_rows: list[np.ndarray] = []
+    surrogate_torch = None
+    surrogate_checkpoint = str(metadata.get("projection_surrogate_checkpoint_path", "")).strip()
+    if surrogate_checkpoint and Path(surrogate_checkpoint).exists():
+        try:
+            surrogate_audit = FrozenProjectionSurrogate(
+                checkpoint_path=surrogate_checkpoint,
+                env_config=config,
+                observation_keys=tuple(str(key) for key in metadata.get("observation_keys", ())),
+                action_keys=tuple(str(key) for key in metadata.get("action_keys", ())),
+                device=device,
+            )
+            surrogate_torch, _, _, _ = _require_torch_modules()
+            surrogate_audit_summary = {"enabled": True}
+        except Exception as error:
+            surrogate_audit = None
+            surrogate_torch = None
+            surrogate_audit_summary = {
+                "enabled": False,
+                "error": str(error),
+            }
     env = CCHPPhysicalEnv(exogenous_df=eval_df, config=config, seed=seed)
     observation, _ = env.reset(seed=seed, episode_df=eval_df)
     terminated = False
@@ -9116,6 +10285,36 @@ def evaluate_pafc_td3(
 
     while not terminated:
         action = predictor(observation)
+        surrogate_exec_hat = None
+        obs_vector = None
+        if surrogate_audit is not None and surrogate_torch is not None and isinstance(observation, Mapping):
+            obs_vector = build_feature_vector(
+                observation=observation,
+                feature_keys=tuple(str(key) for key in metadata.get("observation_keys", ())),
+            ).astype(np.float32)
+            action_vector = np.asarray(
+                [_safe_float(action.get(key, 0.0)) for key in metadata.get("action_keys", ())],
+                dtype=np.float32,
+            )
+            obs_tensor = surrogate_torch.as_tensor(
+                obs_vector.reshape(1, -1),
+                dtype=surrogate_audit.action_low.dtype,
+                device=surrogate_audit.action_low.device,
+            )
+            action_tensor = surrogate_torch.as_tensor(
+                action_vector.reshape(1, -1),
+                dtype=surrogate_audit.action_low.dtype,
+                device=surrogate_audit.action_low.device,
+            )
+            with surrogate_torch.no_grad():
+                surrogate_exec_hat = (
+                    surrogate_audit.project(obs_tensor, action_tensor)
+                    .squeeze(0)
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .astype(np.float32)
+                )
         observation, reward, terminated, _, info = env.step(action)
         total_reward += float(reward)
         final_info = dict(info)
@@ -9136,6 +10335,26 @@ def evaluate_pafc_td3(
             info.get("state_diagnostic_flags", {}),
             ensure_ascii=False,
         )
+        if surrogate_exec_hat is not None:
+            actual_exec = _extract_action_vector_from_info(
+                info,
+                prefix="action_exec",
+                action_keys=tuple(str(key) for key in metadata.get("action_keys", ())),
+            )
+            abs_error = np.abs(surrogate_exec_hat - actual_exec)
+            signed_error = surrogate_exec_hat - actual_exec
+            for index, key in enumerate(tuple(str(name) for name in metadata.get("action_keys", ()))):
+                log_row[f"surrogate_exec_hat_{key}"] = float(surrogate_exec_hat[index])
+                log_row[f"surrogate_gap_hat_exec_{key}"] = float(signed_error[index])
+            log_row["surrogate_gap_hat_exec_l1"] = float(abs_error.sum())
+            log_row["surrogate_gap_hat_exec_l2"] = float(
+                np.sqrt(np.square(signed_error).sum())
+            )
+            log_row["surrogate_gap_hat_exec_max"] = float(abs_error.max())
+            if obs_vector is not None:
+                surrogate_obs_rows.append(obs_vector.copy())
+                surrogate_exec_hat_rows.append(surrogate_exec_hat.copy())
+                surrogate_exec_rows.append(actual_exec.copy())
         step_rows.append(log_row)
 
     summary = dict(final_info.get("episode_summary", env.kpi.summary()))
@@ -9154,6 +10373,7 @@ def evaluate_pafc_td3(
         metadata.get("projection_surrogate_checkpoint_path", "")
     )
     summary["dual_lambdas"] = dict(metadata.get("dual_lambdas", {}) or {})
+    summary["surrogate_audit"] = dict(surrogate_audit_summary)
     summary["policy_details"] = {
         "observation_keys": list(metadata.get("observation_keys", [])),
         "action_keys": list(metadata.get("action_keys", [])),
@@ -9167,13 +10387,35 @@ def evaluate_pafc_td3(
         "abs_to_ech_transfer_ratio": float(metadata.get("abs_to_ech_transfer_ratio", 0.0)),
         "abs_min_on_gate_th": float(metadata.get("abs_min_on_gate_th", 0.0)),
         "abs_min_on_u_margin": float(metadata.get("abs_min_on_u_margin", 0.0)),
+        "surrogate_audit_enabled": bool(surrogate_audit is not None),
     }
 
+    step_df = pd.DataFrame(step_rows)
+    if surrogate_obs_rows and surrogate_exec_hat_rows and surrogate_exec_rows:
+        eval_audit_summary, eval_audit_df = _build_surrogate_audit_report(
+            obs_batch=np.asarray(surrogate_obs_rows, dtype=np.float32),
+            predicted_exec_batch=np.asarray(surrogate_exec_hat_rows, dtype=np.float32),
+            actual_exec_batch=np.asarray(surrogate_exec_rows, dtype=np.float32),
+            observation_index={
+                str(key): idx for idx, key in enumerate(metadata.get("observation_keys", ()))
+            },
+            action_keys=tuple(str(key) for key in metadata.get("action_keys", ())),
+            low_abs_margin_threshold=float(metadata.get("dual_abs_margin_k", 0.0)),
+            high_cooling_ratio_threshold=float(metadata.get("dual_qc_ratio_th", 0.55)),
+            q_total_cooling_cap_mw=float(config.q_abs_cool_cap_mw) + float(config.q_ech_cap_mw),
+        )
+        if not eval_audit_df.empty:
+            eval_audit_path = output_run_dir / "eval" / "surrogate_audit.csv"
+            eval_audit_df.to_csv(eval_audit_path, index=False)
+            summary["surrogate_audit"] = {
+                **eval_audit_summary,
+                "enabled": True,
+                "csv_path": str(eval_audit_path.resolve()).replace("\\", "/"),
+            }
     (output_run_dir / "eval" / "summary.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-    step_df = pd.DataFrame(step_rows)
     step_df.to_csv(output_run_dir / "eval" / "step_log.csv", index=False)
     write_paper_eval_artifacts(
         output_run_dir / "eval",

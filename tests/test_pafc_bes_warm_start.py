@@ -11,8 +11,10 @@ from src.cchp_physical_env.policy.pafc_td3 import (
     _allocate_bes_warm_start_mode_counts,
     _bes_full_year_selection_priority_np,
     _bes_price_prior_target_np,
+    _bes_warm_start_cooling_guard_active_np,
     _select_bes_full_year_target_np,
     _select_temporal_priority_indices,
+    _select_temporal_priority_indices_by_season,
 )
 
 
@@ -53,6 +55,42 @@ class PAFCBESWarmStartTest(unittest.TestCase):
             target_count=3,
         )
         self.assertEqual(selected, [1, 3, 4])
+
+    def test_temporal_priority_selection_by_season_keeps_sparse_winter_summer_mix(self) -> None:
+        selected = _select_temporal_priority_indices_by_season(
+            indices=[0, 1, 4, 5],
+            priorities=[0.2, 0.9, 0.3, 1.1, 0.8, 1.4],
+            season_by_index={
+                0: "winter",
+                1: "winter",
+                4: "summer",
+                5: "summer",
+            },
+            target_count=2,
+        )
+        self.assertEqual(len(selected), 2)
+        self.assertEqual({0, 1} & set(selected), {1})
+        self.assertEqual({4, 5} & set(selected), {5})
+
+    def test_bes_warm_start_cooling_guard_only_triggers_on_joint_risk(self) -> None:
+        self.assertTrue(
+            _bes_warm_start_cooling_guard_active_np(
+                abs_drive_margin_k=0.8,
+                qc_dem_mw=7.0,
+                q_total_cooling_cap_mw=12.0,
+                abs_margin_guard_k=1.25,
+                qc_ratio_guard=0.55,
+            )
+        )
+        self.assertFalse(
+            _bes_warm_start_cooling_guard_active_np(
+                abs_drive_margin_k=1.8,
+                qc_dem_mw=7.0,
+                q_total_cooling_cap_mw=12.0,
+                abs_margin_guard_k=1.25,
+                qc_ratio_guard=0.55,
+            )
+        )
 
     def test_bes_distill_loss_tracks_raw_action_not_exec_projection(self) -> None:
         trainer = object.__new__(PAFCTD3Trainer)

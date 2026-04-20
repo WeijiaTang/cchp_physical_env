@@ -1,6 +1,7 @@
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -556,6 +557,7 @@ class PAFCEconomicTeacherDistillTest(unittest.TestCase):
         )
         trainer.config = SimpleNamespace(
             economic_teacher_distill_coef=0.5,
+            dual_qc_ratio_th=0.55,
         )
         trainer.bes_price_low_threshold = 256.0
         trainer.bes_price_high_threshold = 1539.0
@@ -640,9 +642,29 @@ class PAFCEconomicTeacherDistillTest(unittest.TestCase):
             "u_ech": 4,
             "u_tes": 5,
         }
+        trainer.observation_index = {
+            "abs_drive_margin_k": 0,
+            "qc_dem_mw": 1,
+        }
+        trainer.env_config = SimpleNamespace(
+            abs_gate_scale_k=2.0,
+            q_abs_cool_cap_mw=4.5,
+            q_ech_cap_mw=6.0,
+        )
+        trainer.config = SimpleNamespace(
+            dual_abs_margin_k=1.25,
+            dual_qc_ratio_th=0.55,
+            economic_teacher_safe_preserve_low_margin_boost=0.75,
+            economic_teacher_safe_preserve_high_cooling_boost=1.0,
+            economic_teacher_safe_preserve_joint_boost=1.0,
+        )
         trainer.action_keys = ("u_gt", "u_bes", "u_boiler", "u_abs", "u_ech", "u_tes")
         trainer.economic_teacher_action_weight = torch.tensor(
             [[3.0, 1.0, 0.0, 0.0, 0.0, 0.5]],
+            dtype=torch.float32,
+        )
+        trainer.economic_teacher_mismatch_focus_weight = torch.ones(
+            (1, len(trainer.action_keys)),
             dtype=torch.float32,
         )
         trainer.economic_teacher_safe_preserve_weight = torch.tensor(
@@ -652,6 +674,7 @@ class PAFCEconomicTeacherDistillTest(unittest.TestCase):
         trainer._compute_economic_teacher_safe_preserve_loss = (
             PAFCTD3Trainer._compute_economic_teacher_safe_preserve_loss.__get__(trainer, PAFCTD3Trainer)
         )
+        obs_batch = torch.tensor([[4.0, 2.0]], dtype=torch.float32)
         teacher_available = torch.ones((1, 1), dtype=torch.float32)
         teacher_mask = torch.tensor([[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]], dtype=torch.float32)
         teacher_exec = torch.tensor([[0.8, 0.0, 0.2, 0.7, 0.9, -0.2]], dtype=torch.float32)
@@ -660,6 +683,7 @@ class PAFCEconomicTeacherDistillTest(unittest.TestCase):
 
         matched_loss = PAFCTD3Trainer._compute_economic_teacher_safe_preserve_loss(
             trainer,
+            obs_batch=obs_batch,
             action_exec_batch=matched_actor_exec,
             teacher_action_exec_batch=teacher_exec,
             teacher_action_mask_batch=teacher_mask,
@@ -667,6 +691,7 @@ class PAFCEconomicTeacherDistillTest(unittest.TestCase):
         )
         drifted_loss = PAFCTD3Trainer._compute_economic_teacher_safe_preserve_loss(
             trainer,
+            obs_batch=obs_batch,
             action_exec_batch=drifted_actor_exec,
             teacher_action_exec_batch=teacher_exec,
             teacher_action_mask_batch=teacher_mask,
@@ -1192,6 +1217,128 @@ class PAFCEconomicTeacherDistillTest(unittest.TestCase):
         )
         self.assertNotIn("u_gt", mixed["swapped_dims"])
         self.assertIn("u_bes", mixed["swapped_dims"])
+
+    def test_mixed_teacher_blocks_bes_charge_when_cooling_is_critical(self) -> None:
+        env_config = SimpleNamespace(
+            dt_hours=0.25,
+            p_gt_cap_mw=12.0,
+            q_boiler_cap_mw=10.0,
+            p_bes_cap_mw=4.0,
+            q_abs_cool_cap_mw=4.5,
+            q_ech_cap_mw=6.0,
+            q_tes_charge_cap_mw=8.0,
+            q_tes_discharge_cap_mw=8.0,
+            cop_nominal=0.75,
+            ech_cop_partload_min_fraction=0.72,
+            gt_eta_min=0.26,
+            gt_eta_max=0.36,
+            gt_om_var_cost_per_mwh=20.0,
+            gt_start_cost=250.0,
+            gt_cycle_cost=250.0,
+            bes_eta_charge=0.95,
+            bes_eta_discharge=0.95,
+            sell_price_ratio=0.20,
+            sell_price_cap_per_mwh=300.0,
+            abs_gate_scale_k=2.0,
+            gt_min_output_mw=1.0,
+        )
+        action_index = {
+            "u_gt": 0,
+            "u_bes": 1,
+            "u_boiler": 2,
+            "u_abs": 3,
+            "u_ech": 4,
+            "u_tes": 5,
+        }
+        observation = {
+            "p_dem_mw": 5.0,
+            "pv_mw": 0.0,
+            "wt_mw": 0.0,
+            "price_e": 450.0,
+            "price_gas": 80.0,
+            "t_amb_k": 298.15,
+            "p_gt_prev_mw": 3.0,
+            "abs_drive_margin_k": 0.5,
+            "qc_dem_mw": 6.5,
+            "heat_backup_min_needed_mw": 0.2,
+            "soc_bes": 0.25,
+        }
+        safe_action = np.asarray([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        economic_raw = np.asarray([0.0, -0.6, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        economic_exec = np.asarray([0.0, -0.6, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        safe_proxy = _estimate_dispatch_proxy_np(
+            observation=observation,
+            action_exec=safe_action,
+            action_index=action_index,
+            env_config=env_config,
+            gt_off_deadband_ratio=0.0,
+        )
+        mixed = _build_mixed_economic_teacher_target_np(
+            observation=observation,
+            safe_action_exec=safe_action,
+            safe_proxy=safe_proxy,
+            economic_action_raw=economic_raw,
+            economic_action_exec=economic_exec,
+            action_index=action_index,
+            env_config=env_config,
+            gt_off_deadband_ratio=0.0,
+            min_proxy_advantage_ratio=0.02,
+            gt_proxy_advantage_ratio_min=0.01,
+            max_safe_abs_risk_gap=0.05,
+            max_projection_gap=0.20,
+            gt_projection_gap_max=1.0,
+            bes_proxy_advantage_ratio_min=0.002,
+            bes_price_low_threshold=600.0,
+            bes_price_high_threshold=1200.0,
+            bes_charge_soc_ceiling=0.75,
+            bes_discharge_soc_floor=0.35,
+            bes_soc_min=0.10,
+            bes_soc_max=0.95,
+            bes_charge_u=0.63,
+            bes_discharge_u=0.35,
+            bes_price_opportunity_min=0.10,
+            gt_abs_margin_guard_k=1.25,
+            gt_qc_ratio_guard=0.55,
+            gt_heat_backup_ratio_guard=0.10,
+        )
+        self.assertNotIn("u_bes", mixed["swapped_dims"])
+
+    def test_economic_teacher_uses_prefill_policy_as_safe_reference_when_no_safe_checkpoint(self) -> None:
+        trainer = object.__new__(PAFCTD3Trainer)
+        trainer.config = SimpleNamespace(
+            economic_teacher_distill_coef=0.5,
+            economic_teacher_full_year_warm_start_samples=0,
+            economic_teacher_full_year_warm_start_epochs=0,
+            expert_prefill_economic_policy="checkpoint",
+            expert_prefill_economic_checkpoint_path="economic.json",
+            expert_prefill_checkpoint_path="",
+            expert_prefill_policy="easy_rule_abs",
+            economic_teacher_proxy_advantage_min=0.02,
+            economic_teacher_gt_proxy_advantage_min=0.01,
+            economic_teacher_bes_proxy_advantage_min=0.002,
+            economic_teacher_max_safe_abs_risk_gap=0.05,
+            economic_teacher_projection_gap_max=0.20,
+            economic_teacher_gt_projection_gap_max=1.0,
+            economic_teacher_bes_price_opportunity_min=0.10,
+        )
+
+        with patch.object(
+            PAFCTD3Trainer,
+            "_build_economic_teacher_policy",
+            return_value=("economic_teacher", {"role": "economic_distill"}),
+        ), patch.object(
+            PAFCTD3Trainer,
+            "_build_expert_policy",
+            return_value=("safe_prefill", {"mode": "easy_rule_abs"}),
+        ):
+            teacher_policy, safe_policy, summary = PAFCTD3Trainer._maybe_build_economic_teacher_policy(
+                trainer
+            )
+
+        self.assertEqual(teacher_policy, "economic_teacher")
+        self.assertEqual(safe_policy, "safe_prefill")
+        self.assertEqual(summary["status"], "ready")
+        self.assertEqual(summary["safe_teacher"]["source"], "expert_prefill_policy")
 
     def test_mixed_teacher_accepts_bes_with_small_but_positive_advantage_when_price_signal_matches(self) -> None:
         env_config = SimpleNamespace(
