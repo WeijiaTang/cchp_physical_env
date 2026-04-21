@@ -23,8 +23,11 @@ DEFAULT_RESULTS_ROOT = ROOT / "results"
 DEFAULT_ARCHIVE_TAG = "paper_ready_2026-03-31"
 DEFAULT_FULL_TABLE = ROOT / "results" / "tables" / "paper" / "drl_all_available_multi_seed_yearly_eval_2026-03-31.csv"
 DEFAULT_AGG_TABLE = ROOT / "results" / "tables" / "paper" / "drl_all_available_multi_seed_yearly_eval_aggregate_2026-03-31.csv"
+DEFAULT_DPAR_FULL_TABLE = ROOT / "results" / "tables" / "paper" / "dpar_multi_seed_anchor_pool_2026-04-21.csv"
+DEFAULT_DPAR_AGG_TABLE = ROOT / "results" / "tables" / "paper" / "dpar_multi_seed_anchor_pool_aggregate_2026-04-21.csv"
 
 MODEL_ORDER = [
+    "DPAR",
     "DDPG+rule_residual",
     "SAC+rule_residual",
     "TD3+rule_residual",
@@ -32,6 +35,7 @@ MODEL_ORDER = [
     "PPO+rule_residual",
 ]
 MODEL_COLORS = {
+    "DPAR": "#9E3D33",
     "DDPG+rule_residual": "#416A52",
     "SAC+rule_residual": "#6A7E8F",
     "TD3+rule_residual": "#8B7A4A",
@@ -39,13 +43,21 @@ MODEL_COLORS = {
     "PPO+rule_residual": "#B46E42",
 }
 MODEL_SHORT = {
+    "DPAR": "DPAR",
     "DDPG+rule_residual": "DDPG",
     "SAC+rule_residual": "SAC",
     "TD3+rule_residual": "TD3",
     "rbDQN": "rbDQN",
     "PPO+rule_residual": "PPO",
 }
-CASE_MODELS = ["rbDQN", "DDPG+rule_residual", "PPO+rule_residual"]
+BASELINE_TRAINING_MODELS = [
+    "DDPG+rule_residual",
+    "SAC+rule_residual",
+    "TD3+rule_residual",
+    "rbDQN",
+    "PPO+rule_residual",
+]
+CASE_MODELS = ["DPAR", "rbDQN", "DDPG+rule_residual"]
 CASE_SIGNAL_COLORS = {
     "demand": "#2B2B2B",
     "abs": "#1C617A",
@@ -55,8 +67,9 @@ CASE_SIGNAL_COLORS = {
     "tes": "#B38B59",
 }
 CASE_STRATEGY_NOTES = {
-    "rbDQN": "Steadier ABS-TES buffering",
-    "DDPG+rule_residual": "Cost-oriented dispatch with limited TES swing",
+    "DPAR": "DQN anchor with boiler-only PAFC refinement",
+    "rbDQN": "Discrete anchor without continuous boiler trim",
+    "DDPG+rule_residual": "Cost-oriented residual control baseline",
     "PPO+rule_residual": "ECH-biased cooling support",
 }
 CASE_FINGERPRINT_METRICS = [
@@ -200,11 +213,34 @@ def _load_learning_curve(path: Path) -> pd.DataFrame | None:
     return df.sort_values("timesteps").reset_index(drop=True)
 
 
+def _load_optional_csv(path: Path) -> pd.DataFrame | None:
+    if not path.exists():
+        return None
+    df = pd.read_csv(path)
+    return df.reset_index(drop=True)
+
+
 def _load_bundle(results_root: Path, *, archive_tag: str, full_table: Path, agg_table: Path) -> dict[str, Any]:
     full_df = pd.read_csv(full_table)
     agg_df = pd.read_csv(agg_table)
     archive_root = results_root / "archive" / archive_tag
     baseline_catalog = pd.read_csv(archive_root / "catalogs" / "baseline_catalog.csv")
+    dpar_full_df = _load_optional_csv(DEFAULT_DPAR_FULL_TABLE)
+    dpar_agg_df = _load_optional_csv(DEFAULT_DPAR_AGG_TABLE)
+    dpar_catalog_df = _load_optional_csv(archive_root / "catalogs" / "dpar_eval_catalog.csv")
+
+    if dpar_full_df is not None and not dpar_full_df.empty:
+        full_df = (
+            pd.concat([full_df, dpar_full_df], ignore_index=True, sort=False)
+            .drop_duplicates(subset=["model", "train_seed"], keep="last")
+            .reset_index(drop=True)
+        )
+    if dpar_agg_df is not None and not dpar_agg_df.empty:
+        agg_df = (
+            pd.concat([agg_df, dpar_agg_df], ignore_index=True, sort=False)
+            .drop_duplicates(subset=["model"], keep="last")
+            .reset_index(drop=True)
+        )
 
     full_df["color"] = full_df["model"].map(MODEL_COLORS)
     full_df["short_label"] = full_df["model"].map(MODEL_SHORT)
@@ -214,8 +250,20 @@ def _load_bundle(results_root: Path, *, archive_tag: str, full_table: Path, agg_
     curves: dict[str, list[pd.DataFrame]] = {model: [] for model in MODEL_ORDER}
     curve_manifest_rows: list[dict[str, Any]] = []
     catalog_df = pd.read_csv(archive_root / "catalogs" / "drl_eval_catalog.csv")
+    if dpar_catalog_df is not None and not dpar_catalog_df.empty:
+        catalog_df = (
+            pd.concat([catalog_df, dpar_catalog_df], ignore_index=True, sort=False)
+            .drop_duplicates(subset=["model", "train_seed"], keep="last")
+            .reset_index(drop=True)
+        )
+    if "representative_run" in catalog_df.columns:
+        catalog_df["representative_run"] = (
+            catalog_df["representative_run"].astype(str).str.strip().str.lower().eq("true")
+        )
     for _, row in catalog_df.iterrows():
         model = str(row["model"])
+        if model not in curves:
+            continue
         archive_dir = Path(str(row["archive_dir"]))
         curve_path = archive_dir / "train" / "learning_curve_eval.csv"
         curve = _load_learning_curve(curve_path)
@@ -378,7 +426,11 @@ def _pick_case_representatives(bundle: dict[str, Any]) -> pd.DataFrame:
 
 
 def _load_case_step_log(archive_dir: Path) -> pd.DataFrame:
-    df = pd.read_csv(archive_dir / "eval" / "step_log_light.csv")
+    eval_dir = archive_dir / "eval"
+    step_log_path = eval_dir / "step_log_light.csv"
+    if not step_log_path.exists():
+        step_log_path = eval_dir / "step_log.csv"
+    df = pd.read_csv(step_log_path, low_memory=False)
     df["timestamp"] = pd.to_datetime(df["timestamp"])
     return df
 
@@ -472,6 +524,12 @@ def _case_window_metrics(window: pd.DataFrame) -> dict[str, float]:
 
 
 def _case_summary_text(model: str, metrics: dict[str, float]) -> str:
+    if model == "DPAR":
+        return (
+            f"ABS share {metrics['abs_share']:.0%} | "
+            f"grid import {metrics['grid_import_mean']:.1f} MW\n"
+            f"TES swing {metrics['tes_swing']:.1f} MWh"
+        )
     if model == "rbDQN":
         return (
             f"ABS share {metrics['abs_share']:.0%} | "
@@ -535,6 +593,12 @@ def _panel_tag(ax: plt.Axes, text: str, color: str) -> None:
 
 
 def _case_metric_label(model: str, metrics: dict[str, float]) -> str:
+    if model == "DPAR":
+        return (
+            f"ABS {metrics['abs_share']:.0%} | "
+            f"grid import {metrics['grid_import_mean']:.1f} MW | "
+            f"TES swing {metrics['tes_swing']:.1f} MWh"
+        )
     if model == "rbDQN":
         return (
             f"ABS {metrics['abs_share']:.0%} | "
@@ -558,6 +622,7 @@ def plot_multi_seed_frontier(bundle: dict[str, Any]) -> plt.Figure:
     df = bundle["aggregate"].copy()
     fig, ax = plt.subplots(figsize=(7.5, 5.0))
     offsets = {
+        "DPAR": (0.00016, -0.07),
         "DDPG+rule_residual": (0.00018, -0.06),
         "SAC+rule_residual": (0.00018, 0.09),
         "TD3+rule_residual": (0.00018, 0.02),
@@ -573,13 +638,15 @@ def plot_multi_seed_frontier(bundle: dict[str, Any]) -> plt.Figure:
 
     for _, row in df.iterrows():
         color = row["color"]
+        marker = "D" if str(row["model"]) == "DPAR" else "o"
+        marker_size = 10.0 if str(row["model"]) == "DPAR" else 9.2
         ax.errorbar(
             row["rel_cool_mean"],
             row["total_cost_mean"],
             xerr=row["rel_cool_std"],
             yerr=row["total_cost_std"],
-            fmt="o",
-            ms=9.2,
+            fmt=marker,
+            ms=marker_size,
             color=color,
             mfc=lighten_color(color, 0.05),
             mec=color,
@@ -690,7 +757,7 @@ def plot_multi_seed_cost_strip(bundle: dict[str, Any]) -> plt.Figure:
 def plot_training_cost(bundle: dict[str, Any]) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(7.5, 5.0))
 
-    for model in MODEL_ORDER:
+    for model in BASELINE_TRAINING_MODELS:
         curves = bundle["curves"].get(model, [])
         if not curves:
             continue
@@ -727,7 +794,7 @@ def plot_training_cooling(bundle: dict[str, Any]) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(7.5, 5.0))
     ax.axhspan(0.99, 1.0015, color="#EAF2EC", alpha=0.95, zorder=0)
 
-    for model in MODEL_ORDER:
+    for model in BASELINE_TRAINING_MODELS:
         curves = bundle["curves"].get(model, [])
         if not curves:
             continue
@@ -1275,7 +1342,7 @@ def plot_case_window(bundle: dict[str, Any], results_root: Path) -> plt.Figure:
     fig.text(
         0.07,
         0.025,
-        "The panel notes summarize the within-window mechanism: rbDQN uses more ABS-TES buffering, DDPG remains cost-oriented with limited TES motion, and PPO relies more heavily on ECH support.",
+        "The panel notes summarize the within-window mechanism: DPAR preserves the rbDQN anchor pattern while trimming boiler-side support, rbDQN keeps the discrete anchor without continuous boiler refinement, and DDPG remains a cost-oriented continuous residual baseline.",
         fontsize=9.0,
         color="#5F5A53",
         ha="left",
@@ -1413,6 +1480,8 @@ def main() -> None:
         "multi_seed_case_window": plot_case_window(bundle, args.results_root),
         "multi_seed_case_mechanism": plot_case_mechanism(bundle, args.results_root),
     }
+    if bundle["curves"].get("DPAR"):
+        figures["multi_seed_convergence_dpar"] = plot_single_model_convergence(bundle, args.results_root, "DPAR")
     for stem, fig in figures.items():
         _save_figure(fig, stem, figure_dirs)
         plt.close(fig)

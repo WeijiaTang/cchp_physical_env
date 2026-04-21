@@ -42,3 +42,4 @@ results/paper/drl_with_mlp/snapshots/
 results
 cchp-paper/figures/scientific-figure/*-plot/
 cchp-paper/bib/check.ps1
+scripts/experiments/
