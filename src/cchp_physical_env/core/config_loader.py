@@ -93,6 +93,7 @@ TRAINING_DEFAULTS: dict[str, Any] = {
     "pafc_episode_days": 14,
     "pafc_total_env_steps": 262_144,
     "pafc_warmup_steps": 4_096,
+    "pafc_actor_warmup_steps": 0,
     "pafc_replay_capacity": 100_000,
     "pafc_batch_size": 256,
     "pafc_updates_per_step": 1,
@@ -154,13 +155,17 @@ TRAINING_DEFAULTS: dict[str, Any] = {
     "pafc_economic_bes_full_year_warm_start_samples": 4096,
     "pafc_economic_bes_full_year_warm_start_epochs": 2,
     "pafc_economic_bes_full_year_warm_start_u_weight": 4.0,
+    "pafc_economic_bes_warm_start_economic_anchor_weight": 0.0,
+    "pafc_economic_bes_warm_start_fallback_anchor_weight": 0.0,
     "pafc_economic_bes_teacher_selection_priority_boost": 0.75,
     "pafc_economic_bes_economic_source_priority_bonus": 0.10,
     "pafc_economic_bes_economic_source_min_share": 0.75,
     "pafc_economic_bes_idle_economic_source_min_share": 0.75,
     "pafc_economic_bes_teacher_target_min_share": 0.0,
+    "pafc_economic_bes_anchor_max_scale": 1.0,
     "pafc_surrogate_actor_trust_coef": 0.60,
     "pafc_surrogate_actor_trust_min_scale": 0.10,
+    "pafc_actor_low_trust_raw_fallback_keys": [],
     "pafc_state_feasible_action_shaping_enabled": True,
     "pafc_abs_min_on_gate_th": 0.75,
     "pafc_abs_min_on_u_margin": 0.02,
@@ -168,6 +173,14 @@ TRAINING_DEFAULTS: dict[str, Any] = {
     "pafc_expert_prefill_checkpoint_path": "",
     "pafc_expert_prefill_economic_policy": "checkpoint",
     "pafc_expert_prefill_economic_checkpoint_path": "",
+    "pafc_frozen_action_keys": [],
+    "pafc_frozen_action_safe_checkpoint_path": "",
+    "pafc_gt_safe_action_delta_clip": 0.0,
+    "pafc_bes_safe_action_delta_clip": 0.0,
+    "pafc_boiler_safe_action_delta_clip": 0.0,
+    "pafc_abs_safe_action_delta_clip": 0.0,
+    "pafc_ech_safe_action_delta_clip": 0.0,
+    "pafc_tes_safe_action_delta_clip": 0.0,
     "pafc_expert_prefill_steps": 4_096,
     "pafc_expert_prefill_cooling_bias": 0.5,
     "pafc_expert_prefill_abs_replay_boost": 0,
@@ -480,6 +493,26 @@ def _normalize_hidden_dims_value(value: Any, *, key: str) -> tuple[int, ...]:
     return dims
 
 
+def _normalize_string_tuple_value(value: Any, *, key: str) -> tuple[str, ...]:
+    if value is None:
+        return tuple()
+    if isinstance(value, str):
+        tokens = [token.strip() for token in value.replace(";", ",").split(",") if token.strip()]
+    elif isinstance(value, (list, tuple, set)):
+        tokens = [str(token).strip() for token in value if str(token).strip()]
+    else:
+        raise ValueError(f"{key} 必须是逗号分隔字符串或字符串列表。")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        item = str(token).strip().lower().replace("-", "_")
+        if not item or item in seen:
+            continue
+        normalized.append(item)
+        seen.add(item)
+    return tuple(normalized)
+
+
 def load_yaml_config(path: str | Path) -> dict[str, Any]:
     file_path = Path(path)
     if not file_path.exists():
@@ -638,6 +671,7 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
         "sb3_plateau_early_stop_patience_evals",
         "pafc_episode_days",
         "pafc_total_env_steps",
+        "pafc_actor_warmup_steps",
         "pafc_replay_capacity",
         "pafc_batch_size",
         "pafc_updates_per_step",
@@ -678,6 +712,7 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
         if key in {
             "pafc_expert_prefill_checkpoint_path",
             "pafc_expert_prefill_economic_checkpoint_path",
+            "pafc_frozen_action_safe_checkpoint_path",
         }:
             if not isinstance(value, str):
                 raise ValueError(f"{key} 必须是字符串路径。")
@@ -685,6 +720,9 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
         if key == "pafc_projection_surrogate_checkpoint":
             if not isinstance(value, str):
                 raise ValueError("pafc_projection_surrogate_checkpoint 必须是字符串路径。")
+            continue
+        if key == "pafc_frozen_action_keys":
+            _normalize_string_tuple_value(value, key=key)
             continue
         if key == "pafc_hidden_dims":
             _normalize_hidden_dims_value(value, key=key)
@@ -748,6 +786,7 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
                     "pafc_economic_gt_full_year_warm_start_epochs",
                     "pafc_economic_bes_full_year_warm_start_samples",
                     "pafc_economic_bes_full_year_warm_start_epochs",
+                    "pafc_actor_warmup_steps",
                     "pafc_actor_warm_start_epochs",
                     "pafc_checkpoint_interval_steps",
                     "pafc_eval_window_pool_size",
@@ -782,7 +821,7 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
             if int(value) < 0:
                 raise ValueError(f"{key} 必须 >= 0。")
             continue
-        if key in {"pafc_warmup_steps"}:
+        if key in {"pafc_warmup_steps", "pafc_actor_warmup_steps"}:
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ValueError(f"{key} 必须是整数类型。")
             if int(value) < 0:
@@ -1101,6 +1140,88 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
             "training.pafc_expert_prefill_economic_policy=checkpoint 时必须提供 "
             "pafc_expert_prefill_economic_checkpoint_path。"
         )
+    pafc_frozen_action_keys = _normalize_string_tuple_value(
+        overrides.get("pafc_frozen_action_keys", TRAINING_DEFAULTS["pafc_frozen_action_keys"]),
+        key="pafc_frozen_action_keys",
+    )
+    pafc_frozen_action_safe_checkpoint_path = str(
+        overrides.get(
+            "pafc_frozen_action_safe_checkpoint_path",
+            TRAINING_DEFAULTS["pafc_frozen_action_safe_checkpoint_path"],
+        )
+    ).strip()
+    pafc_tes_safe_action_delta_clip = float(
+        overrides.get(
+            "pafc_tes_safe_action_delta_clip",
+            TRAINING_DEFAULTS["pafc_tes_safe_action_delta_clip"],
+        )
+    )
+    pafc_bes_safe_action_delta_clip = float(
+        overrides.get(
+            "pafc_bes_safe_action_delta_clip",
+            TRAINING_DEFAULTS["pafc_bes_safe_action_delta_clip"],
+        )
+    )
+    pafc_boiler_safe_action_delta_clip = float(
+        overrides.get(
+            "pafc_boiler_safe_action_delta_clip",
+            TRAINING_DEFAULTS["pafc_boiler_safe_action_delta_clip"],
+        )
+    )
+    pafc_gt_safe_action_delta_clip = float(
+        overrides.get(
+            "pafc_gt_safe_action_delta_clip",
+            TRAINING_DEFAULTS["pafc_gt_safe_action_delta_clip"],
+        )
+    )
+    if pafc_frozen_action_keys and len(pafc_frozen_action_safe_checkpoint_path) == 0:
+        raise ValueError(
+            "training.pafc_frozen_action_keys 非空时必须提供 "
+            "pafc_frozen_action_safe_checkpoint_path。"
+        )
+    if pafc_gt_safe_action_delta_clip < 0.0 or pafc_gt_safe_action_delta_clip > 1.0:
+        raise ValueError("training.pafc_gt_safe_action_delta_clip 必须在 [0,1]。")
+    if (
+        pafc_gt_safe_action_delta_clip > 0.0
+        and len(pafc_frozen_action_safe_checkpoint_path) == 0
+    ):
+        raise ValueError(
+            "training.pafc_gt_safe_action_delta_clip > 0 时必须提供 "
+            "pafc_frozen_action_safe_checkpoint_path。"
+        )
+    if pafc_bes_safe_action_delta_clip < 0.0 or pafc_bes_safe_action_delta_clip > 1.0:
+        raise ValueError("training.pafc_bes_safe_action_delta_clip 必须在 [0,1]。")
+    if (
+        pafc_bes_safe_action_delta_clip > 0.0
+        and len(pafc_frozen_action_safe_checkpoint_path) == 0
+    ):
+        raise ValueError(
+            "training.pafc_bes_safe_action_delta_clip > 0 时必须提供 "
+            "pafc_frozen_action_safe_checkpoint_path。"
+        )
+    if (
+        pafc_boiler_safe_action_delta_clip < 0.0
+        or pafc_boiler_safe_action_delta_clip > 1.0
+    ):
+        raise ValueError("training.pafc_boiler_safe_action_delta_clip 必须在 [0,1]。")
+    if (
+        pafc_boiler_safe_action_delta_clip > 0.0
+        and len(pafc_frozen_action_safe_checkpoint_path) == 0
+    ):
+        raise ValueError(
+            "training.pafc_boiler_safe_action_delta_clip > 0 时必须提供 "
+            "pafc_frozen_action_safe_checkpoint_path。"
+        )
+    if pafc_tes_safe_action_delta_clip < 0.0 or pafc_tes_safe_action_delta_clip > 1.0:
+        raise ValueError("training.pafc_tes_safe_action_delta_clip 必须在 [0,1]。")
+    if (
+        pafc_tes_safe_action_delta_clip > 0.0
+        and len(pafc_frozen_action_safe_checkpoint_path) == 0
+    ):
+        raise ValueError(
+            "training.pafc_tes_safe_action_delta_clip > 0 时必须提供 "
+            "pafc_frozen_action_safe_checkpoint_path。"
+        )
     dqn_initial_eps = float(
         overrides.get(
             "sb3_dqn_exploration_initial_eps",
@@ -1243,6 +1364,7 @@ def build_training_options(overrides: dict[str, Any] | None = None) -> dict[str,
     normalized["pafc_episode_days"] = int(normalized["pafc_episode_days"])
     normalized["pafc_total_env_steps"] = int(normalized["pafc_total_env_steps"])
     normalized["pafc_warmup_steps"] = int(normalized["pafc_warmup_steps"])
+    normalized["pafc_actor_warmup_steps"] = int(normalized["pafc_actor_warmup_steps"])
     normalized["pafc_replay_capacity"] = int(normalized["pafc_replay_capacity"])
     normalized["pafc_batch_size"] = int(normalized["pafc_batch_size"])
     normalized["pafc_updates_per_step"] = int(normalized["pafc_updates_per_step"])
@@ -1422,6 +1544,25 @@ def build_training_options(overrides: dict[str, Any] | None = None) -> dict[str,
     normalized["pafc_expert_prefill_economic_checkpoint_path"] = str(
         normalized["pafc_expert_prefill_economic_checkpoint_path"]
     ).strip()
+    normalized["pafc_frozen_action_keys"] = _normalize_string_tuple_value(
+        normalized["pafc_frozen_action_keys"],
+        key="pafc_frozen_action_keys",
+    )
+    normalized["pafc_frozen_action_safe_checkpoint_path"] = str(
+        normalized["pafc_frozen_action_safe_checkpoint_path"]
+    ).strip()
+    normalized["pafc_tes_safe_action_delta_clip"] = float(
+        normalized["pafc_tes_safe_action_delta_clip"]
+    )
+    normalized["pafc_bes_safe_action_delta_clip"] = float(
+        normalized["pafc_bes_safe_action_delta_clip"]
+    )
+    normalized["pafc_boiler_safe_action_delta_clip"] = float(
+        normalized["pafc_boiler_safe_action_delta_clip"]
+    )
+    normalized["pafc_gt_safe_action_delta_clip"] = float(
+        normalized["pafc_gt_safe_action_delta_clip"]
+    )
     normalized["pafc_expert_prefill_steps"] = int(normalized["pafc_expert_prefill_steps"])
     normalized["pafc_expert_prefill_cooling_bias"] = float(normalized["pafc_expert_prefill_cooling_bias"])
     normalized["pafc_expert_prefill_abs_replay_boost"] = int(normalized["pafc_expert_prefill_abs_replay_boost"])

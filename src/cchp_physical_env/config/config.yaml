@@ -316,6 +316,7 @@ training:
   pafc_episode_days: 14
   pafc_total_env_steps: 262144
   pafc_warmup_steps: 4096
+  pafc_actor_warmup_steps: 0
   pafc_replay_capacity: 100000
   pafc_batch_size: 256
   pafc_updates_per_step: 1
@@ -432,6 +433,16 @@ training:
   # --pafc-expert-prefill-economic-policy checkpoint
   # --pafc-expert-prefill-economic-checkpoint-path <economic sb3/pafc json>
   pafc_expert_prefill_economic_checkpoint_path: ""
+  # 结构化冻结维度：这些动作维度始终由安全 PAFC checkpoint 接管，不参与 RL 自由探索。
+  # 典型用法：["u_abs", "u_ech", "u_boiler"]
+  pafc_frozen_action_keys: []
+  pafc_frozen_action_safe_checkpoint_path: ""
+  # 当 u_boiler 不冻结时，可将其限制在安全策略附近的小残差范围内。
+  # 0 表示不限制；建议从 0.05~0.15 起步。
+  pafc_boiler_safe_action_delta_clip: 0.0
+  # 当 u_tes 不冻结时，可将其限制在安全策略附近的小残差范围内。
+  # 0 表示不限制；建议从 0.10~0.20 起步。
+  pafc_tes_safe_action_delta_clip: 0.0
   pafc_expert_prefill_steps: 4096
   pafc_expert_prefill_cooling_bias: 0.5
   pafc_expert_prefill_abs_replay_boost: 0

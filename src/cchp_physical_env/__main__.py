@@ -52,6 +52,7 @@ from .pipeline.collect import write_benchmark_tables
 from .pipeline.sequence import SUPPORTED_SEQUENCE_ADAPTERS
 from .pipeline.runner import evaluate_baseline, train_baseline
 from .policy.checkpoint import load_policy
+from .policy.hybrid_pafc import HybridPAFCConfig, evaluate_hybrid_pafc, train_hybrid_pafc
 from .policy.pafc_td3 import PAFCTD3TrainConfig, evaluate_pafc_td3, train_pafc_td3
 from .policy.sb3 import SB3TrainConfig, evaluate_sb3_policy, train_sb3_policy
 
@@ -129,6 +130,7 @@ TRAINING_OPTION_KEYS = (
     "pafc_episode_days",
     "pafc_total_env_steps",
     "pafc_warmup_steps",
+    "pafc_actor_warmup_steps",
     "pafc_replay_capacity",
     "pafc_batch_size",
     "pafc_updates_per_step",
@@ -190,13 +192,17 @@ TRAINING_OPTION_KEYS = (
     "pafc_economic_bes_full_year_warm_start_samples",
     "pafc_economic_bes_full_year_warm_start_epochs",
     "pafc_economic_bes_full_year_warm_start_u_weight",
+    "pafc_economic_bes_warm_start_economic_anchor_weight",
+    "pafc_economic_bes_warm_start_fallback_anchor_weight",
     "pafc_economic_bes_teacher_selection_priority_boost",
     "pafc_economic_bes_economic_source_priority_bonus",
     "pafc_economic_bes_economic_source_min_share",
     "pafc_economic_bes_idle_economic_source_min_share",
     "pafc_economic_bes_teacher_target_min_share",
+    "pafc_economic_bes_anchor_max_scale",
     "pafc_surrogate_actor_trust_coef",
     "pafc_surrogate_actor_trust_min_scale",
+    "pafc_actor_low_trust_raw_fallback_keys",
     "pafc_state_feasible_action_shaping_enabled",
     "pafc_abs_min_on_gate_th",
     "pafc_abs_min_on_u_margin",
@@ -204,6 +210,12 @@ TRAINING_OPTION_KEYS = (
     "pafc_expert_prefill_checkpoint_path",
     "pafc_expert_prefill_economic_policy",
     "pafc_expert_prefill_economic_checkpoint_path",
+    "pafc_frozen_action_keys",
+    "pafc_frozen_action_safe_checkpoint_path",
+    "pafc_gt_safe_action_delta_clip",
+    "pafc_bes_safe_action_delta_clip",
+    "pafc_boiler_safe_action_delta_clip",
+    "pafc_tes_safe_action_delta_clip",
     "pafc_expert_prefill_steps",
     "pafc_expert_prefill_cooling_bias",
     "pafc_expert_prefill_abs_replay_boost",
@@ -264,6 +276,45 @@ def _parse_hidden_dims(value: object, fallback: tuple[int, ...] = (256, 256)) ->
     return tuple(dims)
 
 
+def _parse_string_tuple(value: object) -> tuple[str, ...]:
+    if value is None:
+        return tuple()
+    if isinstance(value, str):
+        tokens = [token.strip() for token in value.replace(";", ",").split(",") if token.strip()]
+    elif isinstance(value, (list, tuple, set)):
+        tokens = [str(item).strip() for item in value if str(item).strip()]
+    else:
+        tokens = [str(value).strip()]
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        item = str(token).strip().lower().replace("-", "_")
+        if not item or item in seen:
+            continue
+        normalized.append(item)
+        seen.add(item)
+    return tuple(normalized)
+
+
+def _parse_action_scale_map(value: object) -> dict[str, float]:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return {str(key).strip(): float(raw_value) for key, raw_value in value.items()}
+    if isinstance(value, str):
+        tokens = [token.strip() for token in value.replace(";", ",").split(",") if token.strip()]
+        parsed: dict[str, float] = {}
+        for token in tokens:
+            if "=" not in token:
+                raise ValueError(
+                    f"refine_action_scales 项 {token!r} 缺少 '='，示例: u_boiler=1.0,u_abs=0.05"
+                )
+            key, raw_value = token.split("=", 1)
+            parsed[str(key).strip()] = float(raw_value)
+        return parsed
+    raise ValueError("refine_action_scales 仅支持 dict 或 'u_key=value,...' 字符串。")
+
+
 def _read_json_payload(path: str | Path | None) -> dict[str, object]:
     if path is None:
         return {}
@@ -284,6 +335,8 @@ def _detect_checkpoint_artifact(
     artifact_type = str(payload.get("artifact_type", "")).strip().lower()
     if artifact_type == "sb3_policy":
         return "sb3", path, payload
+    if artifact_type == "hybrid_pafc_policy":
+        return "hybrid_pafc", path, payload
     if artifact_type == "pafc_td3_actor":
         resolved = payload.get("checkpoint_path")
         if not isinstance(resolved, str) or len(resolved.strip()) == 0:
@@ -566,6 +619,7 @@ def _command_train(args: argparse.Namespace) -> None:
                 "pafc_episode_days",
                 "pafc_total_env_steps",
                 "pafc_warmup_steps",
+                "pafc_actor_warmup_steps",
                 "pafc_replay_capacity",
                 "pafc_batch_size",
                 "pafc_updates_per_step",
@@ -627,13 +681,17 @@ def _command_train(args: argparse.Namespace) -> None:
                 "pafc_economic_bes_full_year_warm_start_samples",
                 "pafc_economic_bes_full_year_warm_start_epochs",
                 "pafc_economic_bes_full_year_warm_start_u_weight",
+                "pafc_economic_bes_warm_start_economic_anchor_weight",
+                "pafc_economic_bes_warm_start_fallback_anchor_weight",
                 "pafc_economic_bes_teacher_selection_priority_boost",
                 "pafc_economic_bes_economic_source_priority_bonus",
                 "pafc_economic_bes_economic_source_min_share",
                 "pafc_economic_bes_idle_economic_source_min_share",
                 "pafc_economic_bes_teacher_target_min_share",
+                "pafc_economic_bes_anchor_max_scale",
                 "pafc_surrogate_actor_trust_coef",
                 "pafc_surrogate_actor_trust_min_scale",
+                "pafc_actor_low_trust_raw_fallback_keys",
                 "pafc_state_feasible_action_shaping_enabled",
                 "pafc_abs_min_on_gate_th",
                 "pafc_abs_min_on_u_margin",
@@ -689,6 +747,7 @@ def _command_train(args: argparse.Namespace) -> None:
                 episode_days=int(current_options["pafc_episode_days"]),
                 total_env_steps=int(current_options["pafc_total_env_steps"]),
                 warmup_steps=int(current_options["pafc_warmup_steps"]),
+                actor_warmup_steps=int(current_options["pafc_actor_warmup_steps"]),
                 replay_capacity=int(current_options["pafc_replay_capacity"]),
                 batch_size=int(current_options["pafc_batch_size"]),
                 updates_per_step=int(current_options["pafc_updates_per_step"]),
@@ -830,6 +889,12 @@ def _command_train(args: argparse.Namespace) -> None:
                 economic_bes_full_year_warm_start_u_weight=float(
                     current_options["pafc_economic_bes_full_year_warm_start_u_weight"]
                 ),
+                economic_bes_warm_start_economic_anchor_weight=float(
+                    current_options["pafc_economic_bes_warm_start_economic_anchor_weight"]
+                ),
+                economic_bes_warm_start_fallback_anchor_weight=float(
+                    current_options["pafc_economic_bes_warm_start_fallback_anchor_weight"]
+                ),
                 economic_bes_teacher_selection_priority_boost=float(
                     current_options["pafc_economic_bes_teacher_selection_priority_boost"]
                 ),
@@ -845,11 +910,17 @@ def _command_train(args: argparse.Namespace) -> None:
                 economic_bes_teacher_target_min_share=float(
                     current_options["pafc_economic_bes_teacher_target_min_share"]
                 ),
+                economic_bes_anchor_max_scale=float(
+                    current_options["pafc_economic_bes_anchor_max_scale"]
+                ),
                 surrogate_actor_trust_coef=float(
                     current_options["pafc_surrogate_actor_trust_coef"]
                 ),
                 surrogate_actor_trust_min_scale=float(
                     current_options["pafc_surrogate_actor_trust_min_scale"]
+                ),
+                actor_low_trust_raw_fallback_keys=_parse_string_tuple(
+                    current_options["pafc_actor_low_trust_raw_fallback_keys"]
                 ),
                 state_feasible_action_shaping_enabled=bool(
                     current_options["pafc_state_feasible_action_shaping_enabled"]
@@ -863,6 +934,22 @@ def _command_train(args: argparse.Namespace) -> None:
                 ),
                 expert_prefill_economic_checkpoint_path=str(
                     current_options["pafc_expert_prefill_economic_checkpoint_path"]
+                ),
+                frozen_action_keys=_parse_string_tuple(current_options["pafc_frozen_action_keys"]),
+                frozen_action_safe_checkpoint_path=str(
+                    current_options["pafc_frozen_action_safe_checkpoint_path"]
+                ),
+                gt_safe_action_delta_clip=float(
+                    current_options["pafc_gt_safe_action_delta_clip"]
+                ),
+                bes_safe_action_delta_clip=float(
+                    current_options["pafc_bes_safe_action_delta_clip"]
+                ),
+                boiler_safe_action_delta_clip=float(
+                    current_options["pafc_boiler_safe_action_delta_clip"]
+                ),
+                tes_safe_action_delta_clip=float(
+                    current_options["pafc_tes_safe_action_delta_clip"]
                 ),
                 expert_prefill_steps=int(current_options["pafc_expert_prefill_steps"]),
                 expert_prefill_cooling_bias=float(current_options["pafc_expert_prefill_cooling_bias"]),
@@ -1074,6 +1161,17 @@ def _command_eval(args: argparse.Namespace) -> None:
                 "当前 checkpoint 未识别为 pafc_td3_actor；"
                 "请传入 pafc_td3_actor.json，或传入带有 PAFC metadata 的 actor .pt。"
             )
+    if checkpoint_kind == "baseline" and requested_policy == "hybrid_pafc":
+        if args.checkpoint is None:
+            raise ValueError("policy=hybrid_pafc 的 generic eval 必须显式提供 --checkpoint。")
+        checkpoint_kind, resolved_checkpoint_path, checkpoint_payload = _detect_checkpoint_artifact(
+            args.checkpoint
+        )
+        if checkpoint_kind != "hybrid_pafc":
+            raise ValueError(
+                "当前 checkpoint 未识别为 hybrid_pafc_policy；"
+                "请传入 hybrid_pafc_policy.json。"
+            )
 
     if args.run_dir is not None:
         base_run_dir = Path(args.run_dir)
@@ -1111,6 +1209,17 @@ def _command_eval(args: argparse.Namespace) -> None:
             if resolved_checkpoint_path is None:
                 raise ValueError("PAFC-TD3 eval 缺少 actor checkpoint。")
             summary = evaluate_pafc_td3(
+                eval_df=eval_df,
+                config=env_config,
+                checkpoint_path=resolved_checkpoint_path,
+                run_dir=target_run_dir,
+                seed=int(seed),
+                device=current_options["device"],
+            )
+        elif checkpoint_kind == "hybrid_pafc":
+            if resolved_checkpoint_path is None:
+                raise ValueError("Hybrid PAFC eval 缺少 checkpoint json。")
+            summary = evaluate_hybrid_pafc(
                 eval_df=eval_df,
                 config=env_config,
                 checkpoint_path=resolved_checkpoint_path,
@@ -1335,6 +1444,9 @@ def _command_pafc_train(args: argparse.Namespace) -> None:
             episode_days=int(_arg_or_training_default("episode_days", "pafc_episode_days", 14)),
             total_env_steps=int(_arg_or_training_default("total_env_steps", "pafc_total_env_steps", 262_144)),
             warmup_steps=int(_arg_or_training_default("warmup_steps", "pafc_warmup_steps", 4_096)),
+            actor_warmup_steps=int(
+                _arg_or_training_default("actor_warmup_steps", "pafc_actor_warmup_steps", 0)
+            ),
             replay_capacity=int(_arg_or_training_default("replay_capacity", "pafc_replay_capacity", 100_000)),
             batch_size=int(_arg_or_training_default("batch_size", "pafc_batch_size", 256)),
             updates_per_step=int(_arg_or_training_default("updates_per_step", "pafc_updates_per_step", 1)),
@@ -1664,6 +1776,20 @@ def _command_pafc_train(args: argparse.Namespace) -> None:
                     4.0,
                 )
             ),
+            economic_bes_warm_start_economic_anchor_weight=float(
+                _arg_or_training_default(
+                    "economic_bes_warm_start_economic_anchor_weight",
+                    "pafc_economic_bes_warm_start_economic_anchor_weight",
+                    0.0,
+                )
+            ),
+            economic_bes_warm_start_fallback_anchor_weight=float(
+                _arg_or_training_default(
+                    "economic_bes_warm_start_fallback_anchor_weight",
+                    "pafc_economic_bes_warm_start_fallback_anchor_weight",
+                    0.0,
+                )
+            ),
             economic_bes_teacher_selection_priority_boost=float(
                 _arg_or_training_default(
                     "economic_bes_teacher_selection_priority_boost",
@@ -1699,6 +1825,13 @@ def _command_pafc_train(args: argparse.Namespace) -> None:
                     0.0,
                 )
             ),
+            economic_bes_anchor_max_scale=float(
+                _arg_or_training_default(
+                    "economic_bes_anchor_max_scale",
+                    "pafc_economic_bes_anchor_max_scale",
+                    1.0,
+                )
+            ),
             surrogate_actor_trust_coef=float(
                 _arg_or_training_default(
                     "surrogate_actor_trust_coef",
@@ -1711,6 +1844,13 @@ def _command_pafc_train(args: argparse.Namespace) -> None:
                     "surrogate_actor_trust_min_scale",
                     "pafc_surrogate_actor_trust_min_scale",
                     0.10,
+                )
+            ),
+            actor_low_trust_raw_fallback_keys=_parse_string_tuple(
+                _arg_or_training_default(
+                    "actor_low_trust_raw_fallback_keys",
+                    "pafc_actor_low_trust_raw_fallback_keys",
+                    (),
                 )
             ),
             state_feasible_action_shaping_enabled=bool(
@@ -1748,6 +1888,48 @@ def _command_pafc_train(args: argparse.Namespace) -> None:
                     "expert_prefill_economic_checkpoint_path",
                     "pafc_expert_prefill_economic_checkpoint_path",
                     "",
+                )
+            ),
+            frozen_action_keys=_parse_string_tuple(
+                _arg_or_training_default(
+                    "frozen_action_keys",
+                    "pafc_frozen_action_keys",
+                    (),
+                )
+            ),
+            frozen_action_safe_checkpoint_path=str(
+                _arg_or_training_default(
+                    "frozen_action_safe_checkpoint_path",
+                    "pafc_frozen_action_safe_checkpoint_path",
+                    "",
+                )
+            ),
+            gt_safe_action_delta_clip=float(
+                _arg_or_training_default(
+                    "gt_safe_action_delta_clip",
+                    "pafc_gt_safe_action_delta_clip",
+                    0.0,
+                )
+            ),
+            bes_safe_action_delta_clip=float(
+                _arg_or_training_default(
+                    "bes_safe_action_delta_clip",
+                    "pafc_bes_safe_action_delta_clip",
+                    0.0,
+                )
+            ),
+            boiler_safe_action_delta_clip=float(
+                _arg_or_training_default(
+                    "boiler_safe_action_delta_clip",
+                    "pafc_boiler_safe_action_delta_clip",
+                    0.0,
+                )
+            ),
+            tes_safe_action_delta_clip=float(
+                _arg_or_training_default(
+                    "tes_safe_action_delta_clip",
+                    "pafc_tes_safe_action_delta_clip",
+                    0.0,
                 )
             ),
             expert_prefill_steps=int(
@@ -1899,6 +2081,96 @@ def _command_pafc_eval(args: argparse.Namespace) -> None:
         outputs.append(
             {
                 "mode": "pafc_eval",
+                "run_dir": str(target_run_dir),
+                "seed": int(seed),
+                "summary": summary,
+            }
+        )
+
+    if multi_seed:
+        _write_multi_seed_eval_summary(base_run_dir, outputs, preferred_seed=seed_values[0])
+    print(json.dumps(outputs[0] if not multi_seed else outputs, indent=2, ensure_ascii=False))
+
+
+def _command_hybrid_train(args: argparse.Namespace) -> None:
+    train_df = load_exogenous_data(args.train_path)
+    env_overrides = load_env_overrides(_resolve_env_config_path(args))
+    force_mode = getattr(args, "constraint_mode", None)
+    env_config = build_env_config_from_overrides(env_overrides, force_constraint_mode=force_mode)
+    seed_values = _normalize_seed_list(args.seed, fallback=42)
+    multi_seed = len(seed_values) > 1
+    eval_df_cache: pd.DataFrame | None = None
+    outputs: list[dict[str, object]] = []
+
+    for seed in seed_values:
+        config = HybridPAFCConfig(
+            dqn_checkpoint_path=args.dqn_checkpoint,
+            pafc_checkpoint_path=args.pafc_checkpoint,
+            discrete_hold_steps=int(args.discrete_hold_steps),
+            residual_scale=float(args.residual_scale),
+            refine_action_keys=_parse_string_tuple(args.refine_action_keys),
+            refine_action_scales=_parse_action_scale_map(getattr(args, "refine_action_scales", None)),
+            dqn_model_source=str(args.model_source),
+            dqn_deterministic=not bool(getattr(args, "stochastic_dqn", False)),
+            use_safe_residual=bool(args.use_safe_residual),
+            seed=int(seed),
+            device=str(args.device),
+        )
+        result = train_hybrid_pafc(
+            train_df=train_df,
+            env_config=env_config,
+            trainer_config=config,
+            run_root=args.run_root,
+        )
+        payload: dict[str, object] = {"mode": "hybrid_train", "seed": int(seed), **result}
+        if bool(getattr(args, "eval_after_train", False)):
+            if eval_df_cache is None:
+                eval_df_cache = load_exogenous_data(args.eval_path)
+            run_dir = Path(str(result.get("run_dir", "") or "")).resolve()
+            payload["eval_summary"] = evaluate_hybrid_pafc(
+                eval_df=eval_df_cache,
+                config=env_config,
+                checkpoint_path=Path(str(result["checkpoint_json_path"])).resolve(),
+                run_dir=run_dir,
+                seed=int(seed),
+                device=str(config.device),
+            )
+        outputs.append(payload)
+
+    print(json.dumps(outputs[0] if not multi_seed else outputs, indent=2, ensure_ascii=False))
+
+
+def _command_hybrid_eval(args: argparse.Namespace) -> None:
+    eval_df = load_exogenous_data(args.eval_path)
+    env_overrides = load_env_overrides(_resolve_env_config_path(args))
+    force_mode = getattr(args, "constraint_mode", None)
+    env_config = build_env_config_from_overrides(env_overrides, force_constraint_mode=force_mode)
+    seed_values = _normalize_seed_list(args.seed, fallback=42)
+    multi_seed = len(seed_values) > 1
+
+    if args.run_dir is not None:
+        base_run_dir = Path(args.run_dir)
+    else:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        base_run_dir = Path("runs") / f"{stamp}_eval_hybrid_pafc"
+
+    outputs: list[dict[str, object]] = []
+    checkpoint_kind, resolved_checkpoint_path, _ = _detect_checkpoint_artifact(args.checkpoint)
+    if checkpoint_kind != "hybrid_pafc" or resolved_checkpoint_path is None:
+        raise ValueError("hybrid-eval 只接受 hybrid_pafc_policy.json。")
+    for seed in seed_values:
+        target_run_dir = _maybe_seed_run_dir(base_run_dir, seed, multi_seed)
+        summary = evaluate_hybrid_pafc(
+            eval_df=eval_df,
+            config=env_config,
+            checkpoint_path=resolved_checkpoint_path,
+            run_dir=target_run_dir,
+            seed=int(seed),
+            device=args.device,
+        )
+        outputs.append(
+            {
+                "mode": "hybrid_eval",
                 "run_dir": str(target_run_dir),
                 "seed": int(seed),
                 "summary": summary,
@@ -2349,6 +2621,7 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--pafc-episode-days", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument("--pafc-total-env-steps", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument("--pafc-warmup-steps", type=int, default=argparse.SUPPRESS)
+    train_parser.add_argument("--pafc-actor-warmup-steps", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument("--pafc-replay-capacity", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument("--pafc-batch-size", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument("--pafc-updates-per-step", type=int, default=argparse.SUPPRESS)
@@ -2456,6 +2729,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=argparse.SUPPRESS,
     )
     train_parser.add_argument(
+        "--pafc-economic-bes-warm-start-economic-anchor-weight",
+        type=float,
+        default=argparse.SUPPRESS,
+    )
+    train_parser.add_argument(
+        "--pafc-economic-bes-warm-start-fallback-anchor-weight",
+        type=float,
+        default=argparse.SUPPRESS,
+    )
+    train_parser.add_argument(
         "--pafc-economic-bes-teacher-selection-priority-boost",
         type=float,
         default=argparse.SUPPRESS,
@@ -2480,8 +2763,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=argparse.SUPPRESS,
     )
+    train_parser.add_argument(
+        "--pafc-economic-bes-anchor-max-scale",
+        type=float,
+        default=argparse.SUPPRESS,
+    )
     train_parser.add_argument("--pafc-surrogate-actor-trust-coef", type=float, default=argparse.SUPPRESS)
     train_parser.add_argument("--pafc-surrogate-actor-trust-min-scale", type=float, default=argparse.SUPPRESS)
+    train_parser.add_argument(
+        "--pafc-actor-low-trust-raw-fallback-keys",
+        type=str,
+        default=argparse.SUPPRESS,
+    )
     train_parser.add_argument(
         "--pafc-state-feasible-action-shaping-enabled",
         action="store_true",
@@ -2493,6 +2786,7 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--pafc-expert-prefill-checkpoint-path", type=str, default=argparse.SUPPRESS)
     train_parser.add_argument("--pafc-expert-prefill-economic-policy", type=str, default=argparse.SUPPRESS)
     train_parser.add_argument("--pafc-expert-prefill-economic-checkpoint-path", type=str, default=argparse.SUPPRESS)
+    train_parser.add_argument("--pafc-tes-safe-action-delta-clip", type=float, default=argparse.SUPPRESS)
     train_parser.add_argument("--pafc-expert-prefill-steps", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument("--pafc-expert-prefill-cooling-bias", type=float, default=argparse.SUPPRESS)
     train_parser.add_argument("--pafc-expert-prefill-abs-replay-boost", type=int, default=argparse.SUPPRESS)
@@ -2565,7 +2859,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--policy",
         type=str,
         default=argparse.SUPPRESS,
-        choices=["rule", "easy_rule", "random", "sequence_rule", "milp_mpc", "milp-mpc", "ga_mpc", "ga-mpc", "sb3", "pafc_td3", "pafc-td3"],
+        choices=[
+            "rule",
+            "easy_rule",
+            "random",
+            "sequence_rule",
+            "milp_mpc",
+            "milp-mpc",
+            "ga_mpc",
+            "ga-mpc",
+            "sb3",
+            "pafc_td3",
+            "pafc-td3",
+            "hybrid_pafc",
+            "hybrid-pafc",
+        ],
     )
     eval_parser.add_argument(
         "--env-config",
@@ -2842,6 +3150,7 @@ def build_parser() -> argparse.ArgumentParser:
     pafc_train_parser.add_argument("--episode-days", type=int, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--total-env-steps", type=int, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--warmup-steps", type=int, default=argparse.SUPPRESS)
+    pafc_train_parser.add_argument("--actor-warmup-steps", type=int, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--replay-capacity", type=int, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--batch-size", type=int, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--updates-per-step", type=int, default=argparse.SUPPRESS)
@@ -2923,6 +3232,54 @@ def build_parser() -> argparse.ArgumentParser:
     pafc_train_parser.add_argument("--expert-prefill-checkpoint-path", type=str, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--expert-prefill-economic-policy", type=str, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--expert-prefill-economic-checkpoint-path", type=str, default=argparse.SUPPRESS)
+    pafc_train_parser.add_argument(
+        "--frozen-action-keys",
+        type=str,
+        default=argparse.SUPPRESS,
+        help="逗号分隔的冻结动作键，例如 u_abs,u_ech,u_boiler。",
+    )
+    pafc_train_parser.add_argument(
+        "--frozen-action-safe-checkpoint-path",
+        type=str,
+        default=argparse.SUPPRESS,
+        help="冻结动作维度使用的安全策略 checkpoint 路径。",
+    )
+    pafc_train_parser.add_argument(
+        "--gt-safe-action-delta-clip",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="限制 u_gt 相对安全策略的最大偏移量；0 表示不限制。",
+    )
+    pafc_train_parser.add_argument(
+        "--bes-safe-action-delta-clip",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="限制 u_bes 相对安全策略的最大偏移量；0 表示不限制。",
+    )
+    pafc_train_parser.add_argument(
+        "--boiler-safe-action-delta-clip",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="限制 u_boiler 相对安全策略的最大偏移量；0 表示不限制。",
+    )
+    pafc_train_parser.add_argument(
+        "--abs-safe-action-delta-clip",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="限制 u_abs 相对安全策略的最大偏移量；0 表示不限制。",
+    )
+    pafc_train_parser.add_argument(
+        "--ech-safe-action-delta-clip",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="限制 u_ech 相对安全策略的最大偏移量；0 表示不限制。",
+    )
+    pafc_train_parser.add_argument(
+        "--tes-safe-action-delta-clip",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="限制 u_tes 相对安全策略的最大偏移量；0 表示不限制。",
+    )
     pafc_train_parser.add_argument("--expert-prefill-steps", type=int, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--expert-prefill-cooling-bias", type=float, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--expert-prefill-abs-replay-boost", type=int, default=argparse.SUPPRESS)
@@ -2956,6 +3313,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=argparse.SUPPRESS,
     )
     pafc_train_parser.add_argument(
+        "--economic-bes-warm-start-economic-anchor-weight",
+        type=float,
+        default=argparse.SUPPRESS,
+    )
+    pafc_train_parser.add_argument(
+        "--economic-bes-warm-start-fallback-anchor-weight",
+        type=float,
+        default=argparse.SUPPRESS,
+    )
+    pafc_train_parser.add_argument(
         "--economic-bes-teacher-selection-priority-boost",
         type=float,
         default=argparse.SUPPRESS,
@@ -2980,8 +3347,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=argparse.SUPPRESS,
     )
+    pafc_train_parser.add_argument(
+        "--economic-bes-anchor-max-scale",
+        type=float,
+        default=argparse.SUPPRESS,
+    )
     pafc_train_parser.add_argument("--surrogate-actor-trust-coef", type=float, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--surrogate-actor-trust-min-scale", type=float, default=argparse.SUPPRESS)
+    pafc_train_parser.add_argument(
+        "--actor-low-trust-raw-fallback-keys",
+        type=str,
+        default=argparse.SUPPRESS,
+    )
     pafc_train_parser.add_argument("--actor-warm-start-epochs", type=int, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--actor-warm-start-batch-size", type=int, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--actor-warm-start-lr", type=float, default=argparse.SUPPRESS)
@@ -3058,6 +3435,92 @@ def build_parser() -> argparse.ArgumentParser:
     pafc_eval_parser.add_argument("--device", type=str, default="auto")
     pafc_eval_parser.add_argument("--seed", type=str, default="42")
     pafc_eval_parser.add_argument(
+        "--env-config",
+        type=Path,
+        default=argparse.SUPPRESS,
+        help="环境参数配置文件路径（支持放在子命令后）。",
+    )
+
+    hybrid_train_parser = subparsers.add_parser("hybrid-train", help="组装并评估 DQN+PAFC 的分层 hybrid 策略。")
+    hybrid_train_parser.add_argument("--dqn-checkpoint", type=Path, required=True, help="高层 DQN 的 sb3_policy json。")
+    hybrid_train_parser.add_argument("--pafc-checkpoint", type=Path, required=True, help="低层 PAFC checkpoint（.pt 或 pafc_td3_actor.json）。")
+    hybrid_train_parser.add_argument("--run-root", type=Path, default=Path("runs"))
+    hybrid_train_parser.add_argument(
+        "--constraint-mode",
+        type=str,
+        default=argparse.SUPPRESS,
+        choices=list(DEFAULT_CONSTRAINT_MODES),
+        help="覆盖 env.constraint_mode（子命令级覆盖）。",
+    )
+    hybrid_train_parser.add_argument("--discrete-hold-steps", type=int, default=1)
+    hybrid_train_parser.add_argument("--residual-scale", type=float, default=1.0)
+    hybrid_train_parser.add_argument(
+        "--refine-action-keys",
+        type=str,
+        default="u_boiler",
+        help="逗号分隔的连续微调动作键，例如 u_boiler,u_bes。",
+    )
+    hybrid_train_parser.add_argument(
+        "--refine-action-scales",
+        type=str,
+        default=None,
+        help="按动作维指定 blend 权重，例如 u_boiler=1.0,u_abs=0.05；未指定的键回退到 --residual-scale。",
+    )
+    hybrid_train_parser.add_argument(
+        "--model-source",
+        type=str,
+        default="best",
+        choices=["best", "last"],
+        help="DQN 恢复 best 或 last 模型。",
+    )
+    hybrid_train_parser.add_argument(
+        "--stochastic-dqn",
+        action="store_true",
+        default=False,
+        help="高层 DQN 使用随机动作采样（默认 deterministic）。",
+    )
+    hybrid_train_parser.add_argument(
+        "--use-safe-residual",
+        dest="use_safe_residual",
+        action="store_true",
+        default=False,
+        help="启用 safe residual 基准；默认直接以 DQN anchor 为残差参考。",
+    )
+    hybrid_train_parser.add_argument(
+        "--no-safe-residual",
+        dest="use_safe_residual",
+        action="store_false",
+        default=False,
+        help="禁用 safe residual 基准，直接使用 PAFC 输出相对 anchor 的残差。",
+    )
+    hybrid_train_parser.add_argument("--device", type=str, default="auto")
+    hybrid_train_parser.add_argument("--seed", type=str, default="42")
+    hybrid_train_parser.add_argument(
+        "--eval-after-train",
+        action="store_true",
+        default=False,
+        help="组装完成后立即在 2025 上评估，并写入同一 run_dir/eval/。",
+    )
+    hybrid_train_parser.add_argument(
+        "--env-config",
+        type=Path,
+        default=argparse.SUPPRESS,
+        help="环境参数配置文件路径（支持放在子命令后）。",
+    )
+
+    hybrid_eval_parser = subparsers.add_parser("hybrid-eval", help="评估 DQN+PAFC hybrid 策略（固定 2025）。")
+    hybrid_eval_parser.add_argument("--checkpoint", type=Path, required=True, help="hybrid_pafc_policy.json")
+    hybrid_eval_parser.add_argument("--run-dir", type=Path, default=None)
+    hybrid_eval_parser.add_argument(
+        "--constraint-mode",
+        type=str,
+        default=argparse.SUPPRESS,
+        choices=list(DEFAULT_CONSTRAINT_MODES),
+        help="覆盖 env.constraint_mode（子命令级覆盖）。",
+    )
+    hybrid_eval_parser.add_argument("--device", type=str, default="auto")
+    hybrid_eval_parser.add_argument("--seed", type=str, default="42")
+    hybrid_eval_parser.add_argument(
         "--env-config",
         type=Path,
         default=argparse.SUPPRESS,
@@ -3181,6 +3644,12 @@ def main() -> None:
         return
     if command == "pafc-eval":
         _command_pafc_eval(args)
+        return
+    if command == "hybrid-train":
+        _command_hybrid_train(args)
+        return
+    if command == "hybrid-eval":
+        _command_hybrid_eval(args)
         return
     if command == "calibrate":
         _command_calibrate(args)

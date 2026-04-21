@@ -112,6 +112,42 @@ def _action_vector_to_dict(
     return result
 
 
+def _normalize_action_key_tuple(value: object) -> tuple[str, ...]:
+    if value is None:
+        return tuple()
+    if isinstance(value, str):
+        tokens = [token.strip() for token in value.replace(";", ",").split(",") if token.strip()]
+    elif isinstance(value, (list, tuple, set)):
+        tokens = [str(token).strip() for token in value if str(token).strip()]
+    else:
+        tokens = [str(value).strip()]
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        key = str(token).strip().lower().replace("-", "_")
+        if not key or key in seen:
+            continue
+        normalized.append(key)
+        seen.add(key)
+    return tuple(normalized)
+
+
+def _observation_vector_to_dict(
+    observation_vector: np.ndarray | Sequence[float],
+    *,
+    observation_keys: Sequence[str],
+) -> dict[str, float]:
+    vector = np.asarray(observation_vector, dtype=np.float32).reshape(-1)
+    if vector.shape[0] != len(observation_keys):
+        raise ValueError(
+            f"观测维度不匹配：期望 {len(observation_keys)}，实际 {vector.shape[0]}"
+        )
+    return {
+        str(key): float(vector[index])
+        for index, key in enumerate(observation_keys)
+    }
+
+
 def _materialize_teacher_action_np(
     *,
     teacher_action: Mapping[str, float],
@@ -1657,6 +1693,7 @@ class PAFCTD3TrainConfig:
     episode_days: int = 14
     total_env_steps: int = 262_144
     warmup_steps: int = 4_096
+    actor_warmup_steps: int = 0
     replay_capacity: int = 100_000
     batch_size: int = 256
     updates_per_step: int = 1
@@ -1718,13 +1755,17 @@ class PAFCTD3TrainConfig:
     economic_bes_full_year_warm_start_samples: int = 4096
     economic_bes_full_year_warm_start_epochs: int = 2
     economic_bes_full_year_warm_start_u_weight: float = 4.0
+    economic_bes_warm_start_economic_anchor_weight: float = 0.0
+    economic_bes_warm_start_fallback_anchor_weight: float = 0.0
     economic_bes_teacher_selection_priority_boost: float = 0.75
     economic_bes_economic_source_priority_bonus: float = 0.10
     economic_bes_economic_source_min_share: float = 0.75
     economic_bes_idle_economic_source_min_share: float = 0.75
     economic_bes_teacher_target_min_share: float = 0.0
+    economic_bes_anchor_max_scale: float = 1.0
     surrogate_actor_trust_coef: float = 0.60
     surrogate_actor_trust_min_scale: float = 0.10
+    actor_low_trust_raw_fallback_keys: tuple[str, ...] = field(default_factory=tuple)
     state_feasible_action_shaping_enabled: bool = True
     abs_min_on_gate_th: float = 0.75
     abs_min_on_u_margin: float = 0.02
@@ -1732,6 +1773,14 @@ class PAFCTD3TrainConfig:
     expert_prefill_checkpoint_path: str | Path = ""
     expert_prefill_economic_policy: str = "checkpoint"
     expert_prefill_economic_checkpoint_path: str | Path = ""
+    frozen_action_keys: tuple[str, ...] = field(default_factory=tuple)
+    frozen_action_safe_checkpoint_path: str | Path = ""
+    gt_safe_action_delta_clip: float = 0.0
+    bes_safe_action_delta_clip: float = 0.0
+    boiler_safe_action_delta_clip: float = 0.0
+    tes_safe_action_delta_clip: float = 0.0
+    abs_safe_action_delta_clip: float = 0.0
+    ech_safe_action_delta_clip: float = 0.0
     expert_prefill_steps: int = 4_096
     actor_warm_start_epochs: int = 4
     actor_warm_start_batch_size: int = 256
@@ -1771,6 +1820,7 @@ class PAFCTD3TrainConfig:
         self.episode_days = int(self.episode_days)
         self.total_env_steps = int(self.total_env_steps)
         self.warmup_steps = int(self.warmup_steps)
+        self.actor_warmup_steps = int(self.actor_warmup_steps)
         self.replay_capacity = int(self.replay_capacity)
         self.batch_size = int(self.batch_size)
         self.updates_per_step = int(self.updates_per_step)
@@ -1886,6 +1936,12 @@ class PAFCTD3TrainConfig:
         self.economic_bes_full_year_warm_start_u_weight = float(
             self.economic_bes_full_year_warm_start_u_weight
         )
+        self.economic_bes_warm_start_economic_anchor_weight = float(
+            self.economic_bes_warm_start_economic_anchor_weight
+        )
+        self.economic_bes_warm_start_fallback_anchor_weight = float(
+            self.economic_bes_warm_start_fallback_anchor_weight
+        )
         self.economic_bes_teacher_selection_priority_boost = float(
             self.economic_bes_teacher_selection_priority_boost
         )
@@ -1901,9 +1957,13 @@ class PAFCTD3TrainConfig:
         self.economic_bes_teacher_target_min_share = float(
             self.economic_bes_teacher_target_min_share
         )
+        self.economic_bes_anchor_max_scale = float(self.economic_bes_anchor_max_scale)
         self.surrogate_actor_trust_coef = float(self.surrogate_actor_trust_coef)
         self.surrogate_actor_trust_min_scale = float(
             self.surrogate_actor_trust_min_scale
+        )
+        self.actor_low_trust_raw_fallback_keys = _normalize_action_key_tuple(
+            self.actor_low_trust_raw_fallback_keys
         )
         self.state_feasible_action_shaping_enabled = bool(self.state_feasible_action_shaping_enabled)
         self.abs_min_on_gate_th = float(self.abs_min_on_gate_th)
@@ -1916,6 +1976,16 @@ class PAFCTD3TrainConfig:
         self.expert_prefill_economic_checkpoint_path = str(
             self.expert_prefill_economic_checkpoint_path
         ).strip()
+        self.frozen_action_keys = _normalize_action_key_tuple(self.frozen_action_keys)
+        self.frozen_action_safe_checkpoint_path = str(
+            self.frozen_action_safe_checkpoint_path
+        ).strip()
+        self.gt_safe_action_delta_clip = float(self.gt_safe_action_delta_clip)
+        self.bes_safe_action_delta_clip = float(self.bes_safe_action_delta_clip)
+        self.boiler_safe_action_delta_clip = float(self.boiler_safe_action_delta_clip)
+        self.tes_safe_action_delta_clip = float(self.tes_safe_action_delta_clip)
+        self.abs_safe_action_delta_clip = float(self.abs_safe_action_delta_clip)
+        self.ech_safe_action_delta_clip = float(self.ech_safe_action_delta_clip)
         self.expert_prefill_steps = int(self.expert_prefill_steps)
         self.actor_warm_start_epochs = int(self.actor_warm_start_epochs)
         self.actor_warm_start_batch_size = int(self.actor_warm_start_batch_size)
@@ -1946,16 +2016,80 @@ class PAFCTD3TrainConfig:
         self.action_keys = tuple(self.action_keys) or DEFAULT_SEQUENCE_ACTION_KEYS
         self.hidden_dims = tuple(int(dim) for dim in self.hidden_dims)
         self.cost_targets = tuple(float(value) for value in self.cost_targets)
+        unknown_frozen_keys = sorted(set(self.frozen_action_keys) - set(self.action_keys))
+        if unknown_frozen_keys:
+            raise ValueError(f"frozen_action_keys 包含未知动作键: {unknown_frozen_keys}")
+        if self.frozen_action_keys and len(self.frozen_action_safe_checkpoint_path) == 0:
+            raise ValueError(
+                "frozen_action_keys 非空时必须提供 frozen_action_safe_checkpoint_path。"
+            )
+        if self.tes_safe_action_delta_clip > 0.0 and len(self.frozen_action_safe_checkpoint_path) == 0:
+            raise ValueError(
+                "tes_safe_action_delta_clip > 0 时必须提供 frozen_action_safe_checkpoint_path。"
+            )
+        if self.gt_safe_action_delta_clip > 0.0 and len(self.frozen_action_safe_checkpoint_path) == 0:
+            raise ValueError(
+                "gt_safe_action_delta_clip > 0 时必须提供 frozen_action_safe_checkpoint_path。"
+            )
+        if self.bes_safe_action_delta_clip > 0.0 and len(self.frozen_action_safe_checkpoint_path) == 0:
+            raise ValueError(
+                "bes_safe_action_delta_clip > 0 时必须提供 frozen_action_safe_checkpoint_path。"
+            )
+        if self.boiler_safe_action_delta_clip > 0.0 and len(self.frozen_action_safe_checkpoint_path) == 0:
+            raise ValueError(
+                "boiler_safe_action_delta_clip > 0 时必须提供 frozen_action_safe_checkpoint_path。"
+            )
+        if self.abs_safe_action_delta_clip > 0.0 and len(self.frozen_action_safe_checkpoint_path) == 0:
+            raise ValueError(
+                "abs_safe_action_delta_clip > 0 时必须提供 frozen_action_safe_checkpoint_path。"
+            )
+        if self.ech_safe_action_delta_clip > 0.0 and len(self.frozen_action_safe_checkpoint_path) == 0:
+            raise ValueError(
+                "ech_safe_action_delta_clip > 0 时必须提供 frozen_action_safe_checkpoint_path。"
+            )
+        if len(self.frozen_action_keys) >= len(self.action_keys):
+            raise ValueError("frozen_action_keys 不能冻结全部动作维度。")
         if not Path(self.projection_surrogate_checkpoint_path).exists():
             raise FileNotFoundError(
                 f"projection surrogate checkpoint 不存在: {self.projection_surrogate_checkpoint_path}"
             )
+        if self.frozen_action_keys and not Path(self.frozen_action_safe_checkpoint_path).exists():
+            raise FileNotFoundError(
+                "frozen_action_safe_checkpoint_path 不存在: "
+                f"{self.frozen_action_safe_checkpoint_path}"
+            )
+        if self.tes_safe_action_delta_clip < 0.0 or self.tes_safe_action_delta_clip > 1.0:
+            raise ValueError("tes_safe_action_delta_clip 必须在 [0,1]。")
+        if self.tes_safe_action_delta_clip > 0.0 and "u_tes" not in self.action_keys:
+            raise ValueError("tes_safe_action_delta_clip > 0 时动作空间必须包含 u_tes。")
+        if self.gt_safe_action_delta_clip < 0.0 or self.gt_safe_action_delta_clip > 1.0:
+            raise ValueError("gt_safe_action_delta_clip 必须在 [0,1]。")
+        if self.gt_safe_action_delta_clip > 0.0 and "u_gt" not in self.action_keys:
+            raise ValueError("gt_safe_action_delta_clip > 0 时动作空间必须包含 u_gt。")
+        if self.bes_safe_action_delta_clip < 0.0 or self.bes_safe_action_delta_clip > 1.0:
+            raise ValueError("bes_safe_action_delta_clip 必须在 [0,1]。")
+        if self.bes_safe_action_delta_clip > 0.0 and "u_bes" not in self.action_keys:
+            raise ValueError("bes_safe_action_delta_clip > 0 时动作空间必须包含 u_bes。")
+        if self.boiler_safe_action_delta_clip < 0.0 or self.boiler_safe_action_delta_clip > 1.0:
+            raise ValueError("boiler_safe_action_delta_clip 必须在 [0,1]。")
+        if self.boiler_safe_action_delta_clip > 0.0 and "u_boiler" not in self.action_keys:
+            raise ValueError("boiler_safe_action_delta_clip > 0 时动作空间必须包含 u_boiler。")
+        if self.abs_safe_action_delta_clip < 0.0 or self.abs_safe_action_delta_clip > 1.0:
+            raise ValueError("abs_safe_action_delta_clip 必须在 [0,1]。")
+        if self.abs_safe_action_delta_clip > 0.0 and "u_abs" not in self.action_keys:
+            raise ValueError("abs_safe_action_delta_clip > 0 时动作空间必须包含 u_abs。")
+        if self.ech_safe_action_delta_clip < 0.0 or self.ech_safe_action_delta_clip > 1.0:
+            raise ValueError("ech_safe_action_delta_clip 必须在 [0,1]。")
+        if self.ech_safe_action_delta_clip > 0.0 and "u_ech" not in self.action_keys:
+            raise ValueError("ech_safe_action_delta_clip > 0 时动作空间必须包含 u_ech。")
         if self.episode_days < 7 or self.episode_days > 30:
             raise ValueError("episode_days 必须在 [7,30]。")
         if self.total_env_steps <= 0:
             raise ValueError("total_env_steps 必须 > 0。")
         if self.warmup_steps < 0:
             raise ValueError("warmup_steps 必须 >= 0。")
+        if self.actor_warmup_steps < 0:
+            raise ValueError("actor_warmup_steps 必须 >= 0。")
         if self.replay_capacity <= 1:
             raise ValueError("replay_capacity 必须 > 1。")
         if self.batch_size <= 0:
@@ -2090,6 +2224,20 @@ class PAFCTD3TrainConfig:
             raise ValueError("economic_bes_full_year_warm_start_epochs 必须 >= 0。")
         if self.economic_bes_full_year_warm_start_u_weight < 0.0:
             raise ValueError("economic_bes_full_year_warm_start_u_weight 必须 >= 0。")
+        if (
+            self.economic_bes_warm_start_economic_anchor_weight < 0.0
+            or self.economic_bes_warm_start_economic_anchor_weight > 1.0
+        ):
+            raise ValueError(
+                "economic_bes_warm_start_economic_anchor_weight 必须在 [0,1]。"
+            )
+        if (
+            self.economic_bes_warm_start_fallback_anchor_weight < 0.0
+            or self.economic_bes_warm_start_fallback_anchor_weight > 1.0
+        ):
+            raise ValueError(
+                "economic_bes_warm_start_fallback_anchor_weight 必须在 [0,1]。"
+            )
         if self.economic_bes_teacher_selection_priority_boost < 0.0:
             raise ValueError("economic_bes_teacher_selection_priority_boost 必须 >= 0。")
         if self.economic_bes_economic_source_priority_bonus < 0.0:
@@ -2109,6 +2257,11 @@ class PAFCTD3TrainConfig:
             or self.economic_bes_teacher_target_min_share > 1.0
         ):
             raise ValueError("economic_bes_teacher_target_min_share 必须在 [0,1]。")
+        if (
+            self.economic_bes_anchor_max_scale < 0.0
+            or self.economic_bes_anchor_max_scale > 1.0
+        ):
+            raise ValueError("economic_bes_anchor_max_scale 必须在 [0,1]。")
         if self.surrogate_actor_trust_coef < 0.0:
             raise ValueError("surrogate_actor_trust_coef 必须 >= 0。")
         if (
@@ -2116,6 +2269,13 @@ class PAFCTD3TrainConfig:
             or self.surrogate_actor_trust_min_scale > 1.0
         ):
             raise ValueError("surrogate_actor_trust_min_scale 必须在 [0,1]。")
+        unknown_fallback_keys = sorted(
+            set(self.actor_low_trust_raw_fallback_keys) - set(self.action_keys)
+        )
+        if unknown_fallback_keys:
+            raise ValueError(
+                f"actor_low_trust_raw_fallback_keys 包含未知动作键: {unknown_fallback_keys}"
+            )
         if self.abs_min_on_gate_th < 0.0 or self.abs_min_on_gate_th > 1.0:
             raise ValueError("abs_min_on_gate_th 必须在 [0,1]。")
         if self.abs_min_on_u_margin < 0.0 or self.abs_min_on_u_margin > 1.0:
@@ -3296,6 +3456,43 @@ class PAFCTD3Trainer:
         )
         self.dual_lambdas = np.zeros(3, dtype=np.float32)
         self.dual_targets = np.asarray(self.config.cost_targets, dtype=np.float32)
+        self.frozen_action_keys = tuple(
+            str(key) for key in self.config.frozen_action_keys if str(key) in self.action_index
+        )
+        self.frozen_action_enabled = bool(self.frozen_action_keys)
+        self.safe_reference_action_enabled = bool(
+            self.frozen_action_enabled
+            or float(self.config.gt_safe_action_delta_clip) > 0.0
+            or float(self.config.bes_safe_action_delta_clip) > 0.0
+            or float(self.config.boiler_safe_action_delta_clip) > 0.0
+            or float(self.config.tes_safe_action_delta_clip) > 0.0
+            or float(self.config.abs_safe_action_delta_clip) > 0.0
+            or float(self.config.ech_safe_action_delta_clip) > 0.0
+        )
+        self.frozen_action_safe_checkpoint_path = str(
+            self.config.frozen_action_safe_checkpoint_path
+        ).strip()
+        self.frozen_action_safe_metadata: dict[str, Any] = {}
+        self.frozen_action_safe_actor = None
+        self.frozen_action_safe_obs_offset_np = np.zeros((len(self.observation_keys),), dtype=np.float32)
+        self.frozen_action_safe_obs_scale_np = np.ones((len(self.observation_keys),), dtype=np.float32)
+        self.frozen_action_safe_obs_offset = self.torch.zeros(
+            (1, len(self.observation_keys)),
+            dtype=self.torch.float32,
+            device=self.device,
+        )
+        self.frozen_action_safe_obs_scale = self.torch.ones(
+            (1, len(self.observation_keys)),
+            dtype=self.torch.float32,
+            device=self.device,
+        )
+        self.frozen_action_safe_state_feasible_action_shaping_enabled = bool(
+            self.config.state_feasible_action_shaping_enabled
+        )
+        self.frozen_action_safe_abs_min_on_gate_th = float(self.config.abs_min_on_gate_th)
+        self.frozen_action_safe_abs_min_on_u_margin = float(self.config.abs_min_on_u_margin)
+        if self.safe_reference_action_enabled:
+            self._load_frozen_action_safe_bundle()
 
         self.run_dir = self._create_run_directory(run_root=run_root)
         dump_statistics_json(
@@ -3459,6 +3656,453 @@ class PAFCTD3Trainer:
             observation=observation,
             feature_keys=self.observation_keys,
         ).astype(np.float32)
+
+    def _observation_vector_to_dict(self, observation_vector: np.ndarray) -> dict[str, float]:
+        return _observation_vector_to_dict(
+            observation_vector,
+            observation_keys=self.observation_keys,
+        )
+
+    def _load_frozen_action_safe_bundle(self) -> None:
+        if not self.safe_reference_action_enabled:
+            return
+        artifact = self._resolve_prefill_checkpoint_artifact(
+            checkpoint_path=self.frozen_action_safe_checkpoint_path,
+        )
+        if str(artifact.get("artifact_type", "")).strip().lower() != "pafc_td3_actor":
+            raise ValueError(
+                "frozen_action_safe_checkpoint_path 当前仅支持 PAFC-TD3 actor checkpoint。"
+            )
+        resolved_path = Path(artifact["resolved_path"])
+        payload = load_policy(
+            resolved_path,
+            map_location=self.device,
+        )
+        metadata = dict(payload.get("metadata", {}))
+        observation_keys = tuple(str(key) for key in metadata.get("observation_keys", ()))
+        action_keys = tuple(str(key) for key in metadata.get("action_keys", ()))
+        if observation_keys != self.observation_keys:
+            raise ValueError("冻结安全策略的 observation_keys 与当前训练配置不一致。")
+        if action_keys != self.action_keys:
+            raise ValueError("冻结安全策略的 action_keys 与当前训练配置不一致。")
+        actor = build_pafc_actor_network(
+            observation_dim=int(metadata["observation_dim"]),
+            action_keys=action_keys,
+            hidden_dims=tuple(int(dim) for dim in metadata.get("hidden_dims", (256, 256))),
+        ).to(self.device)
+        actor.load_state_dict(payload["state_dict"])
+        actor.eval()
+        for parameter in actor.parameters():
+            parameter.requires_grad_(False)
+        obs_norm = dict(metadata.get("observation_norm", {}))
+        offset_np = np.asarray(obs_norm.get("offset", []), dtype=np.float32).reshape(-1)
+        scale_np = np.asarray(obs_norm.get("scale", []), dtype=np.float32).reshape(-1)
+        if offset_np.shape[0] != len(self.observation_keys) or scale_np.shape[0] != len(
+            self.observation_keys
+        ):
+            raise ValueError("冻结安全策略 observation_norm 维度与当前训练配置不一致。")
+        scale_np = np.where(np.abs(scale_np) < _NORM_EPS, 1.0, scale_np)
+        self.frozen_action_safe_actor = actor
+        self.frozen_action_safe_metadata = {
+            **metadata,
+            "entry_path": str(Path(artifact["entry_path"]).resolve()).replace("\\", "/"),
+            "resolved_path": str(resolved_path.resolve()).replace("\\", "/"),
+        }
+        self.frozen_action_safe_obs_offset_np = offset_np.astype(np.float32, copy=True)
+        self.frozen_action_safe_obs_scale_np = scale_np.astype(np.float32, copy=True)
+        self.frozen_action_safe_obs_offset = self.torch.as_tensor(
+            offset_np.reshape(1, -1),
+            dtype=self.torch.float32,
+            device=self.device,
+        )
+        self.frozen_action_safe_obs_scale = self.torch.as_tensor(
+            scale_np.reshape(1, -1),
+            dtype=self.torch.float32,
+            device=self.device,
+        )
+        self.frozen_action_safe_state_feasible_action_shaping_enabled = bool(
+            metadata.get(
+                "state_feasible_action_shaping_enabled",
+                self.config.state_feasible_action_shaping_enabled,
+            )
+        )
+        self.frozen_action_safe_abs_min_on_gate_th = float(
+            metadata.get("abs_min_on_gate_th", self.config.abs_min_on_gate_th)
+        )
+        self.frozen_action_safe_abs_min_on_u_margin = float(
+            metadata.get("abs_min_on_u_margin", self.config.abs_min_on_u_margin)
+        )
+
+    def _predict_frozen_safe_action_tensor(self, *, obs_batch):
+        if not self.safe_reference_action_enabled or self.frozen_action_safe_actor is None:
+            return None
+        with self.torch.no_grad():
+            obs_norm = (obs_batch - self.frozen_action_safe_obs_offset) / self.frozen_action_safe_obs_scale
+            safe_action = self.frozen_action_safe_actor(obs_norm)
+            return self._apply_abs_cooling_blend_tensor(
+                obs_batch=obs_batch,
+                action_batch=safe_action,
+                state_feasible_action_shaping_enabled=(
+                    self.frozen_action_safe_state_feasible_action_shaping_enabled
+                ),
+                abs_min_on_gate_th=self.frozen_action_safe_abs_min_on_gate_th,
+                abs_min_on_u_margin=self.frozen_action_safe_abs_min_on_u_margin,
+            )
+
+    def _predict_frozen_safe_action_np(self, *, observation_vector: np.ndarray) -> np.ndarray | None:
+        if not self.safe_reference_action_enabled or self.frozen_action_safe_actor is None:
+            return None
+        normalized = (
+            (np.asarray(observation_vector, dtype=np.float32).reshape(-1) - self.frozen_action_safe_obs_offset_np)
+            / self.frozen_action_safe_obs_scale_np
+        ).astype(np.float32)
+        with self.torch.no_grad():
+            tensor = self.torch.as_tensor(
+                normalized.reshape(1, -1),
+                dtype=self.torch.float32,
+                device=self.device,
+            )
+            safe_action = (
+                self.frozen_action_safe_actor(tensor).squeeze(0).detach().cpu().numpy().astype(np.float32)
+            )
+        return self._apply_abs_cooling_blend_np(
+            observation_vector=np.asarray(observation_vector, dtype=np.float32).reshape(-1),
+            action_vector=safe_action,
+            state_feasible_action_shaping_enabled=(
+                self.frozen_action_safe_state_feasible_action_shaping_enabled
+            ),
+            abs_min_on_gate_th=self.frozen_action_safe_abs_min_on_gate_th,
+            abs_min_on_u_margin=self.frozen_action_safe_abs_min_on_u_margin,
+        )
+
+    def _overwrite_frozen_action_dims_tensor(self, *, action_batch, safe_action_batch):
+        if not self.frozen_action_enabled or safe_action_batch is None:
+            return action_batch
+        blended = action_batch.clone()
+        for key in self.frozen_action_keys:
+            index = int(self.action_index[key])
+            blended[:, index : index + 1] = safe_action_batch[:, index : index + 1].detach()
+        return blended
+
+    def _clip_tes_near_safe_action_tensor(self, *, action_batch, safe_action_batch):
+        clip_delta = float(self.config.tes_safe_action_delta_clip)
+        if (
+            clip_delta <= 0.0
+            or safe_action_batch is None
+            or "u_tes" not in self.action_index
+            or "u_tes" in self.frozen_action_keys
+        ):
+            return action_batch
+        index = int(self.action_index["u_tes"])
+        safe_column = safe_action_batch[:, index : index + 1].detach()
+        lower = self.torch.clamp(
+            safe_column - clip_delta,
+            float(self.action_low_np[index]),
+            float(self.action_high_np[index]),
+        )
+        upper = self.torch.clamp(
+            safe_column + clip_delta,
+            float(self.action_low_np[index]),
+            float(self.action_high_np[index]),
+        )
+        clipped_column = self.torch.maximum(
+            self.torch.minimum(action_batch[:, index : index + 1], upper),
+            lower,
+        )
+        mask = self.torch.zeros_like(action_batch)
+        mask[:, index : index + 1] = 1.0
+        return action_batch * (1.0 - mask) + clipped_column * mask
+
+    def _clip_bes_near_safe_action_tensor(self, *, action_batch, safe_action_batch):
+        clip_delta = float(self.config.bes_safe_action_delta_clip)
+        if (
+            clip_delta <= 0.0
+            or safe_action_batch is None
+            or "u_bes" not in self.action_index
+            or "u_bes" in self.frozen_action_keys
+        ):
+            return action_batch
+        index = int(self.action_index["u_bes"])
+        safe_column = safe_action_batch[:, index : index + 1].detach()
+        lower = self.torch.clamp(
+            safe_column - clip_delta,
+            float(self.action_low_np[index]),
+            float(self.action_high_np[index]),
+        )
+        upper = self.torch.clamp(
+            safe_column + clip_delta,
+            float(self.action_low_np[index]),
+            float(self.action_high_np[index]),
+        )
+        clipped_column = self.torch.maximum(
+            self.torch.minimum(action_batch[:, index : index + 1], upper),
+            lower,
+        )
+        mask = self.torch.zeros_like(action_batch)
+        mask[:, index : index + 1] = 1.0
+        return action_batch * (1.0 - mask) + clipped_column * mask
+
+    def _clip_boiler_near_safe_action_tensor(self, *, action_batch, safe_action_batch):
+        clip_delta = float(self.config.boiler_safe_action_delta_clip)
+        if (
+            clip_delta <= 0.0
+            or safe_action_batch is None
+            or "u_boiler" not in self.action_index
+            or "u_boiler" in self.frozen_action_keys
+        ):
+            return action_batch
+        index = int(self.action_index["u_boiler"])
+        safe_column = safe_action_batch[:, index : index + 1].detach()
+        lower = self.torch.clamp(
+            safe_column - clip_delta,
+            float(self.action_low_np[index]),
+            float(self.action_high_np[index]),
+        )
+        upper = self.torch.clamp(
+            safe_column + clip_delta,
+            float(self.action_low_np[index]),
+            float(self.action_high_np[index]),
+        )
+        clipped_column = self.torch.maximum(
+            self.torch.minimum(action_batch[:, index : index + 1], upper),
+            lower,
+        )
+        mask = self.torch.zeros_like(action_batch)
+        mask[:, index : index + 1] = 1.0
+        return action_batch * (1.0 - mask) + clipped_column * mask
+
+    def _clip_abs_near_safe_action_tensor(self, *, action_batch, safe_action_batch):
+        clip_delta = float(self.config.abs_safe_action_delta_clip)
+        if (
+            clip_delta <= 0.0
+            or safe_action_batch is None
+            or "u_abs" not in self.action_index
+            or "u_abs" in self.frozen_action_keys
+        ):
+            return action_batch
+        index = int(self.action_index["u_abs"])
+        safe_column = safe_action_batch[:, index : index + 1].detach()
+        lower = self.torch.clamp(
+            safe_column - clip_delta,
+            float(self.action_low_np[index]),
+            float(self.action_high_np[index]),
+        )
+        upper = self.torch.clamp(
+            safe_column + clip_delta,
+            float(self.action_low_np[index]),
+            float(self.action_high_np[index]),
+        )
+        clipped_column = self.torch.maximum(
+            self.torch.minimum(action_batch[:, index : index + 1], upper),
+            lower,
+        )
+        mask = self.torch.zeros_like(action_batch)
+        mask[:, index : index + 1] = 1.0
+        return action_batch * (1.0 - mask) + clipped_column * mask
+
+    def _clip_ech_near_safe_action_tensor(self, *, action_batch, safe_action_batch):
+        clip_delta = float(self.config.ech_safe_action_delta_clip)
+        if (
+            clip_delta <= 0.0
+            or safe_action_batch is None
+            or "u_ech" not in self.action_index
+            or "u_ech" in self.frozen_action_keys
+        ):
+            return action_batch
+        index = int(self.action_index["u_ech"])
+        safe_column = safe_action_batch[:, index : index + 1].detach()
+        lower = self.torch.clamp(
+            safe_column - clip_delta,
+            float(self.action_low_np[index]),
+            float(self.action_high_np[index]),
+        )
+        upper = self.torch.clamp(
+            safe_column + clip_delta,
+            float(self.action_low_np[index]),
+            float(self.action_high_np[index]),
+        )
+        clipped_column = self.torch.maximum(
+            self.torch.minimum(action_batch[:, index : index + 1], upper),
+            lower,
+        )
+        mask = self.torch.zeros_like(action_batch)
+        mask[:, index : index + 1] = 1.0
+        return action_batch * (1.0 - mask) + clipped_column * mask
+
+    def _clip_gt_near_safe_action_tensor(self, *, action_batch, safe_action_batch):
+        clip_delta = float(self.config.gt_safe_action_delta_clip)
+        if (
+            clip_delta <= 0.0
+            or safe_action_batch is None
+            or "u_gt" not in self.action_index
+            or "u_gt" in self.frozen_action_keys
+        ):
+            return action_batch
+        index = int(self.action_index["u_gt"])
+        safe_column = safe_action_batch[:, index : index + 1].detach()
+        lower = self.torch.clamp(
+            safe_column - clip_delta,
+            float(self.action_low_np[index]),
+            float(self.action_high_np[index]),
+        )
+        upper = self.torch.clamp(
+            safe_column + clip_delta,
+            float(self.action_low_np[index]),
+            float(self.action_high_np[index]),
+        )
+        clipped_column = self.torch.maximum(
+            self.torch.minimum(action_batch[:, index : index + 1], upper),
+            lower,
+        )
+        mask = self.torch.zeros_like(action_batch)
+        mask[:, index : index + 1] = 1.0
+        return action_batch * (1.0 - mask) + clipped_column * mask
+
+    def _overwrite_frozen_action_dims_np(
+        self,
+        *,
+        action_vector: np.ndarray,
+        safe_action_vector: np.ndarray | None,
+    ) -> np.ndarray:
+        if not self.frozen_action_enabled or safe_action_vector is None:
+            return np.asarray(action_vector, dtype=np.float32).reshape(-1)
+        blended = np.asarray(action_vector, dtype=np.float32).reshape(-1).copy()
+        safe_vector = np.asarray(safe_action_vector, dtype=np.float32).reshape(-1)
+        for key in self.frozen_action_keys:
+            blended[int(self.action_index[key])] = float(safe_vector[int(self.action_index[key])])
+        return blended
+
+    def _clip_tes_near_safe_action_np(
+        self,
+        *,
+        action_vector: np.ndarray,
+        safe_action_vector: np.ndarray | None,
+    ) -> np.ndarray:
+        clip_delta = float(self.config.tes_safe_action_delta_clip)
+        action_np = np.asarray(action_vector, dtype=np.float32).reshape(-1).copy()
+        if (
+            clip_delta <= 0.0
+            or safe_action_vector is None
+            or "u_tes" not in self.action_index
+            or "u_tes" in self.frozen_action_keys
+        ):
+            return action_np
+        safe_vector = np.asarray(safe_action_vector, dtype=np.float32).reshape(-1)
+        index = int(self.action_index["u_tes"])
+        lower = max(float(self.action_low_np[index]), float(safe_vector[index]) - clip_delta)
+        upper = min(float(self.action_high_np[index]), float(safe_vector[index]) + clip_delta)
+        action_np[index] = float(np.clip(float(action_np[index]), lower, upper))
+        return action_np
+
+    def _clip_bes_near_safe_action_np(
+        self,
+        *,
+        action_vector: np.ndarray,
+        safe_action_vector: np.ndarray | None,
+    ) -> np.ndarray:
+        clip_delta = float(self.config.bes_safe_action_delta_clip)
+        action_np = np.asarray(action_vector, dtype=np.float32).reshape(-1).copy()
+        if (
+            clip_delta <= 0.0
+            or safe_action_vector is None
+            or "u_bes" not in self.action_index
+            or "u_bes" in self.frozen_action_keys
+        ):
+            return action_np
+        safe_vector = np.asarray(safe_action_vector, dtype=np.float32).reshape(-1)
+        index = int(self.action_index["u_bes"])
+        lower = max(float(self.action_low_np[index]), float(safe_vector[index]) - clip_delta)
+        upper = min(float(self.action_high_np[index]), float(safe_vector[index]) + clip_delta)
+        action_np[index] = float(np.clip(float(action_np[index]), lower, upper))
+        return action_np
+
+    def _clip_boiler_near_safe_action_np(
+        self,
+        *,
+        action_vector: np.ndarray,
+        safe_action_vector: np.ndarray | None,
+    ) -> np.ndarray:
+        clip_delta = float(self.config.boiler_safe_action_delta_clip)
+        action_np = np.asarray(action_vector, dtype=np.float32).reshape(-1).copy()
+        if (
+            clip_delta <= 0.0
+            or safe_action_vector is None
+            or "u_boiler" not in self.action_index
+            or "u_boiler" in self.frozen_action_keys
+        ):
+            return action_np
+        safe_vector = np.asarray(safe_action_vector, dtype=np.float32).reshape(-1)
+        index = int(self.action_index["u_boiler"])
+        lower = max(float(self.action_low_np[index]), float(safe_vector[index]) - clip_delta)
+        upper = min(float(self.action_high_np[index]), float(safe_vector[index]) + clip_delta)
+        action_np[index] = float(np.clip(float(action_np[index]), lower, upper))
+        return action_np
+
+    def _clip_abs_near_safe_action_np(
+        self,
+        *,
+        action_vector: np.ndarray,
+        safe_action_vector: np.ndarray | None,
+    ) -> np.ndarray:
+        clip_delta = float(self.config.abs_safe_action_delta_clip)
+        action_np = np.asarray(action_vector, dtype=np.float32).reshape(-1).copy()
+        if (
+            clip_delta <= 0.0
+            or safe_action_vector is None
+            or "u_abs" not in self.action_index
+            or "u_abs" in self.frozen_action_keys
+        ):
+            return action_np
+        safe_vector = np.asarray(safe_action_vector, dtype=np.float32).reshape(-1)
+        index = int(self.action_index["u_abs"])
+        lower = max(float(self.action_low_np[index]), float(safe_vector[index]) - clip_delta)
+        upper = min(float(self.action_high_np[index]), float(safe_vector[index]) + clip_delta)
+        action_np[index] = float(np.clip(float(action_np[index]), lower, upper))
+        return action_np
+
+    def _clip_ech_near_safe_action_np(
+        self,
+        *,
+        action_vector: np.ndarray,
+        safe_action_vector: np.ndarray | None,
+    ) -> np.ndarray:
+        clip_delta = float(self.config.ech_safe_action_delta_clip)
+        action_np = np.asarray(action_vector, dtype=np.float32).reshape(-1).copy()
+        if (
+            clip_delta <= 0.0
+            or safe_action_vector is None
+            or "u_ech" not in self.action_index
+            or "u_ech" in self.frozen_action_keys
+        ):
+            return action_np
+        safe_vector = np.asarray(safe_action_vector, dtype=np.float32).reshape(-1)
+        index = int(self.action_index["u_ech"])
+        lower = max(float(self.action_low_np[index]), float(safe_vector[index]) - clip_delta)
+        upper = min(float(self.action_high_np[index]), float(safe_vector[index]) + clip_delta)
+        action_np[index] = float(np.clip(float(action_np[index]), lower, upper))
+        return action_np
+
+    def _clip_gt_near_safe_action_np(
+        self,
+        *,
+        action_vector: np.ndarray,
+        safe_action_vector: np.ndarray | None,
+    ) -> np.ndarray:
+        clip_delta = float(self.config.gt_safe_action_delta_clip)
+        action_np = np.asarray(action_vector, dtype=np.float32).reshape(-1).copy()
+        if (
+            clip_delta <= 0.0
+            or safe_action_vector is None
+            or "u_gt" not in self.action_index
+            or "u_gt" in self.frozen_action_keys
+        ):
+            return action_np
+        safe_vector = np.asarray(safe_action_vector, dtype=np.float32).reshape(-1)
+        index = int(self.action_index["u_gt"])
+        lower = max(float(self.action_low_np[index]), float(safe_vector[index]) - clip_delta)
+        upper = min(float(self.action_high_np[index]), float(safe_vector[index]) + clip_delta)
+        action_np[index] = float(np.clip(float(action_np[index]), lower, upper))
+        return action_np
 
     def _normalize_observation_tensor(self, observation):
         return (observation - self.obs_offset) / self.obs_scale
@@ -3836,11 +4480,34 @@ class PAFCTD3Trainer:
             )
         return teacher_target.astype(np.float32, copy=False), teacher_mask.astype(np.float32, copy=False), True
 
-    def _apply_abs_cooling_blend_tensor(self, *, obs_batch, action_batch):
+    def _apply_abs_cooling_blend_tensor(
+        self,
+        *,
+        obs_batch,
+        action_batch,
+        state_feasible_action_shaping_enabled: bool | None = None,
+        abs_min_on_gate_th: float | None = None,
+        abs_min_on_u_margin: float | None = None,
+    ):
         shaped_columns = [
             action_batch[:, index : index + 1]
             for index in range(action_batch.shape[1])
         ]
+        feasible_shaping_enabled = (
+            bool(self.config.state_feasible_action_shaping_enabled)
+            if state_feasible_action_shaping_enabled is None
+            else bool(state_feasible_action_shaping_enabled)
+        )
+        resolved_abs_min_on_gate_th = (
+            float(self.config.abs_min_on_gate_th)
+            if abs_min_on_gate_th is None
+            else float(abs_min_on_gate_th)
+        )
+        resolved_abs_min_on_u_margin = (
+            float(self.config.abs_min_on_u_margin)
+            if abs_min_on_u_margin is None
+            else float(abs_min_on_u_margin)
+        )
 
         if "u_gt" in self.action_index and "p_gt_prev_mw" in self.observation_index:
             u_gt_index = int(self.action_index["u_gt"])
@@ -3884,7 +4551,7 @@ class PAFCTD3Trainer:
                 1.0,
             )
 
-        if bool(self.config.state_feasible_action_shaping_enabled):
+        if feasible_shaping_enabled:
             if "u_bes" in self.action_index and "soc_bes" in self.observation_index:
                 u_bes_index = int(self.action_index["u_bes"])
                 soc_index = int(self.observation_index["soc_bes"])
@@ -3950,8 +4617,8 @@ class PAFCTD3Trainer:
         invalid_req_gate_th = float(max(0.0, float(self.env_config.abs_invalid_req_gate_th)))
         abs_deadzone_gate_th = float(max(0.0, float(self.env_config.abs_deadzone_gate_th)))
         abs_deadzone_u_th = float(max(0.0, float(self.env_config.abs_deadzone_u_th)))
-        abs_effective_min_u = float(max(0.0, abs_deadzone_u_th + float(self.config.abs_min_on_u_margin)))
-        abs_min_on_gate_th = float(max(0.0, float(self.config.abs_min_on_gate_th)))
+        abs_effective_min_u = float(max(0.0, abs_deadzone_u_th + resolved_abs_min_on_u_margin))
+        abs_min_on_gate_th = float(max(0.0, resolved_abs_min_on_gate_th))
         margin = obs_batch[:, margin_index : margin_index + 1]
         abs_gate = self.torch.sigmoid(margin / gate_scale_k)
         u_abs = shaped_columns[u_abs_index]
@@ -4019,10 +4686,28 @@ class PAFCTD3Trainer:
         *,
         observation_vector: np.ndarray,
         action_vector: np.ndarray,
+        state_feasible_action_shaping_enabled: bool | None = None,
+        abs_min_on_gate_th: float | None = None,
+        abs_min_on_u_margin: float | None = None,
     ) -> np.ndarray:
         blended = np.asarray(action_vector, dtype=np.float32).copy()
+        feasible_shaping_enabled = (
+            bool(self.config.state_feasible_action_shaping_enabled)
+            if state_feasible_action_shaping_enabled is None
+            else bool(state_feasible_action_shaping_enabled)
+        )
+        resolved_abs_min_on_gate_th = (
+            float(self.config.abs_min_on_gate_th)
+            if abs_min_on_gate_th is None
+            else float(abs_min_on_gate_th)
+        )
+        resolved_abs_min_on_u_margin = (
+            float(self.config.abs_min_on_u_margin)
+            if abs_min_on_u_margin is None
+            else float(abs_min_on_u_margin)
+        )
 
-        if "u_bes" in self.action_index and "soc_bes" in self.observation_index:
+        if feasible_shaping_enabled and "u_bes" in self.action_index and "soc_bes" in self.observation_index:
             u_bes_index = int(self.action_index["u_bes"])
             soc_index = int(self.observation_index["soc_bes"])
             soc = float(observation_vector[soc_index])
@@ -4043,7 +4728,7 @@ class PAFCTD3Trainer:
             )
             blended[u_bes_index] = float(np.clip(float(blended[u_bes_index]), -max_charge_u, max_discharge_u))
 
-        if "u_tes" in self.action_index and "e_tes_mwh" in self.observation_index:
+        if feasible_shaping_enabled and "u_tes" in self.action_index and "e_tes_mwh" in self.observation_index:
             u_tes_index = int(self.action_index["u_tes"])
             e_tes_index = int(self.observation_index["e_tes_mwh"])
             e_tes = float(observation_vector[e_tes_index])
@@ -4102,8 +4787,8 @@ class PAFCTD3Trainer:
         invalid_req_gate_th = float(max(0.0, float(self.env_config.abs_invalid_req_gate_th)))
         abs_deadzone_gate_th = float(max(0.0, float(self.env_config.abs_deadzone_gate_th)))
         abs_deadzone_u_th = float(max(0.0, float(self.env_config.abs_deadzone_u_th)))
-        abs_effective_min_u = float(max(0.0, abs_deadzone_u_th + float(self.config.abs_min_on_u_margin)))
-        abs_min_on_gate_th = float(max(0.0, float(self.config.abs_min_on_gate_th)))
+        abs_effective_min_u = float(max(0.0, abs_deadzone_u_th + resolved_abs_min_on_u_margin))
+        abs_min_on_gate_th = float(max(0.0, resolved_abs_min_on_gate_th))
         margin = float(observation_vector[margin_index])
         abs_gate = float(1.0 / (1.0 + np.exp(-margin / gate_scale_k)))
         cooling_transfer_ratio = float(abs_gate * transfer_ratio)
@@ -6730,7 +7415,9 @@ class PAFCTD3Trainer:
         transition_source_labels: list[str] = []
         transition_anchor_weights: list[float] = []
         transition_seasons: list[str] = []
+        transition_local_step_indices: list[int] = []
         source_rollouts: dict[str, dict[str, Any]] = {}
+        safe_action_exec_by_step: dict[int, np.ndarray] = {}
         train_timestamps = self.train_df["timestamp"] if "timestamp" in self.train_df.columns else None
 
         def _append_rollout(
@@ -6762,6 +7449,12 @@ class PAFCTD3Trainer:
                 all_transitions.append(dict(transition))
                 transition_source_labels.append(str(source_label))
                 transition_anchor_weights.append(float(source_anchor_weight))
+                transition_local_step_indices.append(int(local_step_index))
+                if str(source_label) == "safe":
+                    safe_action_exec_by_step[int(local_step_index)] = np.asarray(
+                        transition["action_exec"],
+                        dtype=np.float32,
+                    ).copy()
                 if train_timestamps is not None and int(local_step_index) < len(train_timestamps):
                     transition_seasons.append(
                         _calendar_season_from_timestamp_value(
@@ -6785,7 +7478,9 @@ class PAFCTD3Trainer:
         if economic_policy is not None:
             economic_rollout = _append_rollout(
                 source_label="economic",
-                source_anchor_weight=0.0,
+                source_anchor_weight=float(
+                    self.config.economic_bes_warm_start_economic_anchor_weight
+                ),
                 expert_policy=economic_policy,
                 expert_policy_info=economic_policy_info,
             )
@@ -6808,7 +7503,9 @@ class PAFCTD3Trainer:
             )
             _append_rollout(
                 source_label="fallback_bidirectional",
-                source_anchor_weight=0.0,
+                source_anchor_weight=float(
+                    self.config.economic_bes_warm_start_fallback_anchor_weight
+                ),
                 expert_policy=fallback_policy,
                 expert_policy_info={
                     "mode": "easy_rule_abs",
@@ -7047,16 +7744,28 @@ class PAFCTD3Trainer:
         anchor_weight_rows: list[np.ndarray] = []
         sampled_modes = {"charge": 0, "discharge": 0, "idle": 0}
         sampled_source_counts: dict[str, int] = {}
+        safe_base_override_count = 0
         replay_augmented_steps = 0
         for idx in selected_indices:
             transition = all_transitions[int(idx)]
             obs_rows.append(np.asarray(transition["obs"], dtype=np.float32).copy())
-            action_exec_rows.append(np.asarray(transition["action_exec"], dtype=np.float32).copy())
+            source_label = str(transition_source_labels[int(idx)])
+            local_step_index = int(transition_local_step_indices[int(idx)])
+            base_action_exec = np.asarray(
+                transition["action_exec"],
+                dtype=np.float32,
+            ).copy()
+            if source_label != "safe" and local_step_index in safe_action_exec_by_step:
+                base_action_exec = np.asarray(
+                    safe_action_exec_by_step[int(local_step_index)],
+                    dtype=np.float32,
+                ).copy()
+                safe_base_override_count += 1
+            action_exec_rows.append(base_action_exec)
             anchor_weight_rows.append(
                 np.asarray([float(transition_anchor_weights[int(idx)])], dtype=np.float32)
             )
             sampled_modes[str(prior_modes[int(idx)])] += 1
-            source_label = str(transition_source_labels[int(idx)])
             sampled_source_counts[source_label] = sampled_source_counts.get(source_label, 0) + 1
             self.replay.add(
                 obs=np.asarray(transition["obs"], dtype=np.float32).copy(),
@@ -7170,6 +7879,7 @@ class PAFCTD3Trainer:
                 "sampled_source_counts": {
                     str(key): int(value) for key, value in sampled_source_counts.items()
                 },
+                "safe_base_override_count": int(safe_base_override_count),
                 "replay_augmented_steps": int(replay_augmented_steps),
                 "price_low_threshold": float(self.bes_price_low_threshold),
                 "price_high_threshold": float(self.bes_price_high_threshold),
@@ -8163,8 +8873,36 @@ class PAFCTD3Trainer:
                         bes_anchor_scale,
                         teacher_bes_anchor,
                     )
+            bes_anchor_cap = float(
+                np.clip(
+                    self.config.economic_bes_anchor_max_scale,
+                    bes_anchor_floor,
+                    1.0,
+                )
+            )
+            bes_anchor_scale = self.torch.clamp(
+                bes_anchor_scale,
+                bes_anchor_floor,
+                bes_anchor_cap,
+            )
             anchor_scale[:, u_bes_index : u_bes_index + 1] = bes_anchor_scale
         return anchor_scale
+
+    def _build_actor_low_trust_fallback_action_tensor(
+        self,
+        *,
+        action_raw_batch,
+        replay_action_exec_batch,
+    ):
+        fallback_action = replay_action_exec_batch.detach().clone()
+        for key in self.config.actor_low_trust_raw_fallback_keys:
+            if key not in self.action_index:
+                continue
+            dim_index = int(self.action_index[key])
+            fallback_action[:, dim_index : dim_index + 1] = action_raw_batch[
+                :, dim_index : dim_index + 1
+            ]
+        return fallback_action
 
     def _compute_economic_teacher_weight(
         self,
@@ -8530,9 +9268,40 @@ class PAFCTD3Trainer:
                 size=action_np.shape,
             ).astype(np.float32)
             action_np = np.clip(action_np + noise, self.action_low_np, self.action_high_np)
-        return self._apply_abs_cooling_blend_np(
+        action_np = self._apply_abs_cooling_blend_np(
             observation_vector=observation_vector,
             action_vector=action_np,
+        )
+        safe_action_np = self._predict_frozen_safe_action_np(
+            observation_vector=observation_vector,
+        )
+        action_np = self._clip_abs_near_safe_action_np(
+            action_vector=action_np,
+            safe_action_vector=safe_action_np,
+        )
+        action_np = self._clip_ech_near_safe_action_np(
+            action_vector=action_np,
+            safe_action_vector=safe_action_np,
+        )
+        action_np = self._clip_gt_near_safe_action_np(
+            action_vector=action_np,
+            safe_action_vector=safe_action_np,
+        )
+        action_np = self._clip_bes_near_safe_action_np(
+            action_vector=action_np,
+            safe_action_vector=safe_action_np,
+        )
+        action_np = self._clip_boiler_near_safe_action_np(
+            action_vector=action_np,
+            safe_action_vector=safe_action_np,
+        )
+        action_np = self._clip_tes_near_safe_action_np(
+            action_vector=action_np,
+            safe_action_vector=safe_action_np,
+        )
+        return self._overwrite_frozen_action_dims_np(
+            action_vector=action_np,
+            safe_action_vector=safe_action_np,
         )
 
     def _sample_target_noise(self, shape: tuple[int, ...]):
@@ -8584,6 +9353,18 @@ class PAFCTD3Trainer:
             "episode_idx": int(episode_idx),
             "training_complete": bool(training_complete),
             "checkpoint_role": str(checkpoint_role),
+            "frozen_action_keys": list(self.frozen_action_keys),
+            "frozen_action_safe_checkpoint_path": (
+                str(Path(self.frozen_action_safe_checkpoint_path).resolve()).replace("\\", "/")
+                if self.safe_reference_action_enabled and len(self.frozen_action_safe_checkpoint_path) > 0
+                else ""
+            ),
+            "gt_safe_action_delta_clip": float(self.config.gt_safe_action_delta_clip),
+            "bes_safe_action_delta_clip": float(self.config.bes_safe_action_delta_clip),
+            "boiler_safe_action_delta_clip": float(self.config.boiler_safe_action_delta_clip),
+            "tes_safe_action_delta_clip": float(self.config.tes_safe_action_delta_clip),
+            "abs_safe_action_delta_clip": float(self.config.abs_safe_action_delta_clip),
+            "ech_safe_action_delta_clip": float(self.config.ech_safe_action_delta_clip),
             "dual_lambdas": {
                 name: float(value)
                 for name, value in zip(_DUAL_NAMES, self.dual_lambdas)
@@ -8615,6 +9396,7 @@ class PAFCTD3Trainer:
             "p_gt_cap_mw": float(self.env_config.p_gt_cap_mw),
             "gt_min_output_mw": float(self.env_config.gt_min_output_mw),
             "dual_warmup_steps": int(self.config.dual_warmup_steps),
+            "actor_warmup_steps": int(self.config.actor_warmup_steps),
             "exec_action_anchor_coef": float(self.config.exec_action_anchor_coef),
             "exec_action_anchor_safe_floor": float(self.config.exec_action_anchor_safe_floor),
             "gt_off_deadband_ratio": float(self.config.gt_off_deadband_ratio),
@@ -8720,6 +9502,12 @@ class PAFCTD3Trainer:
             "economic_bes_full_year_warm_start_u_weight": float(
                 self.config.economic_bes_full_year_warm_start_u_weight
             ),
+            "economic_bes_warm_start_economic_anchor_weight": float(
+                self.config.economic_bes_warm_start_economic_anchor_weight
+            ),
+            "economic_bes_warm_start_fallback_anchor_weight": float(
+                self.config.economic_bes_warm_start_fallback_anchor_weight
+            ),
             "economic_bes_teacher_selection_priority_boost": float(
                 self.config.economic_bes_teacher_selection_priority_boost
             ),
@@ -8735,11 +9523,17 @@ class PAFCTD3Trainer:
             "economic_bes_teacher_target_min_share": float(
                 self.config.economic_bes_teacher_target_min_share
             ),
+            "economic_bes_anchor_max_scale": float(
+                self.config.economic_bes_anchor_max_scale
+            ),
             "surrogate_actor_trust_coef": float(
                 self.config.surrogate_actor_trust_coef
             ),
             "surrogate_actor_trust_min_scale": float(
                 self.config.surrogate_actor_trust_min_scale
+            ),
+            "actor_low_trust_raw_fallback_keys": list(
+                self.config.actor_low_trust_raw_fallback_keys
             ),
             "bes_price_low_threshold": float(self.bes_price_low_threshold),
             "bes_price_high_threshold": float(self.bes_price_high_threshold),
@@ -9079,7 +9873,12 @@ class PAFCTD3Trainer:
             )
         return plateau_event
 
-    def _update_networks(self, *, update_step: int) -> dict[str, float]:
+    def _update_networks(
+        self,
+        *,
+        update_step: int,
+        actor_update_step: int | None = None,
+    ) -> dict[str, float]:
         batch = self.replay.sample(batch_size=int(self.config.batch_size), rng=self.rng)
         obs = self.torch.as_tensor(batch["obs"], dtype=self.torch.float32, device=self.device)
         next_obs = self.torch.as_tensor(batch["next_obs"], dtype=self.torch.float32, device=self.device)
@@ -9117,6 +9916,35 @@ class PAFCTD3Trainer:
             next_action_raw = self._apply_abs_cooling_blend_tensor(
                 obs_batch=next_obs,
                 action_batch=next_action_raw,
+            )
+            next_safe_action = self._predict_frozen_safe_action_tensor(obs_batch=next_obs)
+            next_action_raw = self._clip_abs_near_safe_action_tensor(
+                action_batch=next_action_raw,
+                safe_action_batch=next_safe_action,
+            )
+            next_action_raw = self._clip_ech_near_safe_action_tensor(
+                action_batch=next_action_raw,
+                safe_action_batch=next_safe_action,
+            )
+            next_action_raw = self._clip_gt_near_safe_action_tensor(
+                action_batch=next_action_raw,
+                safe_action_batch=next_safe_action,
+            )
+            next_action_raw = self._clip_bes_near_safe_action_tensor(
+                action_batch=next_action_raw,
+                safe_action_batch=next_safe_action,
+            )
+            next_action_raw = self._clip_boiler_near_safe_action_tensor(
+                action_batch=next_action_raw,
+                safe_action_batch=next_safe_action,
+            )
+            next_action_raw = self._clip_tes_near_safe_action_tensor(
+                action_batch=next_action_raw,
+                safe_action_batch=next_safe_action,
+            )
+            next_action_raw = self._overwrite_frozen_action_dims_tensor(
+                action_batch=next_action_raw,
+                safe_action_batch=next_safe_action,
             )
             next_action_exec_hat = self.surrogate.project(next_obs, next_action_raw)
             # For bootstrap targets we do not have a real executed next action in replay.
@@ -9180,23 +10008,60 @@ class PAFCTD3Trainer:
         mean_constraint_value = float("nan")
         surrogate_actor_trust_mean_value = float("nan")
         surrogate_actor_trust_min_value = float("nan")
+        actor_step = int(update_step) if actor_update_step is None else int(actor_update_step)
         dual_scale_value = float(
             min(
                 1.0,
                 float(update_step) / max(1.0, float(self.config.dual_warmup_steps)),
             )
         ) if int(self.config.dual_warmup_steps) > 0 else 1.0
-        if update_step % int(self.config.actor_delay) == 0:
+        if (
+            actor_step >= int(self.config.actor_warmup_steps)
+            and update_step % int(self.config.actor_delay) == 0
+        ):
             action_raw = self.actor(obs_norm)
             action_raw = self._apply_abs_cooling_blend_tensor(
                 obs_batch=obs,
                 action_batch=action_raw,
             )
+            safe_action_raw = self._predict_frozen_safe_action_tensor(obs_batch=obs)
+            action_raw = self._clip_abs_near_safe_action_tensor(
+                action_batch=action_raw,
+                safe_action_batch=safe_action_raw,
+            )
+            action_raw = self._clip_ech_near_safe_action_tensor(
+                action_batch=action_raw,
+                safe_action_batch=safe_action_raw,
+            )
+            action_raw = self._clip_gt_near_safe_action_tensor(
+                action_batch=action_raw,
+                safe_action_batch=safe_action_raw,
+            )
+            action_raw = self._clip_bes_near_safe_action_tensor(
+                action_batch=action_raw,
+                safe_action_batch=safe_action_raw,
+            )
+            action_raw = self._clip_boiler_near_safe_action_tensor(
+                action_batch=action_raw,
+                safe_action_batch=safe_action_raw,
+            )
+            action_raw = self._clip_tes_near_safe_action_tensor(
+                action_batch=action_raw,
+                safe_action_batch=safe_action_raw,
+            )
+            action_raw = self._overwrite_frozen_action_dims_tensor(
+                action_batch=action_raw,
+                safe_action_batch=safe_action_raw,
+            )
             action_exec_hat = self.surrogate.project(obs, action_raw)
             surrogate_actor_trust = self.surrogate_actor_trust_weight
+            fallback_action_for_actor = self._build_actor_low_trust_fallback_action_tensor(
+                action_raw_batch=action_raw,
+                replay_action_exec_batch=action_exec,
+            )
             action_exec_for_actor = _blend_surrogate_action_proxy(
                 action_exec_hat=action_exec_hat,
-                fallback_action=action_exec.detach(),
+                fallback_action=fallback_action_for_actor,
                 trust_weight=surrogate_actor_trust,
             )
             reward_actor = self.torch.minimum(
@@ -9596,7 +10461,10 @@ class PAFCTD3Trainer:
                     and total_env_steps >= int(effective_warmup_steps)
                 ):
                     for _ in range(int(self.config.updates_per_step)):
-                        latest_update_metrics = self._update_networks(update_step=total_env_steps)
+                        latest_update_metrics = self._update_networks(
+                            update_step=total_env_steps,
+                            actor_update_step=total_env_steps,
+                        )
 
                 if total_env_steps >= next_checkpoint_step:
                     retained_checkpoint_path = self._save_actor_checkpoint(
@@ -9714,6 +10582,7 @@ class PAFCTD3Trainer:
             "episode_days": int(self.config.episode_days),
             "warmup_steps": int(self.config.warmup_steps),
             "effective_warmup_steps": int(effective_warmup_steps),
+            "actor_warmup_steps": int(self.config.actor_warmup_steps),
             "batch_size": int(self.config.batch_size),
             "updates_per_step": int(self.config.updates_per_step),
             "gamma": float(self.config.gamma),
@@ -10018,7 +10887,18 @@ def load_pafc_td3_predictor(
 ):
     torch, _, _, _ = _require_torch_modules()
     target_device = resolve_torch_device(device)
-    payload = load_policy(checkpoint_path, map_location=target_device)
+    checkpoint_entry_path = Path(str(checkpoint_path)).expanduser()
+    checkpoint_resolved_path = checkpoint_entry_path
+    if checkpoint_entry_path.suffix.lower() == ".json":
+        entry_payload = _json_payload_from_path(checkpoint_entry_path)
+        artifact_type = str(entry_payload.get("artifact_type", "")).strip().lower()
+        if artifact_type != "pafc_td3_actor":
+            raise ValueError("load_pafc_td3_predictor 仅支持 pafc_td3_actor json/pt checkpoint。")
+        resolved = entry_payload.get("checkpoint_path")
+        if not isinstance(resolved, str) or len(resolved.strip()) == 0:
+            raise ValueError("pafc_td3_actor.json 缺少 checkpoint_path。")
+        checkpoint_resolved_path = Path(resolved).expanduser()
+    payload = load_policy(checkpoint_resolved_path, map_location=target_device)
     metadata = dict(payload["metadata"])
     observation_keys = tuple(str(key) for key in metadata.get("observation_keys", ()))
     action_keys = tuple(str(key) for key in metadata.get("action_keys", ()))
@@ -10035,6 +10915,53 @@ def load_pafc_td3_predictor(
     scale = np.where(np.abs(scale) < _NORM_EPS, 1.0, scale)
     observation_index = {key: idx for idx, key in enumerate(observation_keys)}
     action_index = {key: idx for idx, key in enumerate(action_keys)}
+    frozen_action_keys = tuple(
+        key
+        for key in _normalize_action_key_tuple(metadata.get("frozen_action_keys", ()))
+        if key in action_index
+    )
+    frozen_action_safe_checkpoint_path = str(
+        metadata.get("frozen_action_safe_checkpoint_path", "")
+    ).strip()
+    gt_safe_action_delta_clip = float(metadata.get("gt_safe_action_delta_clip", 0.0))
+    bes_safe_action_delta_clip = float(metadata.get("bes_safe_action_delta_clip", 0.0))
+    boiler_safe_action_delta_clip = float(metadata.get("boiler_safe_action_delta_clip", 0.0))
+    tes_safe_action_delta_clip = float(metadata.get("tes_safe_action_delta_clip", 0.0))
+    abs_safe_action_delta_clip = float(metadata.get("abs_safe_action_delta_clip", 0.0))
+    ech_safe_action_delta_clip = float(metadata.get("ech_safe_action_delta_clip", 0.0))
+    frozen_action_safe_predictor = None
+    if (
+        frozen_action_keys
+        or gt_safe_action_delta_clip > 0.0
+        or bes_safe_action_delta_clip > 0.0
+        or boiler_safe_action_delta_clip > 0.0
+        or tes_safe_action_delta_clip > 0.0
+        or abs_safe_action_delta_clip > 0.0
+        or ech_safe_action_delta_clip > 0.0
+    ):
+        if len(frozen_action_safe_checkpoint_path) == 0:
+            raise ValueError(
+                "checkpoint metadata 缺少 frozen_action_safe_checkpoint_path，无法恢复安全参考动作。"
+            )
+        current_resolved = checkpoint_resolved_path.resolve()
+        safe_entry_path = Path(frozen_action_safe_checkpoint_path).expanduser()
+        safe_resolved = safe_entry_path.resolve()
+        if safe_entry_path.suffix.lower() == ".json":
+            safe_entry_payload = _json_payload_from_path(safe_entry_path)
+            safe_artifact_type = str(safe_entry_payload.get("artifact_type", "")).strip().lower()
+            if safe_artifact_type != "pafc_td3_actor":
+                raise ValueError("冻结安全策略 metadata 仅支持 pafc_td3_actor json/pt checkpoint。")
+            safe_checkpoint_payload = safe_entry_payload.get("checkpoint_path")
+            if not isinstance(safe_checkpoint_payload, str) or len(safe_checkpoint_payload.strip()) == 0:
+                raise ValueError("冻结安全策略 pafc_td3_actor.json 缺少 checkpoint_path。")
+            safe_resolved = Path(safe_checkpoint_payload).expanduser().resolve()
+        if safe_resolved == current_resolved:
+            raise ValueError("冻结安全策略 checkpoint 不能指向当前 PAFC actor 本身。")
+        frozen_action_safe_predictor, _ = load_pafc_td3_predictor(
+            checkpoint_path=safe_entry_path,
+            device=device,
+            env_config=env_config,
+        )
     abs_cooling_blend_enabled = bool(metadata.get("abs_cooling_blend_enabled", False))
     abs_to_ech_transfer_ratio = float(metadata.get("abs_to_ech_transfer_ratio", 0.0))
     gate_scale_k = max(_NORM_EPS, float(metadata.get("abs_gate_scale_k", 2.0)))
@@ -10222,6 +11149,101 @@ def load_pafc_td3_predictor(
             action[u_ech_index] = float(
                 np.clip(u_ech_safe - abs_increase * cooling_transfer_ratio, 0.0, 1.0)
             )
+        if frozen_action_safe_predictor is not None:
+            safe_action = dict(
+                frozen_action_safe_predictor(
+                    observation if isinstance(observation, Mapping) else obs_vector
+                )
+            )
+            if (
+                abs_safe_action_delta_clip > 0.0
+                and "u_abs" in action_index
+                and "u_abs" not in frozen_action_keys
+            ):
+                u_abs_index = int(action_index["u_abs"])
+                safe_abs = float(safe_action["u_abs"])
+                abs_low, abs_high = _ACTION_BOUNDS["u_abs"]
+                action[u_abs_index] = float(
+                    np.clip(
+                        float(action[u_abs_index]),
+                        max(abs_low, safe_abs - abs_safe_action_delta_clip),
+                        min(abs_high, safe_abs + abs_safe_action_delta_clip),
+                    )
+                )
+            if (
+                ech_safe_action_delta_clip > 0.0
+                and "u_ech" in action_index
+                and "u_ech" not in frozen_action_keys
+            ):
+                u_ech_index = int(action_index["u_ech"])
+                safe_ech = float(safe_action["u_ech"])
+                ech_low, ech_high = _ACTION_BOUNDS["u_ech"]
+                action[u_ech_index] = float(
+                    np.clip(
+                        float(action[u_ech_index]),
+                        max(ech_low, safe_ech - ech_safe_action_delta_clip),
+                        min(ech_high, safe_ech + ech_safe_action_delta_clip),
+                    )
+                )
+            if (
+                gt_safe_action_delta_clip > 0.0
+                and "u_gt" in action_index
+                and "u_gt" not in frozen_action_keys
+            ):
+                u_gt_index = int(action_index["u_gt"])
+                safe_gt = float(safe_action["u_gt"])
+                action[u_gt_index] = float(
+                    np.clip(
+                        float(action[u_gt_index]),
+                        max(-1.0, safe_gt - gt_safe_action_delta_clip),
+                        min(1.0, safe_gt + gt_safe_action_delta_clip),
+                    )
+                )
+            if (
+                bes_safe_action_delta_clip > 0.0
+                and "u_bes" in action_index
+                and "u_bes" not in frozen_action_keys
+            ):
+                u_bes_index = int(action_index["u_bes"])
+                safe_bes = float(safe_action["u_bes"])
+                action[u_bes_index] = float(
+                    np.clip(
+                        float(action[u_bes_index]),
+                        max(-1.0, safe_bes - bes_safe_action_delta_clip),
+                        min(1.0, safe_bes + bes_safe_action_delta_clip),
+                    )
+                )
+            if (
+                boiler_safe_action_delta_clip > 0.0
+                and "u_boiler" in action_index
+                and "u_boiler" not in frozen_action_keys
+            ):
+                u_boiler_index = int(action_index["u_boiler"])
+                safe_boiler = float(safe_action["u_boiler"])
+                boiler_low, boiler_high = _ACTION_BOUNDS["u_boiler"]
+                action[u_boiler_index] = float(
+                    np.clip(
+                        float(action[u_boiler_index]),
+                        max(boiler_low, safe_boiler - boiler_safe_action_delta_clip),
+                        min(boiler_high, safe_boiler + boiler_safe_action_delta_clip),
+                    )
+                )
+            if (
+                tes_safe_action_delta_clip > 0.0
+                and "u_tes" in action_index
+                and "u_tes" not in frozen_action_keys
+            ):
+                u_tes_index = int(action_index["u_tes"])
+                safe_tes = float(safe_action["u_tes"])
+                action[u_tes_index] = float(
+                    np.clip(
+                        float(action[u_tes_index]),
+                        max(-1.0, safe_tes - tes_safe_action_delta_clip),
+                        min(1.0, safe_tes + tes_safe_action_delta_clip),
+                    )
+                )
+            for key in frozen_action_keys:
+                action[int(action_index[key])] = float(safe_action[key])
         return _action_vector_to_dict(action, action_keys=action_keys)
 
     return predictor, metadata
