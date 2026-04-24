@@ -663,17 +663,17 @@ def plot_multi_seed_frontier(bundle: dict[str, Any]) -> plt.Figure:
         )
 
     baseline_colors = {
-        "Oracle MILP (strict, h32)": "#222222",
         "Rule baseline (h16)": "#8A8F97",
     }
     for _, row in bundle["baselines"].iterrows():
+        if "Oracle" in str(row["label"]):
+            continue
         color = baseline_colors.get(str(row["label"]), "#555555")
-        marker = "D" if "Oracle" in str(row["label"]) else "s"
         ax.scatter(
             row["rel_cool"],
             row["total_cost_m"],
             s=62,
-            marker=marker,
+            marker="s",
             color="#FBF8F2",
             edgecolor=color,
             linewidth=1.2,
@@ -1164,8 +1164,8 @@ def plot_case_window(bundle: dict[str, Any], results_root: Path) -> plt.Figure:
         .loc[CASE_MODELS]
         .reset_index()
     )
-    fig, axes = plt.subplots(2, 3, figsize=(11.8, 6.6), sharex="col")
-    fig.subplots_adjust(left=0.07, right=0.965, bottom=0.15, top=0.84, wspace=0.20, hspace=0.20)
+    fig, axes = plt.subplots(2, 3, figsize=(12.8, 5.95), sharex="col")
+    fig.subplots_adjust(left=0.045, right=0.992, bottom=0.16, top=0.855, wspace=0.15, hspace=0.18)
 
     cool_max = float(case_df["cooling_demand_mw"].max()) * 1.08
     gt_max = float(case_df["gt_power_mw"].clip(lower=0.0).max()) * 1.08
@@ -1326,22 +1326,22 @@ def plot_case_window(bundle: dict[str, Any], results_root: Path) -> plt.Figure:
         handles=legend_handles,
         loc="upper center",
         ncol=3,
-        bbox_to_anchor=(0.5, 1.01),
+        bbox_to_anchor=(0.5, 1.005),
         columnspacing=1.2,
         handlelength=2.2,
     )
-    fig.suptitle("Representative high-cooling-load dispatch composition", fontsize=14.5, fontweight="semibold", color="#1D232A", y=0.95)
+    fig.suptitle("Representative high-cooling-load dispatch composition", fontsize=14.0, fontweight="semibold", color="#1D232A", y=0.958)
     fig.text(
-        0.07,
-        0.06,
+        0.045,
+        0.066,
         "The 24 h window is selected by the highest rolling-average cooling demand on the shared 2025 horizon.",
         fontsize=9.0,
         color="#5F5A53",
         ha="left",
     )
     fig.text(
-        0.07,
-        0.025,
+        0.045,
+        0.032,
         "The panel notes summarize the within-window mechanism: DPAR preserves the rbDQN anchor pattern while trimming boiler-side support, rbDQN keeps the discrete anchor without continuous boiler refinement, and DDPG remains a cost-oriented continuous residual baseline.",
         fontsize=9.0,
         color="#5F5A53",
