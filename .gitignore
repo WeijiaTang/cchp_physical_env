@@ -11,6 +11,7 @@ wheels/
 .windsurfrules
 .ace-tool/
 reference/
+.omx/
 # IDE
 .kiro
 .wind*
@@ -40,6 +41,9 @@ results/figures/paper/latest_kaggle_mlp/pdf
 *.pdf
 results/paper/drl_with_mlp/snapshots/
 results
+cchp-paper/*.md
+cchp-paper/*.txt
+cchp-paper/figures/
 cchp-paper/figures/scientific-figure/*-plot/
 cchp-paper/bib/check.ps1
 scripts/experiments/

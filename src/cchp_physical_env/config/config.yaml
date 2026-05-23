@@ -18,18 +18,68 @@ env:
   ua_mw_per_k: 0.06
   sigma_per_hour: 0.002  # TES 热损耗率（每小时）。工程实际：良好保温约 0.1~0.5%/h；原值 0.02 过高（每步损耗 0.5%，全年累计极大）
   cop_nominal: 0.75
-  abs_t_drive_min_k: 348.15
+  # ABS：按单效热水 LiBr 机组的调度代理校核，75°C 过于乐观，改为 85/95°C 激活/额定点
+  abs_t_drive_min_k: 358.15
   abs_t_drive_ref_k: 368.15
   abs_cop_min_fraction: 0.50
-  m_exh_per_fuel_ratio: 18.0
+  abs_t_cooling_water_ref_k: 303.15
+  abs_t_evap_ref_k: 280.15
+  abs_cooling_water_approach_k: 5.0
+  abs_cooling_tower_wetbulb_depression_k: 4.0
+  abs_cooling_tower_range_design_k: 5.0
+  abs_cooling_tower_load_exponent: 0.60
+  abs_evap_temp_k: 280.15
+  chilled_water_supply_k: 280.15
+  chilled_water_return_k: 285.15
+  abs_cop_cooling_water_slope_per_k: 0.012
+  abs_cop_evap_slope_per_k: 0.010
+  abs_cop_partload_min_fraction: 0.85
+  abs_cop_partload_curve_exp: 1.20
+  # GT：m_exh/fuel 用稀燃燃机量级（约 50--70 kg/kg），原 18 更接近化学计量空燃比，低估排烟热容流率
+  m_exh_per_fuel_ratio: 65.0
   t_exh_offset_k: 220.0
-  t_exh_slope_k_per_mw: 2.0
+  t_exh_slope_k_per_mw: 0.0
+  gt_eta_curve_exp: 1.0
+  gt_eta_frac_25: 0.66
+  gt_eta_frac_50: 0.79
+  gt_eta_frac_75: 0.91
+  gt_eta_frac_100: 1.00
+  gt_t_exh_load_curve_exp: 1.0
+  gt_t_exh_min_k: 620.0
+  gt_t_exh_max_k: 850.0
+  gt_exh_temp_k_25: 673.15
+  gt_exh_temp_k_50: 733.15
+  gt_exh_temp_k_75: 773.15
+  gt_exh_temp_k_100: 793.15
+  gt_exh_flow_frac_25: 0.42
+  gt_exh_flow_frac_50: 0.62
+  gt_exh_flow_frac_75: 0.82
+  gt_exh_flow_frac_100: 1.00
+  hrsg_cp_exh_kj_per_kgk: 1.10
+  hrsg_cp_water_kj_per_kgk: 4.18
+  hrsg_t_w_out_max_k: 393.15
+  hrsg_t_exh_out_min_k: 380.15
+  hrsg_m_exh_ref_kg_per_s: 45.0
+  hrsg_k_a_flow_exponent: 0.80
+  hrsg_water_flow_min_fraction: 0.35
+  hrsg_water_flow_max_fraction: 1.10
+  hrsg_water_flow_exponent: 0.65
+  hrsg_pinch_min_k: 15.0
+  # ECH：水冷电制冷机额定 COP 使用工程常见量级；IPLV/NPLV 优势由部分负荷曲线体现
+  ech_cop_nominal: 5.2
+  ech_cop_floor: 3.0
+  ech_cop_temp_slope_per_k: 0.03
+  ech_cop_ref_temp_k: 303.15
+  ech_condenser_water_approach_k: 5.0
+  ech_cooling_tower_wetbulb_depression_k: 4.0
+  ech_cooling_tower_range_design_k: 5.0
+  ech_cooling_tower_load_exponent: 0.60
 
   # GT/BES 电侧参数（部分建议不改：影响可比性）
   p_gt_cap_mw: 12.0
   gt_min_output_mw: 1.0
   gt_ramp_mw_per_step: 2.5
-  gt_eta_min: 0.26
+  gt_eta_min: 0.20
   gt_eta_max: 0.36
   gas_lhv_mj_per_kg: 50.0
   gt_om_var_cost_per_mwh: 20.0

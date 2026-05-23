@@ -307,6 +307,58 @@ ENV_NUMERIC_RULES: dict[str, tuple[Callable[[float], bool], str]] = {
         lambda value: 0.0 <= value <= 1.0,
         "abs_cop_min_fraction 必须在 [0,1]。",
     ),
+    "abs_t_cooling_water_ref_k": (
+        lambda value: value > 273.15,
+        "abs_t_cooling_water_ref_k 必须 > 273.15K。",
+    ),
+    "abs_t_evap_ref_k": (
+        lambda value: value > 250.0,
+        "abs_t_evap_ref_k 必须 > 250K。",
+    ),
+    "abs_cooling_water_approach_k": (
+        lambda value: value >= 0.0,
+        "abs_cooling_water_approach_k 必须 >= 0。",
+    ),
+    "abs_cooling_tower_wetbulb_depression_k": (
+        lambda value: value >= 0.0,
+        "abs_cooling_tower_wetbulb_depression_k 必须 >= 0。",
+    ),
+    "abs_cooling_tower_range_design_k": (
+        lambda value: value >= 0.0,
+        "abs_cooling_tower_range_design_k 必须 >= 0。",
+    ),
+    "abs_cooling_tower_load_exponent": (
+        lambda value: value > 0.0,
+        "abs_cooling_tower_load_exponent 必须 > 0。",
+    ),
+    "abs_evap_temp_k": (
+        lambda value: value > 250.0,
+        "abs_evap_temp_k 必须 > 250K。",
+    ),
+    "chilled_water_supply_k": (
+        lambda value: value > 250.0,
+        "chilled_water_supply_k 必须 > 250K。",
+    ),
+    "chilled_water_return_k": (
+        lambda value: value > 250.0,
+        "chilled_water_return_k 必须 > 250K。",
+    ),
+    "abs_cop_cooling_water_slope_per_k": (
+        lambda value: value >= 0.0,
+        "abs_cop_cooling_water_slope_per_k 必须 >= 0。",
+    ),
+    "abs_cop_evap_slope_per_k": (
+        lambda value: value >= 0.0,
+        "abs_cop_evap_slope_per_k 必须 >= 0。",
+    ),
+    "abs_cop_partload_min_fraction": (
+        lambda value: 0.0 < value <= 1.0,
+        "abs_cop_partload_min_fraction 必须在 (0,1]。",
+    ),
+    "abs_cop_partload_curve_exp": (
+        lambda value: value > 0.0,
+        "abs_cop_partload_curve_exp 必须 > 0。",
+    ),
     "abs_deadzone_gate_th": (
         lambda value: 0.0 <= value <= 1.0,
         "abs_deadzone_gate_th 必须在 [0,1]。",
@@ -334,6 +386,142 @@ ENV_NUMERIC_RULES: dict[str, tuple[Callable[[float], bool], str]] = {
     "ech_cop_partload_curve_exp": (
         lambda value: value > 0.0,
         "ech_cop_partload_curve_exp 必须 > 0。",
+    ),
+    "gt_eta_curve_exp": (
+        lambda value: value > 0.0,
+        "gt_eta_curve_exp 必须 > 0。",
+    ),
+    "gt_eta_frac_25": (
+        lambda value: 0.0 < value <= 1.5,
+        "gt_eta_frac_25 必须在 (0,1.5]。",
+    ),
+    "gt_eta_frac_50": (
+        lambda value: 0.0 < value <= 1.5,
+        "gt_eta_frac_50 必须在 (0,1.5]。",
+    ),
+    "gt_eta_frac_75": (
+        lambda value: 0.0 < value <= 1.5,
+        "gt_eta_frac_75 必须在 (0,1.5]。",
+    ),
+    "gt_eta_frac_100": (
+        lambda value: 0.0 < value <= 1.5,
+        "gt_eta_frac_100 必须在 (0,1.5]。",
+    ),
+    "gt_t_exh_load_curve_exp": (
+        lambda value: value > 0.0,
+        "gt_t_exh_load_curve_exp 必须 > 0。",
+    ),
+    "gt_t_exh_min_k": (
+        lambda value: value > 273.15,
+        "gt_t_exh_min_k 必须 > 273.15K。",
+    ),
+    "gt_t_exh_max_k": (
+        lambda value: value > 273.15,
+        "gt_t_exh_max_k 必须 > 273.15K。",
+    ),
+    "gt_exh_temp_k_25": (
+        lambda value: value > 273.15,
+        "gt_exh_temp_k_25 必须 > 273.15K。",
+    ),
+    "gt_exh_temp_k_50": (
+        lambda value: value > 273.15,
+        "gt_exh_temp_k_50 必须 > 273.15K。",
+    ),
+    "gt_exh_temp_k_75": (
+        lambda value: value > 273.15,
+        "gt_exh_temp_k_75 必须 > 273.15K。",
+    ),
+    "gt_exh_temp_k_100": (
+        lambda value: value > 273.15,
+        "gt_exh_temp_k_100 必须 > 273.15K。",
+    ),
+    "gt_exh_flow_frac_25": (
+        lambda value: value > 0.0,
+        "gt_exh_flow_frac_25 必须 > 0。",
+    ),
+    "gt_exh_flow_frac_50": (
+        lambda value: value > 0.0,
+        "gt_exh_flow_frac_50 必须 > 0。",
+    ),
+    "gt_exh_flow_frac_75": (
+        lambda value: value > 0.0,
+        "gt_exh_flow_frac_75 必须 > 0。",
+    ),
+    "gt_exh_flow_frac_100": (
+        lambda value: value > 0.0,
+        "gt_exh_flow_frac_100 必须 > 0。",
+    ),
+    "hrsg_cp_exh_kj_per_kgk": (
+        lambda value: value > 0.0,
+        "hrsg_cp_exh_kj_per_kgk 必须 > 0。",
+    ),
+    "hrsg_cp_water_kj_per_kgk": (
+        lambda value: value > 0.0,
+        "hrsg_cp_water_kj_per_kgk 必须 > 0。",
+    ),
+    "hrsg_t_w_out_max_k": (
+        lambda value: value > 273.15,
+        "hrsg_t_w_out_max_k 必须 > 273.15K。",
+    ),
+    "hrsg_t_exh_out_min_k": (
+        lambda value: value > 273.15,
+        "hrsg_t_exh_out_min_k 必须 > 273.15K。",
+    ),
+    "hrsg_m_exh_ref_kg_per_s": (
+        lambda value: value > 0.0,
+        "hrsg_m_exh_ref_kg_per_s 必须 > 0。",
+    ),
+    "hrsg_k_a_flow_exponent": (
+        lambda value: value > 0.0,
+        "hrsg_k_a_flow_exponent 必须 > 0。",
+    ),
+    "hrsg_water_flow_min_fraction": (
+        lambda value: value >= 0.0,
+        "hrsg_water_flow_min_fraction 必须 >= 0。",
+    ),
+    "hrsg_water_flow_max_fraction": (
+        lambda value: value > 0.0,
+        "hrsg_water_flow_max_fraction 必须 > 0。",
+    ),
+    "hrsg_water_flow_exponent": (
+        lambda value: value > 0.0,
+        "hrsg_water_flow_exponent 必须 > 0。",
+    ),
+    "hrsg_pinch_min_k": (
+        lambda value: value >= 0.0,
+        "hrsg_pinch_min_k 必须 >= 0。",
+    ),
+    "ech_cop_nominal": (
+        lambda value: value > 0.0,
+        "ech_cop_nominal 必须 > 0。",
+    ),
+    "ech_cop_floor": (
+        lambda value: value > 0.0,
+        "ech_cop_floor 必须 > 0。",
+    ),
+    "ech_cop_temp_slope_per_k": (
+        lambda value: value >= 0.0,
+        "ech_cop_temp_slope_per_k 必须 >= 0。",
+    ),
+    "ech_cop_ref_temp_k": (
+        lambda value: value > 273.15,
+        "ech_cop_ref_temp_k 必须 > 273.15K。",
+    ),
+    "ech_condenser_water_approach_k": (
+        lambda value: value >= 0.0,
+        "ech_condenser_water_approach_k 必须 >= 0。",
+    ),
+    "ech_cooling_tower_wetbulb_depression_k": (
+        lambda value: value >= 0.0,
+        "ech_cooling_tower_wetbulb_depression_k 必须 >= 0。",
+    ),
+    "ech_cooling_tower_range_design_k": (
+        lambda value: value >= 0.0,
+        "ech_cooling_tower_range_design_k 必须 >= 0。",
+    ),
+    "ech_cooling_tower_load_exponent": (
+        lambda value: value > 0.0,
+        "ech_cooling_tower_load_exponent 必须 > 0。",
     ),
     "abs_boiler_assist_max_mw": (
         lambda value: value >= 0.0,
@@ -616,6 +804,30 @@ def build_env_config_from_overrides(
 
     if float(values["abs_t_drive_ref_k"]) <= float(values["abs_t_drive_min_k"]):
         raise ValueError("abs_t_drive_ref_k 必须大于 abs_t_drive_min_k。")
+    if float(values["gt_t_exh_max_k"]) <= float(values["gt_t_exh_min_k"]):
+        raise ValueError("gt_t_exh_max_k 必须大于 gt_t_exh_min_k。")
+    if float(values["hrsg_t_w_out_max_k"]) <= float(values["hrsg_water_inlet_k"]):
+        raise ValueError("hrsg_t_w_out_max_k 必须大于 hrsg_water_inlet_k。")
+    if float(values["ech_cop_floor"]) > float(values["ech_cop_nominal"]):
+        raise ValueError("ech_cop_floor 必须小于等于 ech_cop_nominal。")
+    if float(values["chilled_water_return_k"]) <= float(values["chilled_water_supply_k"]):
+        raise ValueError("chilled_water_return_k 必须大于 chilled_water_supply_k。")
+    if float(values["hrsg_water_flow_max_fraction"]) < float(values["hrsg_water_flow_min_fraction"]):
+        raise ValueError("hrsg_water_flow_max_fraction 必须大于等于 hrsg_water_flow_min_fraction。")
+    if not (
+        float(values["gt_eta_frac_25"])
+        <= float(values["gt_eta_frac_50"])
+        <= float(values["gt_eta_frac_75"])
+        <= float(values["gt_eta_frac_100"])
+    ):
+        raise ValueError("GT part-load eta fraction map 必须随负荷非递减。")
+    if not (
+        float(values["gt_exh_flow_frac_25"])
+        <= float(values["gt_exh_flow_frac_50"])
+        <= float(values["gt_exh_flow_frac_75"])
+        <= float(values["gt_exh_flow_frac_100"])
+    ):
+        raise ValueError("GT exhaust-flow fraction map 必须随负荷非递减。")
 
     return EnvConfig(**values)
 

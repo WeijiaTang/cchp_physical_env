@@ -105,9 +105,56 @@ class EnvConfig:
     abs_t_drive_min_k: float
     abs_t_drive_ref_k: float
     abs_cop_min_fraction: float
+    abs_t_cooling_water_ref_k: float
+    abs_t_evap_ref_k: float
+    abs_cooling_water_approach_k: float
+    abs_cooling_tower_wetbulb_depression_k: float
+    abs_cooling_tower_range_design_k: float
+    abs_cooling_tower_load_exponent: float
+    abs_evap_temp_k: float
+    chilled_water_supply_k: float
+    chilled_water_return_k: float
+    abs_cop_cooling_water_slope_per_k: float
+    abs_cop_evap_slope_per_k: float
+    abs_cop_partload_min_fraction: float
+    abs_cop_partload_curve_exp: float
     m_exh_per_fuel_ratio: float
     t_exh_offset_k: float
     t_exh_slope_k_per_mw: float
+    gt_eta_curve_exp: float
+    gt_eta_frac_25: float
+    gt_eta_frac_50: float
+    gt_eta_frac_75: float
+    gt_eta_frac_100: float
+    gt_t_exh_load_curve_exp: float
+    gt_t_exh_min_k: float
+    gt_t_exh_max_k: float
+    gt_exh_temp_k_25: float
+    gt_exh_temp_k_50: float
+    gt_exh_temp_k_75: float
+    gt_exh_temp_k_100: float
+    gt_exh_flow_frac_25: float
+    gt_exh_flow_frac_50: float
+    gt_exh_flow_frac_75: float
+    gt_exh_flow_frac_100: float
+    hrsg_cp_exh_kj_per_kgk: float
+    hrsg_cp_water_kj_per_kgk: float
+    hrsg_t_w_out_max_k: float
+    hrsg_t_exh_out_min_k: float
+    hrsg_m_exh_ref_kg_per_s: float
+    hrsg_k_a_flow_exponent: float
+    hrsg_water_flow_min_fraction: float
+    hrsg_water_flow_max_fraction: float
+    hrsg_water_flow_exponent: float
+    hrsg_pinch_min_k: float
+    ech_cop_nominal: float
+    ech_cop_floor: float
+    ech_cop_temp_slope_per_k: float
+    ech_cop_ref_temp_k: float
+    ech_condenser_water_approach_k: float
+    ech_cooling_tower_wetbulb_depression_k: float
+    ech_cooling_tower_range_design_k: float
+    ech_cooling_tower_load_exponent: float
 
     p_gt_cap_mw: float
     gt_min_output_mw: float
@@ -298,11 +345,27 @@ class CCHPPhysicalEnv:
                 p_gt_cap_mw=self.config.p_gt_cap_mw,
                 gt_eta_min=self.config.gt_eta_min,
                 gt_eta_max=self.config.gt_eta_max,
+                gt_eta_curve_exp=self.config.gt_eta_curve_exp,
+                gt_eta_frac_25=self.config.gt_eta_frac_25,
+                gt_eta_frac_50=self.config.gt_eta_frac_50,
+                gt_eta_frac_75=self.config.gt_eta_frac_75,
+                gt_eta_frac_100=self.config.gt_eta_frac_100,
                 gas_lhv_mj_per_kg=self.config.gas_lhv_mj_per_kg,
                 gt_min_output_mw=self.config.gt_min_output_mw,
                 m_exh_per_fuel_ratio=self.config.m_exh_per_fuel_ratio,
                 t_exh_offset_k=self.config.t_exh_offset_k,
                 t_exh_slope_k_per_mw=self.config.t_exh_slope_k_per_mw,
+                t_exh_load_curve_exp=self.config.gt_t_exh_load_curve_exp,
+                t_exh_min_k=self.config.gt_t_exh_min_k,
+                t_exh_max_k=self.config.gt_t_exh_max_k,
+                gt_exh_temp_k_25=self.config.gt_exh_temp_k_25,
+                gt_exh_temp_k_50=self.config.gt_exh_temp_k_50,
+                gt_exh_temp_k_75=self.config.gt_exh_temp_k_75,
+                gt_exh_temp_k_100=self.config.gt_exh_temp_k_100,
+                gt_exh_flow_frac_25=self.config.gt_exh_flow_frac_25,
+                gt_exh_flow_frac_50=self.config.gt_exh_flow_frac_50,
+                gt_exh_flow_frac_75=self.config.gt_exh_flow_frac_75,
+                gt_exh_flow_frac_100=self.config.gt_exh_flow_frac_100,
             )
         )
         self.hrsg_network = HRSGNetwork(
@@ -310,6 +373,16 @@ class CCHPPhysicalEnv:
                 ua_mw_per_k=self.config.ua_mw_per_k,
                 m_water_kg_per_s=self.config.hrsg_water_mass_flow_kg_per_s,
                 t_water_in_k=self.config.hrsg_water_inlet_k,
+                cp_exh_kj_per_kgk=self.config.hrsg_cp_exh_kj_per_kgk,
+                cp_water_kj_per_kgk=self.config.hrsg_cp_water_kj_per_kgk,
+                t_w_out_max_k=self.config.hrsg_t_w_out_max_k,
+                t_exh_out_min_k=self.config.hrsg_t_exh_out_min_k,
+                m_exh_ref_kg_per_s=self.config.hrsg_m_exh_ref_kg_per_s,
+                k_a_flow_exponent=self.config.hrsg_k_a_flow_exponent,
+                water_flow_min_fraction=self.config.hrsg_water_flow_min_fraction,
+                water_flow_max_fraction=self.config.hrsg_water_flow_max_fraction,
+                water_flow_exponent=self.config.hrsg_water_flow_exponent,
+                pinch_min_k=self.config.hrsg_pinch_min_k,
             )
         )
         self.abs_chiller = AbsChillerNetwork(
@@ -320,6 +393,19 @@ class CCHPPhysicalEnv:
                 t_drive_ref_k=self.config.abs_t_drive_ref_k,
                 cop_nominal=self.config.cop_nominal,
                 cop_min_fraction=self.config.abs_cop_min_fraction,
+                t_cooling_water_ref_k=self.config.abs_t_cooling_water_ref_k,
+                t_evap_ref_k=self.config.abs_t_evap_ref_k,
+                cooling_water_approach_k=self.config.abs_cooling_water_approach_k,
+                cooling_tower_wetbulb_depression_k=self.config.abs_cooling_tower_wetbulb_depression_k,
+                cooling_tower_range_design_k=self.config.abs_cooling_tower_range_design_k,
+                cooling_tower_load_exponent=self.config.abs_cooling_tower_load_exponent,
+                evap_temp_k=self.config.abs_evap_temp_k,
+                chilled_water_supply_k=self.config.chilled_water_supply_k,
+                chilled_water_return_k=self.config.chilled_water_return_k,
+                cop_cooling_water_slope_per_k=self.config.abs_cop_cooling_water_slope_per_k,
+                cop_evap_slope_per_k=self.config.abs_cop_evap_slope_per_k,
+                cop_partload_min_fraction=self.config.abs_cop_partload_min_fraction,
+                cop_partload_curve_exp=self.config.abs_cop_partload_curve_exp,
             )
         )
         self.thermal_storage = ThermalStorageState(
@@ -334,8 +420,19 @@ class CCHPPhysicalEnv:
         self.boiler = BackupBoiler(q_boiler_cap_mw=self.config.q_boiler_cap_mw)
         self.electric_chiller = ElectricChillerNetwork(
             q_ech_cap_mw=self.config.q_ech_cap_mw,
+            cop_nominal=self.config.ech_cop_nominal,
+            cop_floor=self.config.ech_cop_floor,
+            cop_temp_slope_per_k=self.config.ech_cop_temp_slope_per_k,
+            cop_ref_temp_k=self.config.ech_cop_ref_temp_k,
             cop_partload_min_fraction=self.config.ech_cop_partload_min_fraction,
             cop_partload_curve_exp=self.config.ech_cop_partload_curve_exp,
+            condenser_water_approach_k=self.config.ech_condenser_water_approach_k,
+            cooling_tower_wetbulb_depression_k=self.config.ech_cooling_tower_wetbulb_depression_k,
+            cooling_tower_range_design_k=self.config.ech_cooling_tower_range_design_k,
+            cooling_tower_load_exponent=self.config.ech_cooling_tower_load_exponent,
+            chilled_water_supply_k=self.config.chilled_water_supply_k,
+            chilled_water_return_k=self.config.chilled_water_return_k,
+            chilled_water_supply_ref_k=self.config.chilled_water_supply_k,
         )
         self.constraint_solver = ConstraintSolver(
             ConstraintConfig(
@@ -813,6 +910,14 @@ class CCHPPhysicalEnv:
             if str(key).startswith("planner_")
         }
         processed_action, action_debug = self._preprocess_action(action, tes_hot_k=t_hot_k)
+        u_abs_guess = float(_clip(float(processed_action.get("u_abs", 0.0)), 0.0, 1.0))
+        q_abs_drive_guess = u_abs_guess * float(self.config.q_abs_drive_cap_mw)
+        t_abs_cooling_water_k = float(
+            self.abs_chiller.estimate_cooling_water_temp(
+                t_amb_k,
+                heat_rejection_mw=q_abs_drive_guess * (1.0 + float(self.config.cop_nominal)),
+            )
+        )
 
         # 说明：约束求解器需要一个“线性化的可用热量输入”（HRSG 回收热量）。
         # 这里先用当前 action 的 GT 目标做一次快速离线求解，得到 HRSG 的近似可用热量，
@@ -836,7 +941,12 @@ class CCHPPhysicalEnv:
                 soc_bes=self.bes_soc,
                 action=processed_action,
                 q_hrsg_available_mw=hrsg_guess.q_rec_mw,
-                cop_abs_est=self.abs_chiller.estimate_cop(self.thermal_storage.hot_water_temperature_k()),
+                cop_abs_est=self.abs_chiller.estimate_cop(
+                    self.thermal_storage.hot_water_temperature_k(),
+                    t_cooling_water_k=t_abs_cooling_water_k,
+                    t_evap_k=float(self.config.abs_evap_temp_k),
+                    plr=float(_clip(float(processed_action.get("u_abs", 0.0)), 0.0, 1.0)),
+                ),
                 cop_electric_est=self.electric_chiller.estimate_cop(
                     t_amb_k=t_amb_k,
                     plr=float(_clip(float(processed_action.get("u_ech", 0.0)), 0.0, 1.0)),
@@ -866,6 +976,12 @@ class CCHPPhysicalEnv:
         u_tes = float(solver_result["u_tes"])
         u_abs = float(solver_result["u_abs"])
         q_drive_req = u_abs * self.config.q_abs_drive_cap_mw
+        t_abs_cooling_water_k = float(
+            self.abs_chiller.estimate_cooling_water_temp(
+                t_amb_k,
+                heat_rejection_mw=q_drive_req * (1.0 + float(self.config.cop_nominal)),
+            )
+        )
         if is_physics_mode:
             tes_discharge_limit = self.thermal_storage.max_feasible_discharge_mw(dt_h)
             tes_charge_limit = self.thermal_storage.max_feasible_charge_mw(dt_h)
@@ -907,6 +1023,8 @@ class CCHPPhysicalEnv:
             abs_result = self.abs_chiller.solve(
                 q_drive_request_mw=float(heat_allocation["q_abs_drive_alloc_mw"]),
                 t_hot_k=t_hot_k,
+                t_cooling_water_k=t_abs_cooling_water_k,
+                t_evap_k=float(self.config.abs_evap_temp_k),
             )
             tes_result = self.thermal_storage.apply(
                 charge_request_mw=float(heat_allocation["q_tes_charge_alloc_mw"]),
@@ -921,6 +1039,8 @@ class CCHPPhysicalEnv:
             abs_result = self.abs_chiller.solve(
                 q_drive_request_mw=float(heat_allocation["q_abs_drive_alloc_mw"]),
                 t_hot_k=t_hot_k,
+                t_cooling_water_k=t_abs_cooling_water_k,
+                t_evap_k=float(self.config.abs_evap_temp_k),
             )
             tes_result = self.thermal_storage.apply(
                 charge_request_mw=float(heat_allocation["q_tes_charge_alloc_mw"]),
@@ -1097,6 +1217,8 @@ class CCHPPhysicalEnv:
             "emission_boiler_ton": float(emission_boiler_ton),
             "emission_total_ton": float(emission_total_ton),
             "t_tes_hot_k": float(t_hot_k),
+            "t_abs_cooling_water_k": float(t_abs_cooling_water_k),
+            "t_abs_evap_k": float(self.config.abs_evap_temp_k),
             "e_tes_mwh": float(e_tes_mwh),
             "energy_demand_e_mwh": float(float(row["p_dem_mw"]) * dt_h),
             "energy_demand_h_mwh": float(qh_demand_mw * dt_h),

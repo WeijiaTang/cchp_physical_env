@@ -574,12 +574,12 @@ def _case_tick_positions(window: pd.DataFrame) -> tuple[np.ndarray, list[str]]:
 def _panel_tag(ax: plt.Axes, text: str, color: str) -> None:
     ax.text(
         0.02,
-        0.96,
+        0.95,
         text,
         transform=ax.transAxes,
         ha="left",
         va="top",
-        fontsize=9.2,
+        fontsize=8.6,
         color=color,
         fontweight="semibold",
         bbox={
@@ -1164,8 +1164,8 @@ def plot_case_window(bundle: dict[str, Any], results_root: Path) -> plt.Figure:
         .loc[CASE_MODELS]
         .reset_index()
     )
-    fig, axes = plt.subplots(2, 3, figsize=(12.8, 5.95), sharex="col")
-    fig.subplots_adjust(left=0.045, right=0.992, bottom=0.16, top=0.855, wspace=0.15, hspace=0.18)
+    fig, axes = plt.subplots(2, 3, figsize=(12.4, 5.85), sharex="col")
+    fig.subplots_adjust(left=0.055, right=0.987, bottom=0.165, top=0.885, wspace=0.15, hspace=0.16)
 
     cool_max = float(case_df["cooling_demand_mw"].max()) * 1.08
     gt_max = float(case_df["gt_power_mw"].clip(lower=0.0).max()) * 1.08
@@ -1225,16 +1225,21 @@ def plot_case_window(bundle: dict[str, Any], results_root: Path) -> plt.Figure:
         )
         _style_axes(top_ax, grid_axis="y")
         top_ax.set_ylim(0.0, cool_max)
-        top_ax.set_title(f"{MODEL_SHORT[model]} (seed {int(reps.iloc[col_idx]['train_seed'])})", color=MODEL_COLORS[model], pad=8)
+        top_ax.set_title(
+            f"{MODEL_SHORT[model]} (seed {int(reps.iloc[col_idx]['train_seed'])})",
+            color=MODEL_COLORS[model],
+            fontsize=11.8,
+            pad=7,
+        )
         _panel_tag(top_ax, CASE_STRATEGY_NOTES[model], MODEL_COLORS[model])
         top_ax.text(
             0.03,
-            0.84,
+            0.77,
             _case_metric_label(model, metrics),
             transform=top_ax.transAxes,
             ha="left",
             va="top",
-            fontsize=8.35,
+            fontsize=8.05,
             color="#2B2B2B",
             linespacing=1.25,
             bbox={
@@ -1324,28 +1329,12 @@ def plot_case_window(bundle: dict[str, Any], results_root: Path) -> plt.Figure:
     ]
     fig.legend(
         handles=legend_handles,
-        loc="upper center",
-        ncol=3,
-        bbox_to_anchor=(0.5, 1.005),
-        columnspacing=1.2,
-        handlelength=2.2,
-    )
-    fig.suptitle("Representative high-cooling-load dispatch composition", fontsize=14.0, fontweight="semibold", color="#1D232A", y=0.958)
-    fig.text(
-        0.045,
-        0.066,
-        "The 24 h window is selected by the highest rolling-average cooling demand on the shared 2025 horizon.",
-        fontsize=9.0,
-        color="#5F5A53",
-        ha="left",
-    )
-    fig.text(
-        0.045,
-        0.032,
-        "The panel notes summarize the within-window mechanism: DPAR preserves the rbDQN anchor pattern while trimming boiler-side support, rbDQN keeps the discrete anchor without continuous boiler refinement, and DDPG remains a cost-oriented continuous residual baseline.",
-        fontsize=9.0,
-        color="#5F5A53",
-        ha="left",
+        loc="lower center",
+        ncol=6,
+        bbox_to_anchor=(0.5, 0.035),
+        columnspacing=0.95,
+        handlelength=2.0,
+        fontsize=8.7,
     )
     return fig
 

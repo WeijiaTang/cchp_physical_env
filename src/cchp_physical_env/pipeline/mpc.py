@@ -716,6 +716,8 @@ class BaseMPCPolicy:
             abs_result = env.abs_chiller.solve(
                 q_drive_request_mw=min(float(q_abs_drive_phys_mw), max(0.0, float(heat_after_heating))),
                 t_hot_k=float(t_hot_k),
+                t_cooling_water_k=float(env.abs_chiller.estimate_cooling_water_temp(float(t_amb_k))),
+                t_evap_k=float(self.config.abs_evap_temp_k),
             )
             repaired_cool = self._repair_cool_dispatch_step(
                 qc_demand_mw=float(qc_dem_mw),
@@ -829,7 +831,17 @@ class BaseMPCPolicy:
         u_abs = 0.0
         q_abs_cool_mw = 0.0
         if self._planner_abs_enabled():
-            cop_abs = max(0.0, float(self._require_env().abs_chiller.estimate_cop(t_hot_k=t_hot_k)))
+            env = self._require_env()
+            cop_abs = max(
+                0.0,
+                float(
+                    env.abs_chiller.estimate_cop(
+                        t_hot_k=t_hot_k,
+                        t_cooling_water_k=float(env.abs_chiller.estimate_cooling_water_temp(t_amb_k)),
+                        t_evap_k=float(self.config.abs_evap_temp_k),
+                    )
+                ),
+            )
             if cop_abs > 1e-9 and qc_dem > 1e-9:
                 q_abs_drive_req_mw = min(float(self.config.q_abs_drive_cap_mw), qc_dem / cop_abs)
                 u_abs = q_abs_drive_req_mw / max(1e-6, float(self.config.q_abs_drive_cap_mw))
@@ -1091,6 +1103,8 @@ class BaseMPCPolicy:
                 abs_result = env.abs_chiller.solve(
                     q_drive_request_mw=float(heat_allocation["q_abs_drive_alloc_mw"]),
                     t_hot_k=t_hot_k,
+                    t_cooling_water_k=float(env.abs_chiller.estimate_cooling_water_temp(float(t_amb_k))),
+                    t_evap_k=float(self.config.abs_evap_temp_k),
                 )
                 opportunistic_tes_charge_mw = self._surplus_heat_to_tes_charge_mw(
                     tes_energy_mwh=float(tes_e),
@@ -1135,6 +1149,8 @@ class BaseMPCPolicy:
                 abs_result = env.abs_chiller.solve(
                     q_drive_request_mw=q_abs_drive_phys_mw,
                     t_hot_k=t_hot_k,
+                    t_cooling_water_k=float(env.abs_chiller.estimate_cooling_water_temp(float(t_amb_k))),
+                    t_evap_k=float(self.config.abs_evap_temp_k),
                 )
                 tes_result = tes_shadow.apply(
                     charge_request_mw=tes_charge_req,

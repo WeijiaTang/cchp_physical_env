@@ -27,6 +27,10 @@ class HRSGDesignPoint:
 
     m_exh_ref_kg_per_s: float = 45.0
     k_a_flow_exponent: float = 0.8
+    water_flow_min_fraction: float = 0.35
+    water_flow_max_fraction: float = 1.10
+    water_flow_exponent: float = 0.65
+    pinch_min_k: float = 15.0
 
 
 @dataclass(slots=True)
@@ -79,6 +83,20 @@ class HRSGNetwork:
         ratio = max(1e-6, m_exh_kg_per_s) / max(1e-6, self.design.m_exh_ref_kg_per_s)
         return self.design.ua_mw_per_k * (ratio ** self.design.k_a_flow_exponent)
 
+    def _controlled_water_flow(self, m_exh_kg_per_s: float) -> float:
+        """Approximate HRSG feed/hot-water flow control under GT part load."""
+
+        if m_exh_kg_per_s <= 1e-9:
+            return 0.0
+        ratio = max(1e-6, m_exh_kg_per_s) / max(1e-6, self.design.m_exh_ref_kg_per_s)
+        fraction = ratio ** max(1e-6, self.design.water_flow_exponent)
+        fraction = _clip(
+            fraction,
+            max(0.0, self.design.water_flow_min_fraction),
+            max(self.design.water_flow_min_fraction, self.design.water_flow_max_fraction),
+        )
+        return max(0.0, self.design.m_water_kg_per_s * fraction)
+
     def solve(
         self,
         *,
@@ -87,7 +105,7 @@ class HRSGNetwork:
         m_water_kg_per_s: float | None = None,
         t_water_in_k: float | None = None,
     ) -> HRSGResult:
-        m_w = self.design.m_water_kg_per_s if m_water_kg_per_s is None else max(0.0, m_water_kg_per_s)
+        m_w = self._controlled_water_flow(m_exh_kg_per_s) if m_water_kg_per_s is None else max(0.0, m_water_kg_per_s)
         t_w_in = self.design.t_water_in_k if t_water_in_k is None else t_water_in_k
         ua_effective = self._effective_ua(m_exh_kg_per_s)
 
@@ -147,7 +165,12 @@ class HRSGNetwork:
             0.0,
             c_w_mw_per_k * max(0.0, self.design.t_w_out_max_k - t_w_in),
         )
-        q_rec = min(q_rec_raw, q_rec_exhaust_limit, q_rec_water_limit)
+        q_rec_pinch_limit = max(
+            0.0,
+            (t_exh_in_k - t_w_in - max(0.0, self.design.pinch_min_k))
+            / max(1e-9, (1.0 / max(1e-9, c_exh_mw_per_k)) + (1.0 / max(1e-9, c_w_mw_per_k))),
+        )
+        q_rec = min(q_rec_raw, q_rec_exhaust_limit, q_rec_water_limit, q_rec_pinch_limit)
         t_exh_out = t_exh_in_k - (q_rec / c_exh_mw_per_k) if c_exh_mw_per_k > 0.0 else t_exh_in_k
         t_w_out = t_w_in + (q_rec / c_w_mw_per_k) if c_w_mw_per_k > 0.0 else t_w_in
 
@@ -158,7 +181,8 @@ class HRSGNetwork:
             epsilon=epsilon,
             ua_effective_mw_per_k=ua_effective,
             violation_flags={
-                "hrsg_water_outlet_overheat": False,
-                "hrsg_exhaust_too_cold": False,
+                "hrsg_water_outlet_overheat": q_rec_raw > q_rec_water_limit + 1e-9,
+                "hrsg_exhaust_too_cold": q_rec_raw > q_rec_exhaust_limit + 1e-9,
+                "hrsg_pinch_limited": q_rec_raw > q_rec_pinch_limit + 1e-9,
             },
         )
