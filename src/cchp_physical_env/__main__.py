@@ -20,9 +20,6 @@ CLI 入口：数据校验、训练、评估、标定、消融。
 """
 from __future__ import annotations
 
-import warnings
-warnings.filterwarnings("ignore", category=FutureWarning)
-
 import argparse
 import json
 from datetime import datetime
@@ -143,15 +140,8 @@ TRAINING_OPTION_KEYS = (
     "pafc_critic_lr",
     "pafc_dual_lr",
     "pafc_dual_warmup_steps",
-    "pafc_pid_kp",
-    "pafc_pid_ki",
-    "pafc_pid_kd",
-    "pafc_pid_anti_windup",
-    "pafc_wasserstein_penalty_coef",
-    "pafc_wasserstein_cost_critic_penalty",
     "pafc_actor_delay",
     "pafc_exploration_noise_std",
-    "pafc_gt_exploration_noise_std",
     "pafc_target_policy_noise_std",
     "pafc_target_noise_clip",
     "pafc_gap_penalty_coef",
@@ -767,15 +757,8 @@ def _command_train(args: argparse.Namespace) -> None:
                 critic_lr=float(current_options["pafc_critic_lr"]),
                 dual_lr=float(current_options["pafc_dual_lr"]),
                 dual_warmup_steps=int(current_options["pafc_dual_warmup_steps"]),
-                pid_kp=float(current_options["pafc_pid_kp"]),
-                pid_ki=float(current_options["pafc_pid_ki"]),
-                pid_kd=float(current_options["pafc_pid_kd"]),
-                pid_anti_windup=float(current_options["pafc_pid_anti_windup"]),
-                wasserstein_penalty_coef=float(current_options["pafc_wasserstein_penalty_coef"]),
-                wasserstein_cost_critic_penalty=bool(current_options["pafc_wasserstein_cost_critic_penalty"]),
                 actor_delay=int(current_options["pafc_actor_delay"]),
                 exploration_noise_std=float(current_options["pafc_exploration_noise_std"]),
-                gt_exploration_noise_std=float(current_options["pafc_gt_exploration_noise_std"]),
                 target_policy_noise_std=float(current_options["pafc_target_policy_noise_std"]),
                 target_noise_clip=float(current_options["pafc_target_noise_clip"]),
                 gap_penalty_coef=float(current_options["pafc_gap_penalty_coef"]),
@@ -1475,19 +1458,8 @@ def _command_pafc_train(args: argparse.Namespace) -> None:
             dual_warmup_steps=int(
                 _arg_or_training_default("dual_warmup_steps", "pafc_dual_warmup_steps", 8_192)
             ),
-            pid_kp=float(_arg_or_training_default("pid_kp", "pafc_pid_kp", 0.0)),
-            pid_ki=float(_arg_or_training_default("pid_ki", "pafc_pid_ki", 5e-3)),
-            pid_kd=float(_arg_or_training_default("pid_kd", "pafc_pid_kd", 0.0)),
-            pid_anti_windup=float(_arg_or_training_default("pid_anti_windup", "pafc_pid_anti_windup", 10.0)),
-            wasserstein_penalty_coef=float(
-                _arg_or_training_default("wasserstein_penalty_coef", "pafc_wasserstein_penalty_coef", 0.0)
-            ),
-            wasserstein_cost_critic_penalty=bool(
-                _arg_or_training_default("wasserstein_cost_critic_penalty", "pafc_wasserstein_cost_critic_penalty", False)
-            ),
             actor_delay=int(_arg_or_training_default("actor_delay", "pafc_actor_delay", 2)),
             exploration_noise_std=float(_arg_or_training_default("exploration_noise_std", "pafc_exploration_noise_std", 0.06)),
-            gt_exploration_noise_std=float(_arg_or_training_default("gt_exploration_noise_std", "pafc_gt_exploration_noise_std", 0.0)),
             target_policy_noise_std=float(_arg_or_training_default("target_policy_noise_std", "pafc_target_policy_noise_std", 0.06)),
             target_noise_clip=float(_arg_or_training_default("target_noise_clip", "pafc_target_noise_clip", 0.12)),
             gap_penalty_coef=float(_arg_or_training_default("gap_penalty_coef", "pafc_gap_penalty_coef", 0.2)),

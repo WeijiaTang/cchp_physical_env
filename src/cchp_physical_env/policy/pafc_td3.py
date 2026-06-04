@@ -20,9 +20,7 @@ from ..pipeline.sequence import (
     build_feature_vector,
 )
 from .checkpoint import load_policy, resolve_torch_device, save_policy
-from .pid_lagrangian import PIDLagrangianConfig, PIDLagrangianState, pid_lagrangian_update
 from .projection_surrogate import build_projection_surrogate_network
-from .wasserstein_dro import wasserstein_dual_critic_loss
 
 _NORM_EPS = 1e-6
 _BES_PRIOR_MIN_OPPORTUNITY = 0.05
@@ -1707,7 +1705,6 @@ class PAFCTD3TrainConfig:
     dual_warmup_steps: int = 8_192
     actor_delay: int = 2
     exploration_noise_std: float = 0.06
-    gt_exploration_noise_std: float = 0.0
     target_policy_noise_std: float = 0.06
     target_noise_clip: float = 0.12
     gap_penalty_coef: float = 0.2
@@ -1815,12 +1812,6 @@ class PAFCTD3TrainConfig:
     observation_keys: tuple[str, ...] = field(default_factory=tuple)
     action_keys: tuple[str, ...] = field(default_factory=tuple)
     cost_targets: tuple[float, float, float] = (0.0, 0.01, 0.01)
-    pid_kp: float = 0.0
-    pid_ki: float = 0.005
-    pid_kd: float = 0.0
-    pid_anti_windup: float = 10.0
-    wasserstein_penalty_coef: float = 0.0
-    wasserstein_cost_critic_penalty: bool = False
 
     def __post_init__(self) -> None:
         self.projection_surrogate_checkpoint_path = str(
@@ -1841,7 +1832,6 @@ class PAFCTD3TrainConfig:
         self.dual_warmup_steps = int(self.dual_warmup_steps)
         self.actor_delay = int(self.actor_delay)
         self.exploration_noise_std = float(self.exploration_noise_std)
-        self.gt_exploration_noise_std = float(self.gt_exploration_noise_std)
         self.target_policy_noise_std = float(self.target_policy_noise_std)
         self.target_noise_clip = float(self.target_noise_clip)
         self.gap_penalty_coef = float(self.gap_penalty_coef)
@@ -3466,13 +3456,6 @@ class PAFCTD3Trainer:
         )
         self.dual_lambdas = np.zeros(3, dtype=np.float32)
         self.dual_targets = np.asarray(self.config.cost_targets, dtype=np.float32)
-        self.pid_config = PIDLagrangianConfig(
-            kp=self.config.pid_kp,
-            ki=self.config.pid_ki,
-            kd=self.config.pid_kd,
-            anti_windup=self.config.pid_anti_windup,
-        )
-        self.pid_state = PIDLagrangianState.zeros()
         self.frozen_action_keys = tuple(
             str(key) for key in self.config.frozen_action_keys if str(key) in self.action_index
         )
@@ -4849,14 +4832,7 @@ class PAFCTD3Trainer:
                     raise ValueError("pafc_td3_actor.json 缺少 checkpoint_path。")
                 resolved_path = Path(resolved).expanduser()
                 if not resolved_path.exists():
-                    sibling_path = entry_path.parent / resolved_path.name
-                    if sibling_path.exists():
-                        resolved_path = sibling_path
-                    else:
-                        raise FileNotFoundError(
-                            f"PAFC actor checkpoint 不存在: {resolved_path} "
-                            f"(也未能在其同级目录下找到: {sibling_path})"
-                        )
+                    raise FileNotFoundError(f"PAFC actor checkpoint 不存在: {resolved_path}")
                 return {
                     "artifact_type": artifact_type,
                     "entry_path": entry_path,
@@ -9286,18 +9262,11 @@ class PAFCTD3Trainer:
             action = self.actor(self._normalize_observation_tensor(observation_tensor))
         action_np = action.squeeze(0).detach().cpu().numpy().astype(np.float32)
         if explore and self.config.exploration_noise_std > 0.0:
-            base_std = float(self.config.exploration_noise_std)
             noise = self.rng.normal(
                 loc=0.0,
-                scale=base_std,
+                scale=float(self.config.exploration_noise_std),
                 size=action_np.shape,
             ).astype(np.float32)
-            gt_std = float(self.config.gt_exploration_noise_std)
-            if gt_std > 0.0 and gt_std != base_std and "u_gt" in self.action_index:
-                gt_idx = int(self.action_index["u_gt"])
-                noise[gt_idx] = float(
-                    self.rng.normal(loc=0.0, scale=gt_std, size=1).astype(np.float32)[0]
-                )
             action_np = np.clip(action_np + noise, self.action_low_np, self.action_high_np)
         action_np = self._apply_abs_cooling_blend_np(
             observation_vector=observation_vector,
@@ -9999,43 +9968,20 @@ class PAFCTD3Trainer:
                 for idx in range(3)
             ]
 
-        _obs_dim = int(obs_norm.shape[1])
-        loss_q1, gp_q1 = wasserstein_dual_critic_loss(
-            self.q1, obs_norm, action_exec, reward_target,
-            penalty_coef=self.config.wasserstein_penalty_coef,
-            obs_dim=_obs_dim,
+        q1_pred = self.q1(obs_norm, action_exec)
+        q2_pred = self.q2(obs_norm, action_exec)
+        reward_critic_loss = self.F.mse_loss(q1_pred, reward_target) + self.F.mse_loss(
+            q2_pred, reward_target
         )
-        loss_q2, gp_q2 = wasserstein_dual_critic_loss(
-            self.q2, obs_norm, action_exec, reward_target,
-            penalty_coef=self.config.wasserstein_penalty_coef,
-            obs_dim=_obs_dim,
-        )
-        reward_critic_loss = loss_q1 + loss_q2
         self.reward_critic_optimizer.zero_grad(set_to_none=True)
         reward_critic_loss.backward()
         self.reward_critic_optimizer.step()
 
         cost_predictions = [critic(obs_norm, action_exec) for critic in self.cost_critics]
-        wc_penalty_coef = (
-            float(self.config.wasserstein_penalty_coef)
-            if self.config.wasserstein_cost_critic_penalty
-            else 0.0
+        cost_critic_loss = sum(
+            self.F.mse_loss(prediction, target)
+            for prediction, target in zip(cost_predictions, cost_targets)
         )
-        cost_critic_loss_terms: list[Tensor] = []
-        cost_gp_terms: list[Tensor] = []
-        for prediction, target, critic in zip(cost_predictions, cost_targets, self.cost_critics):
-            if wc_penalty_coef > 0.0:
-                c_loss, c_gp = wasserstein_dual_critic_loss(
-                    critic, obs_norm, action_exec, target,
-                    penalty_coef=wc_penalty_coef, obs_dim=_obs_dim,
-                )
-                cost_critic_loss_terms.append(c_loss)
-                cost_gp_terms.append(c_gp)
-            else:
-                cost_critic_loss_terms.append(
-                    self.F.mse_loss(prediction, target)
-                )
-        cost_critic_loss = sum(cost_critic_loss_terms)
         self.cost_critic_optimizer.zero_grad(set_to_none=True)
         cost_critic_loss.backward()
         self.cost_critic_optimizer.step()
@@ -10050,6 +9996,14 @@ class PAFCTD3Trainer:
         gt_anchor_scale_value = float("nan")
         bes_anchor_scale_value = float("nan")
         bes_teacher_anchor_rate_value = float("nan")
+        economic_teacher_loss_value = float("nan")
+        economic_teacher_weight_value = float("nan")
+        economic_teacher_target_rate_value = float("nan")
+        economic_teacher_safe_preserve_loss_value = float("nan")
+        economic_gt_distill_loss_value = float("nan")
+        economic_gt_distill_weight_value = float("nan")
+        economic_bes_distill_loss_value = float("nan")
+        economic_bes_distill_weight_value = float("nan")
         reward_actor_value = float("nan")
         mean_constraint_value = float("nan")
         surrogate_actor_trust_mean_value = float("nan")
@@ -10166,6 +10120,54 @@ class PAFCTD3Trainer:
                 obs_batch=obs,
                 action_exec_batch=action_exec_for_actor,
             )
+            economic_teacher_weight = self._compute_economic_teacher_weight(
+                obs_batch=obs,
+                action_exec_batch=action_exec_for_actor,
+                teacher_action_exec_batch=teacher_action_exec,
+                teacher_action_mask_batch=teacher_action_mask,
+                gap_batch=gap,
+                teacher_available_batch=teacher_available,
+            )
+            effective_teacher_mask = (
+                teacher_action_mask
+                * self.economic_teacher_action_weight
+                * self.economic_teacher_mismatch_focus_weight
+            )
+            economic_teacher_sq = (
+                (action_exec_for_actor - teacher_action_exec).pow(2) * effective_teacher_mask
+            ).sum(dim=1, keepdim=True) / effective_teacher_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+            economic_teacher_weight_sum = economic_teacher_weight.sum()
+            economic_teacher_selected_loss = (
+                (economic_teacher_weight * economic_teacher_sq).sum()
+                / economic_teacher_weight_sum.clamp_min(1.0)
+            )
+            economic_teacher_safe_preserve_loss = self._compute_economic_teacher_safe_preserve_loss(
+                obs_batch=obs,
+                action_exec_batch=action_exec_for_actor,
+                teacher_action_exec_batch=teacher_action_exec,
+                teacher_action_mask_batch=teacher_action_mask,
+                teacher_available_batch=teacher_available,
+            )
+            economic_teacher_loss = (
+                economic_teacher_selected_loss
+                + float(self.config.economic_teacher_safe_preserve_coef)
+                * economic_teacher_safe_preserve_loss
+            )
+            economic_bes_distill_loss, economic_bes_distill_weight = self._compute_bes_prior_distill_loss(
+                obs_batch=obs,
+                action_raw_batch=action_raw,
+                action_exec_batch=action_exec_for_actor,
+                gap_batch=gap,
+            )
+            economic_gt_distill_loss, economic_gt_distill_weight = self._compute_gt_prior_distill_loss(
+                obs_batch=obs,
+                action_raw_batch=action_raw,
+                action_exec_batch=action_exec_for_actor,
+                gap_batch=gap,
+                teacher_action_exec_batch=teacher_action_exec,
+                teacher_action_mask_batch=teacher_action_mask,
+                teacher_available_batch=teacher_available,
+            )
             actor_loss = (
                 -reward_actor.mean()
                 + (lambda_tensor * constraint_predictions).sum(dim=1).mean()
@@ -10175,6 +10177,9 @@ class PAFCTD3Trainer:
                 + float(self.config.economic_boiler_proxy_coef) * boiler_proxy_penalty
                 + float(self.config.economic_abs_tradeoff_coef) * abs_tradeoff_penalty
                 + float(self.config.economic_gt_grid_proxy_coef) * gt_grid_proxy_penalty
+                + float(self.config.economic_teacher_distill_coef) * economic_teacher_loss
+                + float(self.config.economic_gt_distill_coef) * economic_gt_distill_loss
+                + float(self.config.economic_bes_distill_coef) * economic_bes_distill_loss
             )
             self.actor_optimizer.zero_grad(set_to_none=True)
             actor_loss.backward()
@@ -10187,14 +10192,12 @@ class PAFCTD3Trainer:
                 self._soft_update(source_model=source, target_model=target)
 
             batch_cost_mean = cost.mean(dim=0).detach().cpu().numpy().astype(np.float32)
-            self.dual_lambdas, self.pid_state = pid_lagrangian_update(
-                lambdas=self.dual_lambdas,
-                violation=batch_cost_mean,
-                targets=self.dual_targets,
-                config=self.pid_config,
-                state=self.pid_state,
-                dual_scale=dual_scale_value,
-            )
+            if dual_scale_value >= 1.0:
+                self.dual_lambdas = np.maximum(
+                    0.0,
+                    self.dual_lambdas
+                    + float(self.config.dual_lr) * (batch_cost_mean - self.dual_targets),
+                ).astype(np.float32)
 
             actor_loss_value = float(actor_loss.detach().cpu().item())
             gap_loss_value = float(gap_loss.detach().cpu().item())
@@ -10230,6 +10233,22 @@ class PAFCTD3Trainer:
                 bes_teacher_anchor_rate_value = float(
                     teacher_bes_mask.mean().detach().cpu().item()
                 )
+            economic_teacher_loss_value = float(economic_teacher_loss.detach().cpu().item())
+            economic_teacher_weight_value = float(economic_teacher_weight.mean().detach().cpu().item())
+            economic_teacher_target_rate_value = float(teacher_available.mean().detach().cpu().item())
+            economic_teacher_safe_preserve_loss_value = float(
+                economic_teacher_safe_preserve_loss.detach().cpu().item()
+            )
+            economic_gt_distill_loss_value = float(economic_gt_distill_loss.detach().cpu().item())
+            economic_gt_distill_weight_value = float(
+                economic_gt_distill_weight.detach().cpu().item()
+            )
+            economic_bes_distill_loss_value = float(
+                economic_bes_distill_loss.detach().cpu().item()
+            )
+            economic_bes_distill_weight_value = float(
+                economic_bes_distill_weight.detach().cpu().item()
+            )
             reward_actor_value = float(reward_actor.mean().detach().cpu().item())
             mean_constraint_value = float(constraint_predictions.mean().detach().cpu().item())
             surrogate_actor_trust_mean_value = float(
@@ -10253,6 +10272,14 @@ class PAFCTD3Trainer:
             "actor_gt_anchor_scale": gt_anchor_scale_value,
             "actor_bes_anchor_scale": bes_anchor_scale_value,
             "actor_bes_teacher_anchor_rate": bes_teacher_anchor_rate_value,
+            "actor_economic_teacher_loss": economic_teacher_loss_value,
+            "actor_economic_teacher_weight": economic_teacher_weight_value,
+            "actor_economic_teacher_target_rate": economic_teacher_target_rate_value,
+            "actor_economic_teacher_safe_preserve_loss": economic_teacher_safe_preserve_loss_value,
+            "actor_economic_gt_distill_loss": economic_gt_distill_loss_value,
+            "actor_economic_gt_distill_weight": economic_gt_distill_weight_value,
+            "actor_economic_bes_distill_loss": economic_bes_distill_loss_value,
+            "actor_economic_bes_distill_weight": economic_bes_distill_weight_value,
             "actor_surrogate_trust_mean": surrogate_actor_trust_mean_value,
             "actor_surrogate_trust_min": surrogate_actor_trust_min_value,
             "actor_constraint_mean": mean_constraint_value,
@@ -10260,11 +10287,6 @@ class PAFCTD3Trainer:
             "lambda_e": float(self.dual_lambdas[0]),
             "lambda_h": float(self.dual_lambdas[1]),
             "lambda_c": float(self.dual_lambdas[2]),
-            "pid_integral_e": float(self.pid_state.integral[0]),
-            "pid_integral_h": float(self.pid_state.integral[1]),
-            "pid_integral_c": float(self.pid_state.integral[2]),
-            "wasserstein_gp_q1": float(gp_q1.cpu().item()) if gp_q1.numel() > 0 else 0.0,
-            "wasserstein_gp_q2": float(gp_q2.cpu().item()) if gp_q2.numel() > 0 else 0.0,
         }
 
     def train(self) -> dict[str, Any]:
@@ -10314,16 +10336,19 @@ class PAFCTD3Trainer:
             "actor_gt_anchor_scale": float("nan"),
             "actor_bes_anchor_scale": float("nan"),
             "actor_bes_teacher_anchor_rate": float("nan"),
+            "actor_economic_teacher_loss": float("nan"),
+            "actor_economic_teacher_weight": float("nan"),
+            "actor_economic_teacher_target_rate": float("nan"),
+            "actor_economic_teacher_safe_preserve_loss": float("nan"),
+            "actor_economic_gt_distill_loss": float("nan"),
+            "actor_economic_gt_distill_weight": float("nan"),
+            "actor_economic_bes_distill_loss": float("nan"),
+            "actor_economic_bes_distill_weight": float("nan"),
             "actor_constraint_mean": float("nan"),
             "dual_scale": 1.0,
             "lambda_e": 0.0,
             "lambda_h": 0.0,
             "lambda_c": 0.0,
-            "pid_integral_e": 0.0,
-            "pid_integral_h": 0.0,
-            "pid_integral_c": 0.0,
-            "wasserstein_gp_q1": 0.0,
-            "wasserstein_gp_q2": 0.0,
         }
 
         initial_checkpoint_path = self._save_actor_checkpoint(
@@ -11279,40 +11304,9 @@ def evaluate_pafc_td3(
     total_reward = 0.0
     step_rows: list[dict[str, Any]] = []
     final_info: dict[str, Any] = {}
-    _gt_off_steps = 0
-    _gt_min_off_steps = max(1, int(round(float(config.gt_min_off_steps))))
 
     while not terminated:
         action = predictor(observation)
-        # PAFC-TD3 GT overfitting fix: override u_gt to -1 when conditions favor GT shutdown.
-        # The learned policy converges to GT-always-on because exploration noise cannot cross
-        # the GT on/off boundary. This rule provides GT cycling during eval.
-        if "u_gt" in action and isinstance(observation, dict):
-            p_dem = float(observation.get("p_dem_mw", 0.0))
-            p_re = float(observation.get("pv_mw", 0.0)) + float(observation.get("wt_mw", 0.0))
-            net_load_mw = max(0.0, p_dem - p_re)
-            price_e = float(observation.get("price_e", 9999))
-            qc_dem = float(observation.get("qc_dem_mw", 0.0))
-            p_gt_prev = float(observation.get("p_gt_prev_mw", 0.0))
-            gt_on = p_gt_prev > 1e-9
-            p_gt_cap = float(config.p_gt_cap_mw)
-            q_ech_cap = float(config.q_ech_cap_mw)
-            should_gt_off = (
-                gt_on
-                and net_load_mw < 0.25 * p_gt_cap
-                and price_e < 700.0
-                and qc_dem < 0.6 * q_ech_cap
-            )
-            should_gt_on = (not gt_on) and (
-                net_load_mw > 0.55 * p_gt_cap or price_e > 1100.0
-            )
-            if should_gt_off and _gt_off_steps <= 0:
-                _gt_off_steps = _gt_min_off_steps
-            if _gt_off_steps > 0:
-                action["u_gt"] = -1.0
-                _gt_off_steps -= 1
-            if should_gt_on:
-                _gt_off_steps = 0
         surrogate_exec_hat = None
         obs_vector = None
         if surrogate_audit is not None and surrogate_torch is not None and isinstance(observation, Mapping):
