@@ -57,12 +57,10 @@ class HRSGNetwork:
             return self._network
 
         nw = Network(fluids=["Ar", "N2", "O2", "CO2", "H2O", "CH4"])
-        nw.units.set_defaults(
-            temperature="K",
-            pressure="bar",
-            enthalpy="kJ / kg",
-            mass_flow="kg / s",
-        )
+        nw.T_unit = "K"
+        nw.p_unit = "bar"
+        nw.h_unit = "kJ / kg"
+        nw.m_unit = "kg / s"
 
         exh_in = Source("exhaust_source")
         water_in = Source("water_source")
