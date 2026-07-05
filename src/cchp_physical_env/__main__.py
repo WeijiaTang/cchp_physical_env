@@ -210,6 +210,7 @@ TRAINING_OPTION_KEYS = (
     "pafc_expert_prefill_checkpoint_path",
     "pafc_expert_prefill_economic_policy",
     "pafc_expert_prefill_economic_checkpoint_path",
+    "pafc_mode_anchor_checkpoint_path",
     "pafc_frozen_action_keys",
     "pafc_frozen_action_safe_checkpoint_path",
     "pafc_gt_safe_action_delta_clip",
@@ -934,6 +935,9 @@ def _command_train(args: argparse.Namespace) -> None:
                 ),
                 expert_prefill_economic_checkpoint_path=str(
                     current_options["pafc_expert_prefill_economic_checkpoint_path"]
+                ),
+                mode_anchor_checkpoint_path=str(
+                    current_options["pafc_mode_anchor_checkpoint_path"]
                 ),
                 frozen_action_keys=_parse_string_tuple(current_options["pafc_frozen_action_keys"]),
                 frozen_action_safe_checkpoint_path=str(
@@ -1890,6 +1894,13 @@ def _command_pafc_train(args: argparse.Namespace) -> None:
                     "",
                 )
             ),
+            mode_anchor_checkpoint_path=str(
+                _arg_or_training_default(
+                    "mode_anchor_checkpoint_path",
+                    "pafc_mode_anchor_checkpoint_path",
+                    "",
+                )
+            ),
             frozen_action_keys=_parse_string_tuple(
                 _arg_or_training_default(
                     "frozen_action_keys",
@@ -2786,6 +2797,7 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--pafc-expert-prefill-checkpoint-path", type=str, default=argparse.SUPPRESS)
     train_parser.add_argument("--pafc-expert-prefill-economic-policy", type=str, default=argparse.SUPPRESS)
     train_parser.add_argument("--pafc-expert-prefill-economic-checkpoint-path", type=str, default=argparse.SUPPRESS)
+    train_parser.add_argument("--pafc-mode-anchor-checkpoint-path", type=str, default=argparse.SUPPRESS)
     train_parser.add_argument("--pafc-tes-safe-action-delta-clip", type=float, default=argparse.SUPPRESS)
     train_parser.add_argument("--pafc-expert-prefill-steps", type=int, default=argparse.SUPPRESS)
     train_parser.add_argument("--pafc-expert-prefill-cooling-bias", type=float, default=argparse.SUPPRESS)
@@ -2868,6 +2880,14 @@ def build_parser() -> argparse.ArgumentParser:
             "milp-mpc",
             "ga_mpc",
             "ga-mpc",
+            "ga",
+            "ga_dispatch",
+            "ga-dispatch",
+            "gwo",
+            "gwo_mpc",
+            "gwo-mpc",
+            "gwo_dispatch",
+            "gwo-dispatch",
             "sb3",
             "pafc_td3",
             "pafc-td3",
@@ -3232,6 +3252,7 @@ def build_parser() -> argparse.ArgumentParser:
     pafc_train_parser.add_argument("--expert-prefill-checkpoint-path", type=str, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--expert-prefill-economic-policy", type=str, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument("--expert-prefill-economic-checkpoint-path", type=str, default=argparse.SUPPRESS)
+    pafc_train_parser.add_argument("--mode-anchor-checkpoint-path", type=str, default=argparse.SUPPRESS)
     pafc_train_parser.add_argument(
         "--frozen-action-keys",
         type=str,
@@ -3574,7 +3595,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="覆盖 env.constraint_mode（子命令级覆盖；通常不需要，ablation 会按 --modes 生成）。",
     )
     ablation_parser.add_argument(
-        "--policy", type=str, default=argparse.SUPPRESS, choices=["rule", "easy_rule", "random", "sequence_rule", "milp_mpc", "milp-mpc", "ga_mpc", "ga-mpc"]
+        "--policy", type=str, default=argparse.SUPPRESS, choices=["rule", "easy_rule", "random", "sequence_rule", "milp_mpc", "milp-mpc", "ga_mpc", "ga-mpc", "ga", "ga_dispatch", "ga-dispatch", "gwo", "gwo_mpc", "gwo-mpc", "gwo_dispatch", "gwo-dispatch"]
     )
     ablation_parser.add_argument(
         "--env-config",
