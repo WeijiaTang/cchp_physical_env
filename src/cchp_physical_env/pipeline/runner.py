@@ -20,8 +20,26 @@ from ..core.data import (
 )
 from ..core.reporting import write_paper_eval_artifacts
 from ..env.cchp_env import CCHPPhysicalEnv, EnvConfig
-from .mpc import GAMPCPolicy, MILPMPCPolicy
+from .mpc import GAMPCPolicy, GWOMPCPolicy, MILPMPCPolicy
 from .sequence import SUPPORTED_SEQUENCE_ADAPTERS, SequenceRulePolicy
+
+
+def _gt_target_mw_to_action(
+    p_gt_target_mw: float,
+    *,
+    p_gt_cap_mw: float,
+    gt_min_output_mw: float = 1.0,
+    gt_action_off_threshold: float = -0.8,
+) -> float:
+    threshold = float(np.clip(float(gt_action_off_threshold), -1.0, 1.0))
+    min_output = max(0.0, float(gt_min_output_mw))
+    cap = max(1e-6, float(p_gt_cap_mw))
+    if float(p_gt_target_mw) < 0.5 * min_output:
+        return float(0.5 * (threshold - 1.0))
+    p_clamped = float(np.clip(float(p_gt_target_mw), min_output, cap))
+    normalized = (p_clamped - min_output) / max(1e-6, cap - min_output)
+    u_gt = threshold + 1e-6 + normalized * max(1e-6, 1.0 - threshold - 1e-6)
+    return float(np.clip(u_gt, -1.0, 1.0))
 
 
 def _extract_year(df: pd.DataFrame) -> int:
@@ -59,6 +77,8 @@ class RandomPolicy:
 class RulePolicy:
     train_statistics: dict
     p_gt_cap_mw: float = 12.0
+    gt_min_output_mw: float = 1.0
+    gt_action_off_threshold: float = -0.8
     q_ech_cap_mw: float = 6.0
     abs_drive_threshold_k: float = 348.15
     price_low: float = 0.0
@@ -94,7 +114,12 @@ class RulePolicy:
         gt_ratio = min(1.0, net_load / max(1e-6, self.p_gt_cap_mw))
         if gt_ratio < 0.10:
             gt_ratio = 0.0
-        u_gt = gt_ratio * 2.0 - 1.0
+        u_gt = _gt_target_mw_to_action(
+            gt_ratio * self.p_gt_cap_mw,
+            p_gt_cap_mw=self.p_gt_cap_mw,
+            gt_min_output_mw=self.gt_min_output_mw,
+            gt_action_off_threshold=self.gt_action_off_threshold,
+        )
 
         if price_e >= self.price_high and soc_bes > 0.25:
             u_bes = 0.8
@@ -152,6 +177,8 @@ class EasyRulePolicy:
     """
 
     p_gt_cap_mw: float = 12.0
+    gt_min_output_mw: float = 1.0
+    gt_action_off_threshold: float = -0.8
     q_boiler_cap_mw: float = 10.0
     q_ech_cap_mw: float = 6.0
     price_low_threshold: float = 600.0
@@ -171,7 +198,12 @@ class EasyRulePolicy:
             u_gt = -1.0
         else:
             gt_ratio = min(0.60, net_load / max(1e-6, self.p_gt_cap_mw))
-            u_gt = gt_ratio * 2.0 - 1.0
+            u_gt = _gt_target_mw_to_action(
+                gt_ratio * self.p_gt_cap_mw,
+                p_gt_cap_mw=self.p_gt_cap_mw,
+                gt_min_output_mw=self.gt_min_output_mw,
+                gt_action_off_threshold=self.gt_action_off_threshold,
+            )
 
         if price_e >= self.price_high_threshold and soc_bes > 0.35:
             u_bes = 0.3
@@ -207,11 +239,19 @@ def _build_policy(
     if normalized == "random":
         return RandomPolicy(seed=seed)
     if normalized == "easy_rule":
-        return EasyRulePolicy()
+        return EasyRulePolicy(
+            p_gt_cap_mw=float(config.p_gt_cap_mw),
+            gt_min_output_mw=float(config.gt_min_output_mw),
+            gt_action_off_threshold=float(getattr(config, "gt_action_off_threshold", -0.8)),
+            q_boiler_cap_mw=float(config.q_boiler_cap_mw),
+            q_ech_cap_mw=float(config.q_ech_cap_mw),
+        )
     if normalized == "rule":
         return RulePolicy(
             train_statistics=train_statistics,
             p_gt_cap_mw=float(config.p_gt_cap_mw),
+            gt_min_output_mw=float(config.gt_min_output_mw),
+            gt_action_off_threshold=float(getattr(config, "gt_action_off_threshold", -0.8)),
             q_ech_cap_mw=float(config.q_ech_cap_mw),
             abs_drive_threshold_k=float(config.abs_t_drive_min_k),
         )
@@ -219,6 +259,10 @@ def _build_policy(
         return MILPMPCPolicy(config=config, history_steps=history_steps, seed=seed)
     if normalized == "ga_mpc":
         return GAMPCPolicy(config=config, history_steps=history_steps, seed=seed)
+    if normalized in {"ga", "ga_dispatch"}:
+        return GAMPCPolicy(config=config, history_steps=history_steps, seed=seed, use_milp_seed=False)
+    if normalized in {"gwo", "gwo_mpc", "gwo_dispatch"}:
+        return GWOMPCPolicy(config=config, history_steps=history_steps, seed=seed)
     if normalized == "sequence_rule":
         adapter_name = sequence_adapter.lower().strip()
         if adapter_name not in SUPPORTED_SEQUENCE_ADAPTERS:
@@ -228,6 +272,10 @@ def _build_policy(
         kwargs: dict[str, object] = {
             "train_statistics": train_statistics,
             "history_steps": int(history_steps),
+            "p_gt_cap_mw": float(config.p_gt_cap_mw),
+            "gt_min_output_mw": float(config.gt_min_output_mw),
+            "gt_action_off_threshold": float(getattr(config, "gt_action_off_threshold", -0.8)),
+            "q_ech_cap_mw": float(config.q_ech_cap_mw),
             "sequence_adapter": adapter_name,
             "sequence_predictor": sequence_predictor,
         }

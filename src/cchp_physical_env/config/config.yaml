@@ -144,9 +144,11 @@ env:
   ech_cop_partload_min_fraction: 0.72
   ech_cop_partload_curve_exp: 1.15
   gt_action_smoothing_enabled: true
-  gt_min_on_steps: 8.0
-  gt_min_off_steps: 8.0
-  penalty_gt_toggle: 100.0
+  gt_action_off_threshold: -0.8
+  gt_action_on_threshold: 0.25
+  gt_min_on_steps: 24.0
+  gt_min_off_steps: 24.0
+  penalty_gt_toggle: 2500.0
   penalty_gt_delta_mw: 5.0
   heat_unmet_th_mw: 0.05
   cool_unmet_th_mw: 0.05
@@ -154,6 +156,14 @@ env:
   cool_backup_idle_th_mw: 0.50
   penalty_idle_heat_backup: 50.0
   penalty_idle_cool_backup: 50.0
+  # GT低负荷率惩罚：GT开机但负荷率低于阈值时施加惩罚，抑制低效怠速运行
+  # gt_low_load_threshold_frac: 负荷率阈值（相对额定容量），低于此值触发
+  # penalty_gt_low_load_per_mw: 每MW缺口每步的惩罚（元）
+  gt_low_load_threshold_frac: 0.30
+  penalty_gt_low_load_per_mw: 8.0
+  # ABS驱动温度不足惩罚：TES热水温度低于ABS最低驱动温度时施加惩罚，鼓励GT余热充分加热TES
+  # penalty_abs_drive_temp_low_per_k: 每K温差每步的惩罚（元）
+  penalty_abs_drive_temp_low_per_k: 2.0
   heat_backup_shield_enabled: true
   heat_backup_shield_margin_mw: 0.05
 
@@ -377,8 +387,18 @@ training:
   pafc_dual_lr: 0.005
   # dual 先给 reward/teacher 一段适应时间，再逐步拉起可靠性乘子，避免过早塌到保守 fallback
   pafc_dual_warmup_steps: 8192
+  # PID Lagrangian: 替代纯积分双上升。Kp=0, Ki=0.005, Kd=0 恢复旧行为。
+  pafc_pid_kp: 0.0
+  pafc_pid_ki: 0.005
+  pafc_pid_kd: 0.0
+  pafc_pid_anti_windup: 10.0
+  # Wasserstein DRO critic gradient penalty: 0=禁用。
+  pafc_wasserstein_penalty_coef: 0.0
+  pafc_wasserstein_cost_critic_penalty: false
   pafc_actor_delay: 2
   pafc_exploration_noise_std: 0.06
+  # GT 维度专属探索噪声（0=使用全局 pafc_exploration_noise_std）。
+  pafc_gt_exploration_noise_std: 0.0
   pafc_target_policy_noise_std: 0.06
   pafc_target_noise_clip: 0.12
   pafc_gap_penalty_coef: 0.2
@@ -393,10 +413,13 @@ training:
   pafc_economic_abs_tradeoff_coef: 0.05
   # 价格高且系统有余量时，抑制“全买电”保守动作，鼓励 GT/联供侧承担更多经济调节
   pafc_economic_gt_grid_proxy_coef: 0.50
-  # GT 专项经济蒸馏：直接把同信息集下的“高价高净负荷开机、低价低需求停机”先验写入 actor 的 u_gt
-  pafc_economic_gt_distill_coef: 0.10
-  # 默认开启适中强度的经济教师蒸馏，在安全窗口内把更省钱的调度写入 actor。
-  pafc_economic_teacher_distill_coef: 0.25
+  # GT 专项经济蒸馏：直接把同信息集下的”高价高净负荷开机、低价低需求停机”先验写入 actor 的 u_gt
+  # 提高蒸馏权重可使 actor 更紧密地跟随 MILP teacher 的 GT 启停决策（MILP 全年 226 次启停），
+  # 缓解 exploration noise 无法跨越 GT 开/关机边界的局部最优问题。
+  pafc_economic_gt_distill_coef: 0.0  # 蒸馏已由 PID+Wasserstein 替代
+  # 经济教师蒸馏：在安全窗口内把更省钱的调度写入 actor。
+  # 提高权重使 actor 整体更贴近 MILP teacher 的调度模式。
+  pafc_economic_teacher_distill_coef: 0.0  # 蒸馏已由 PID+Wasserstein 替代
   # 经济教师在线蒸馏时，对非 teacher 维保留 safe 执行动作，避免省钱动作把冷/热链路拉塌
   pafc_economic_teacher_safe_preserve_coef: 1.0
   pafc_economic_teacher_safe_preserve_low_margin_boost: 0.75
@@ -431,14 +454,14 @@ training:
   pafc_economic_teacher_bes_action_weight: 1.5
   pafc_economic_teacher_tes_action_weight: 0.5
   # 全年经济教师 warm-start：按全年状态覆盖采样 teacher target，把 GT/BES/TES 的经济执行动作提前写进 actor
-  pafc_economic_teacher_full_year_warm_start_samples: 4096
-  pafc_economic_teacher_full_year_warm_start_epochs: 4
+  pafc_economic_teacher_full_year_warm_start_samples: 0  # 蒸馏已由 PID+Wasserstein 替代
+  pafc_economic_teacher_full_year_warm_start_epochs: 0  # 蒸馏已由 PID+Wasserstein 替代
   # GT 全年专项 warm-start：仅改写 u_gt，同时用 safe 轨迹强锚定其他维，专门修复“GT 常开最小出力”的保守塌缩
   pafc_economic_gt_full_year_warm_start_samples: 0
   pafc_economic_gt_full_year_warm_start_epochs: 0
   pafc_economic_gt_full_year_warm_start_u_weight: 0.0
   # 持续 BES 经济蒸馏：仅约束 u_bes，利用同信息集电价与 SOC 保持峰谷套利行为不在 RL 过程中塌缩
-  pafc_economic_bes_distill_coef: 0.15
+  pafc_economic_bes_distill_coef: 0.0  # 蒸馏已由 PID+Wasserstein 替代
   # BES 经济调度先验：仅基于同信息集电价与 SOC，帮助 PAFC-TD3 学出基本的峰谷套利
   pafc_economic_bes_prior_u: 0.35
   # 充电侧使用更强的 raw-u 幅值和权重，缓解“全年更愿意放电、不愿意低价充电”的保守偏置
@@ -483,6 +506,7 @@ training:
   # --pafc-expert-prefill-economic-policy checkpoint
   # --pafc-expert-prefill-economic-checkpoint-path <economic sb3/pafc json>
   pafc_expert_prefill_economic_checkpoint_path: ""
+  pafc_mode_anchor_checkpoint_path: ""
   # 结构化冻结维度：这些动作维度始终由安全 PAFC checkpoint 接管，不参与 RL 自由探索。
   # 典型用法：["u_abs", "u_ech", "u_boiler"]
   pafc_frozen_action_keys: []

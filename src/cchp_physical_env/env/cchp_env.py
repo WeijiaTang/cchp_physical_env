@@ -214,6 +214,8 @@ class EnvConfig:
     ech_cop_partload_min_fraction: float
     ech_cop_partload_curve_exp: float
     gt_action_smoothing_enabled: bool
+    gt_action_off_threshold: float
+    gt_action_on_threshold: float
     gt_min_on_steps: float
     gt_min_off_steps: float
     penalty_gt_toggle: float
@@ -224,6 +226,9 @@ class EnvConfig:
     cool_backup_idle_th_mw: float
     penalty_idle_heat_backup: float
     penalty_idle_cool_backup: float
+    gt_low_load_threshold_frac: float
+    penalty_gt_low_load_per_mw: float
+    penalty_abs_drive_temp_low_per_k: float
     heat_backup_shield_enabled: bool
     heat_backup_shield_margin_mw: float
 
@@ -609,9 +614,24 @@ class CCHPPhysicalEnv:
         return max(0.0, up_limit - prev), max(0.0, prev - down_limit)
 
     def _gt_target_mw_to_action(self, p_gt_target_mw: float) -> float:
+        """
+        GT 功率 -> 动作映射（反向）。
+        u_gt ∈ [-1, gt_action_off_threshold] 映射到关机，
+        u_gt ∈ (gt_action_off_threshold, 1] 映射到 [gt_min_output_mw, p_gt_cap_mw]。
+        """
+        threshold = float(getattr(self.config, "gt_action_off_threshold", -0.8))
+        min_output = float(self.config.gt_min_output_mw)
         cap = max(1e-6, float(self.config.p_gt_cap_mw))
-        normalized = 2.0 * (float(p_gt_target_mw) / cap) - 1.0
-        return float(_clip(normalized, -1.0, 1.0))
+
+        if p_gt_target_mw < 0.5 * min_output:
+            # 关机或极低出力 -> 映射到死区中点
+            return 0.5 * (threshold - 1.0)
+
+        # 开机 -> 线性映射 [min_output, cap] -> [threshold + ε, 1]
+        p_clamped = float(_clip(p_gt_target_mw, min_output, cap))
+        normalized = (p_clamped - min_output) / max(1e-6, cap - min_output)
+        u_gt = threshold + 1e-6 + normalized * (1.0 - threshold - 1e-6)
+        return float(_clip(u_gt, -1.0, 1.0))
 
     def _preprocess_action(
         self, action: Mapping[str, float], *, tes_hot_k: float
@@ -651,7 +671,19 @@ class CCHPPhysicalEnv:
             )
 
         u_gt_raw = float(_clip(processed_action.get("u_gt", 0.0), -1.0, 1.0))
-        p_gt_requested_mw_raw = ((u_gt_raw + 1.0) * 0.5) * float(self.config.p_gt_cap_mw)
+        threshold = float(getattr(self.config, "gt_action_off_threshold", -0.8))
+        min_output = float(self.config.gt_min_output_mw)
+        cap = float(self.config.p_gt_cap_mw)
+
+        # GT 动作映射：死区 + 线性段
+        if u_gt_raw <= threshold:
+            # 死区：[-1, threshold] -> 关机
+            p_gt_requested_mw_raw = 0.0
+        else:
+            # 线性段：(threshold, 1] -> [min_output, cap]
+            normalized = (u_gt_raw - threshold) / max(1e-9, 1.0 - threshold)
+            p_gt_requested_mw_raw = min_output + normalized * (cap - min_output)
+
         p_gt_requested_mw = p_gt_requested_mw_raw
         gt_action_smoothing_applied = False
         gt_min_on_enforced = False
@@ -666,14 +698,21 @@ class CCHPPhysicalEnv:
             ramp_limit = float(max(0.0, self.config.gt_ramp_mw_per_step))
             low_limit = max(0.0, float(self.gt_prev_p_mw) - ramp_limit)
             high_limit = min(float(self.config.p_gt_cap_mw), float(self.gt_prev_p_mw) + ramp_limit)
-            limited_target = float(_clip(p_gt_requested_mw, low_limit, high_limit))
+
+            # 关机指令（p_gt_requested_mw=0）跳过 ramp 限制
+            if p_gt_requested_mw < 1e-6:
+                limited_target = 0.0
+            else:
+                limited_target = float(_clip(p_gt_requested_mw, low_limit, high_limit))
+
             if abs(limited_target - p_gt_requested_mw) > 1e-9:
                 gt_action_smoothing_applied = True
             p_gt_requested_mw = limited_target
 
         min_on_steps = max(0, int(round(float(self.config.gt_min_on_steps))))
         min_off_steps = max(0, int(round(float(self.config.gt_min_off_steps))))
-        requested_on = p_gt_requested_mw > 1e-9
+        gt_on_threshold = float(getattr(self.config, "gt_action_on_threshold", 0.0))
+        requested_on = p_gt_requested_mw > gt_on_threshold
 
         if self.gt_prev_on and (not requested_on) and int(self.gt_on_steps) < min_on_steps:
             gt_min_on_enforced = True
@@ -688,6 +727,7 @@ class CCHPPhysicalEnv:
             requested_on = False
 
         if requested_on and 0.0 < p_gt_requested_mw < float(self.config.gt_min_output_mw):
+            # 已通过死区映射，此分支不应再触发
             p_gt_requested_mw = float(self.config.gt_min_output_mw)
             gt_action_smoothing_applied = True
 
@@ -919,12 +959,19 @@ class CCHPPhysicalEnv:
             )
         )
 
-        # 说明：约束求解器需要一个“线性化的可用热量输入”（HRSG 回收热量）。
+        # 说明：约束求解器需要一个"线性化的可用热量输入"（HRSG 回收热量）。
         # 这里先用当前 action 的 GT 目标做一次快速离线求解，得到 HRSG 的近似可用热量，
         # 再把这个值喂给约束求解器。
         # 注意：这一步不直接决定最终动作，只用于构造约束模型的输入。
         u_gt_guess = _clip(float(processed_action.get("u_gt", 0.0)), -1.0, 1.0)
-        p_gt_guess = ((u_gt_guess + 1.0) * 0.5) * self.config.p_gt_cap_mw
+        threshold = float(getattr(self.config, "gt_action_off_threshold", -0.8))
+        if u_gt_guess <= threshold:
+            p_gt_guess = 0.0
+        else:
+            normalized = (u_gt_guess - threshold) / max(1e-9, 1.0 - threshold)
+            p_gt_guess = float(self.config.gt_min_output_mw) + normalized * (
+                float(self.config.p_gt_cap_mw) - float(self.config.gt_min_output_mw)
+            )
         gt_guess = self.gt_network.solve_offdesign(p_gt_request_mw=p_gt_guess, t_amb_k=t_amb_k)
         hrsg_guess = self.hrsg_network.solve(
             m_exh_kg_per_s=gt_guess.m_exh_kg_per_s,
@@ -971,7 +1018,7 @@ class CCHPPhysicalEnv:
         qc_demand_mw = float(row["qc_dem_mw"])
 
         # 热侧：先把两种模式共用的中间量前置统一，减少重复。
-        # physics_in_loop：TES 充放热功率受“当前状态可行域”约束（max_feasible_*）。
+        # physics_in_loop：TES 充放热功率受"当前状态可行域"约束（max_feasible_*）。
         # reward_only：TES 充放热功率按额定上限（cap）执行，不额外做可行域收缩。
         u_tes = float(solver_result["u_tes"])
         u_abs = float(solver_result["u_abs"])
@@ -1034,8 +1081,8 @@ class CCHPPhysicalEnv:
             q_heat_dump_mw = float(heat_allocation["q_heat_dump_mw"])
         else:
             # reward_only 口径：按动作直接驱动各设备，然后再做供需结算。
-            # 该模式下不强制“供暖优先级”，因此可能出现热量使用总需求超过供给的情况。
-            # heat_overcommit_flag 用于标记这种“热侧超配”，供奖励/诊断使用。
+            # 该模式下不强制"供暖优先级"，因此可能出现热量使用总需求超过供给的情况。
+            # heat_overcommit_flag 用于标记这种"热侧超配"，供奖励/诊断使用。
             abs_result = self.abs_chiller.solve(
                 q_drive_request_mw=float(heat_allocation["q_abs_drive_alloc_mw"]),
                 t_hot_k=t_hot_k,
@@ -1144,6 +1191,23 @@ class CCHPPhysicalEnv:
             float(max(0.0, self.config.penalty_idle_cool_backup)) if idle_cool_backup else 0.0
         )
 
+        gt_low_load_threshold_mw = (
+            float(self.config.gt_low_load_threshold_frac) * float(self.config.p_gt_cap_mw)
+        )
+        gt_low_load_gap_mw = (
+            max(0.0, gt_low_load_threshold_mw - float(p_gt_mw))
+            if float(p_gt_mw) > 1e-9
+            else 0.0
+        )
+        gt_low_load_cost = gt_low_load_gap_mw * float(self.config.penalty_gt_low_load_per_mw)
+
+        abs_drive_temp_deficit_k = max(
+            0.0, float(self.abs_chiller.design.t_drive_min_k) - float(t_hot_k)
+        )
+        abs_drive_temp_low_cost = (
+            abs_drive_temp_deficit_k * float(self.config.penalty_abs_drive_temp_low_per_k)
+        )
+
         violation_count = sum(1 for flag in violation_flags.values() if flag)
         cost_breakdown = compute_cost_breakdown(
             dt_h=dt_h,
@@ -1168,6 +1232,8 @@ class CCHPPhysicalEnv:
             gt_delta_penalty=float(action_debug["gt_delta_cost"]),
             idle_heat_backup_penalty=idle_heat_backup_cost,
             idle_cool_backup_penalty=idle_cool_backup_cost,
+            gt_low_load_penalty=gt_low_load_cost,
+            abs_drive_temp_low_penalty=abs_drive_temp_low_cost,
             config=self.config,
         )
 
@@ -1210,6 +1276,8 @@ class CCHPPhysicalEnv:
             "cost_gt_delta": float(cost_breakdown.cost_gt_delta),
             "cost_idle_heat_backup": float(cost_breakdown.cost_idle_heat_backup),
             "cost_idle_cool_backup": float(cost_breakdown.cost_idle_cool_backup),
+            "cost_gt_low_load": float(cost_breakdown.cost_gt_low_load),
+            "cost_abs_drive_temp_low": float(cost_breakdown.cost_abs_drive_temp_low),
             "fuel_input_gt_mw_raw": float(gt_result.fuel_input_mw),
             "fuel_input_gt_effective_mw": float(fuel_input_gt_effective_mw),
             "fuel_input_gt_startup_extra_mw": float(startup_extra_fuel_mw),

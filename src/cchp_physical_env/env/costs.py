@@ -64,6 +64,8 @@ class CostBreakdown:
     cost_gt_delta: float
     cost_idle_heat_backup: float
     cost_idle_cool_backup: float
+    cost_gt_low_load: float
+    cost_abs_drive_temp_low: float
     cost_total: float
     reward: float
 
@@ -92,6 +94,8 @@ def compute_cost_breakdown(
     gt_delta_penalty: float,
     idle_heat_backup_penalty: float,
     idle_cool_backup_penalty: float,
+    gt_low_load_penalty: float,
+    abs_drive_temp_low_penalty: float,
     config: "EnvConfig",
 ) -> CostBreakdown:
     """
@@ -166,6 +170,8 @@ def compute_cost_breakdown(
     cost_gt_delta = max(0.0, float(gt_delta_penalty))
     cost_idle_heat_backup = max(0.0, float(idle_heat_backup_penalty))
     cost_idle_cool_backup = max(0.0, float(idle_cool_backup_penalty))
+    cost_gt_low_load = max(0.0, float(gt_low_load_penalty))
+    cost_abs_drive_temp_low = max(0.0, float(abs_drive_temp_low_penalty))
 
     cost_total = (
         cost_grid
@@ -183,6 +189,8 @@ def compute_cost_breakdown(
         + cost_gt_delta
         + cost_idle_heat_backup
         + cost_idle_cool_backup
+        + cost_gt_low_load
+        + cost_abs_drive_temp_low
     )
     return CostBreakdown(
         cost_grid_import=cost_grid_import,
@@ -204,6 +212,8 @@ def compute_cost_breakdown(
         cost_gt_delta=cost_gt_delta,
         cost_idle_heat_backup=cost_idle_heat_backup,
         cost_idle_cool_backup=cost_idle_cool_backup,
+        cost_gt_low_load=cost_gt_low_load,
+        cost_abs_drive_temp_low=cost_abs_drive_temp_low,
         cost_total=cost_total,
         reward=-cost_total,
     )

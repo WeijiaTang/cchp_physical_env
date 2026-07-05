@@ -27,6 +27,29 @@ def _sigmoid(value: float) -> float:
     return float(1.0 / (1.0 + np.exp(-clipped)))
 
 
+def _gt_action_to_target_mw(u_gt: float, *, config: EnvConfig) -> float:
+    u_gt = float(_clip(float(u_gt), -1.0, 1.0))
+    threshold = float(getattr(config, "gt_action_off_threshold", -0.8))
+    min_output = float(config.gt_min_output_mw)
+    cap = float(config.p_gt_cap_mw)
+    if u_gt <= threshold:
+        return 0.0
+    normalized = (u_gt - threshold) / max(1e-9, 1.0 - threshold)
+    return float(min_output + np.clip(normalized, 0.0, 1.0) * max(0.0, cap - min_output))
+
+
+def _gt_target_mw_to_action(p_gt_target_mw: float, *, config: EnvConfig) -> float:
+    threshold = float(getattr(config, "gt_action_off_threshold", -0.8))
+    min_output = float(config.gt_min_output_mw)
+    cap = max(1e-6, float(config.p_gt_cap_mw))
+    if float(p_gt_target_mw) < 0.5 * min_output:
+        return float(0.5 * (threshold - 1.0))
+    p_clamped = float(np.clip(float(p_gt_target_mw), min_output, cap))
+    normalized = (p_clamped - min_output) / max(1e-6, cap - min_output)
+    u_gt = threshold + 1e-6 + normalized * max(1e-6, 1.0 - threshold - 1e-6)
+    return float(np.clip(u_gt, -1.0, 1.0))
+
+
 @dataclass(slots=True)
 class _PlannerState:
     p_gt_prev_mw: float
@@ -413,7 +436,7 @@ class BaseMPCPolicy:
         t_amb_k = float(observation.get("t_amb_k", 298.15))
         qh_dem_mw = float(observation.get("qh_dem_mw", 0.0))
         u_gt = float(_clip(float(aligned.get("u_gt", -1.0)), -1.0, 1.0))
-        p_gt_req_mw = ((u_gt + 1.0) * 0.5) * float(self.config.p_gt_cap_mw)
+        p_gt_req_mw = _gt_action_to_target_mw(u_gt, config=self.config)
         gt_result = env.gt_network.solve_offdesign(
             p_gt_request_mw=float(p_gt_req_mw),
             t_amb_k=float(t_amb_k),
@@ -602,7 +625,7 @@ class BaseMPCPolicy:
         qh_dem_mw = float(observation.get("qh_dem_mw", 0.0))
         qc_dem_mw = float(observation.get("qc_dem_mw", 0.0))
 
-        p_gt_req_mw = ((float(repaired.get("u_gt", -1.0)) + 1.0) * 0.5) * float(self.config.p_gt_cap_mw)
+        p_gt_req_mw = _gt_action_to_target_mw(float(repaired.get("u_gt", -1.0)), config=self.config)
         t_amb_k = float(observation.get("t_amb_k", 298.15))
         tes_discharge_feasible_mw = (
             float(env.thermal_storage.max_feasible_discharge_mw(float(self.config.dt_hours)))
@@ -813,13 +836,14 @@ class BaseMPCPolicy:
         soc_bes = float(observation["soc_bes"])
         price_e = float(observation["price_e"])
         t_hot_k = float(observation.get("t_tes_hot_k", 0.0))
+        t_amb_k = float(observation.get("t_amb_k", 298.15))
         net_load = max(0.0, p_dem - p_re)
 
         if net_load <= 0.50 * float(self.config.p_gt_cap_mw):
             u_gt = -1.0
         else:
             gt_ratio = min(0.60, net_load / max(1e-6, float(self.config.p_gt_cap_mw)))
-            u_gt = gt_ratio * 2.0 - 1.0
+            u_gt = _gt_target_mw_to_action(gt_ratio * float(self.config.p_gt_cap_mw), config=self.config)
 
         if price_e >= 1200.0 and soc_bes > 0.35:
             u_bes = 0.3
@@ -891,7 +915,7 @@ class BaseMPCPolicy:
         q_tes_discharge_cap = max(1e-6, float(self.config.q_tes_discharge_cap_mw))
 
         p_gt_mw = float(_clip(action.p_gt_mw, 0.0, float(self.config.p_gt_cap_mw)))
-        u_gt = -1.0 if p_gt_mw <= 1e-9 else (2.0 * p_gt_mw / p_gt_cap) - 1.0
+        u_gt = _gt_target_mw_to_action(p_gt_mw, config=self.config)
         p_bes_mw = float(
             _clip(action.p_bes_mw, -float(self.config.p_bes_cap_mw), float(self.config.p_bes_cap_mw))
         )
@@ -943,6 +967,11 @@ class BaseMPCPolicy:
         ramp = max(0.0, float(self.config.gt_ramp_mw_per_step))
         min_on = max(0, int(round(float(self.config.gt_min_on_steps))))
         min_off = max(0, int(round(float(self.config.gt_min_off_steps))))
+        dispatch_gt_min_load_mw = max(
+            gt_min,
+            float(self.config.gt_low_load_threshold_frac) * float(self.config.p_gt_cap_mw),
+        )
+        enforce_dispatch_gt_min_load = bool(getattr(self, "enforce_dispatch_gt_min_load", False))
 
         p_gt_prev = float(state.p_gt_prev_mw)
         gt_prev_on = bool(state.gt_prev_on)
@@ -990,6 +1019,13 @@ class BaseMPCPolicy:
                 requested_on = False
             if requested_on and 0.0 < p_gt_req < gt_min:
                 p_gt_req = gt_min
+            if enforce_dispatch_gt_min_load and requested_on and 0.0 < p_gt_req < dispatch_gt_min_load_mw:
+                if gt_prev_on and gt_on_steps >= min_on:
+                    p_gt_req = 0.0
+                    requested_on = False
+                else:
+                    p_gt_req = min(dispatch_gt_min_load_mw, min(p_gt_cap, max(0.0, p_gt_prev + ramp)))
+                    requested_on = p_gt_req > 1e-9
 
             q_boiler_mw = float(_clip(plan[offset, 2], 0.0, q_boiler_cap))
             q_tes_signed = float(_clip(plan[offset, 5], -q_tes_charge_cap, q_tes_discharge_cap))
@@ -1284,6 +1320,20 @@ class BaseMPCPolicy:
             ) and (
                 float(ech_result.q_cool_mw) < float(max(0.0, self.config.cool_backup_idle_th_mw))
             )
+            gt_low_load_threshold_mw = float(self.config.gt_low_load_threshold_frac) * float(self.config.p_gt_cap_mw)
+            gt_low_load_gap_mw = (
+                max(0.0, gt_low_load_threshold_mw - float(gt_result.p_gt_mw))
+                if float(gt_result.p_gt_mw) > 1e-9
+                else 0.0
+            )
+            gt_low_load_cost = gt_low_load_gap_mw * float(self.config.penalty_gt_low_load_per_mw)
+            abs_drive_temp_deficit_k = max(
+                0.0,
+                float(self._require_env().abs_chiller.design.t_drive_min_k) - float(row.get("t_tes_hot_k", 0.0)),
+            )
+            abs_drive_temp_low_cost = abs_drive_temp_deficit_k * float(
+                self.config.penalty_abs_drive_temp_low_per_k
+            )
 
             cost_breakdown = compute_cost_breakdown(
                 dt_h=dt_h,
@@ -1308,6 +1358,8 @@ class BaseMPCPolicy:
                 gt_delta_penalty=float(gt_delta) * float(self.config.penalty_gt_delta_mw),
                 idle_heat_backup_penalty=float(self.config.penalty_idle_heat_backup) if idle_heat_backup else 0.0,
                 idle_cool_backup_penalty=float(self.config.penalty_idle_cool_backup) if idle_cool_backup else 0.0,
+                gt_low_load_penalty=float(gt_low_load_cost),
+                abs_drive_temp_low_penalty=float(abs_drive_temp_low_cost),
                 config=self.config,
             )
             total_cost += float(cost_breakdown.cost_total)
@@ -2124,8 +2176,17 @@ class MILPMPCPolicy(BaseMPCPolicy):
 
 
 class GAMPCPolicy(BaseMPCPolicy):
-    def __init__(self, *, config: EnvConfig, history_steps: int, seed: int) -> None:
+    def __init__(
+        self,
+        *,
+        config: EnvConfig,
+        history_steps: int,
+        seed: int,
+        use_milp_seed: bool = True,
+    ) -> None:
         super().__init__(config=config, history_steps=history_steps, seed=seed)
+        self.use_milp_seed = bool(use_milp_seed)
+        self.enforce_dispatch_gt_min_load = not bool(use_milp_seed)
         self.population_size = max(4, int(round(float(self.config.oracle_ga_population_size))))
         self.generations = max(1, int(round(float(self.config.oracle_ga_generations))))
         self.elite_count = min(
@@ -2144,6 +2205,8 @@ class GAMPCPolicy(BaseMPCPolicy):
                 "generations": int(self.generations),
                 "elite_count": int(self.elite_count),
                 "mutation_scale": float(self.mutation_scale),
+                "use_milp_seed": bool(self.use_milp_seed),
+                "enforce_dispatch_gt_min_load": bool(self.enforce_dispatch_gt_min_load),
             }
         )
         return payload
@@ -2250,7 +2313,7 @@ class GAMPCPolicy(BaseMPCPolicy):
         heuristic_plan = np.tile(
             np.array(
                 [
-                    ((float(fallback_action["u_gt"]) + 1.0) * 0.5) * float(self.config.p_gt_cap_mw),
+                    _gt_action_to_target_mw(float(fallback_action["u_gt"]), config=self.config),
                     float(fallback_action["u_bes"]) * float(self.config.p_bes_cap_mw),
                     float(fallback_action["u_boiler"]) * float(self.config.q_boiler_cap_mw),
                     float(fallback_action["u_abs"]) * float(self.config.q_abs_drive_cap_mw),
@@ -2273,7 +2336,7 @@ class GAMPCPolicy(BaseMPCPolicy):
             if shifted.shape[0] >= horizon:
                 population.append(np.clip(shifted[:horizon], lower, upper))
 
-        if optimize is not None and sparse is not None:
+        if bool(self.use_milp_seed) and optimize is not None and sparse is not None:
             milp_policy = MILPMPCPolicy(config=self.config, history_steps=self.planning_horizon_steps, seed=self.seed)
             milp_policy.bind_episode_context(
                 env=self._require_env(),
@@ -2293,7 +2356,7 @@ class GAMPCPolicy(BaseMPCPolicy):
                     )
                     milp_plan.append(
                         [
-                            ((float(action_dict["u_gt"]) + 1.0) * 0.5) * float(self.config.p_gt_cap_mw),
+                            _gt_action_to_target_mw(float(action_dict["u_gt"]), config=self.config),
                             float(action_dict["u_bes"]) * float(self.config.p_bes_cap_mw),
                             float(action_dict["u_boiler"]) * float(self.config.q_boiler_cap_mw),
                             float(action_dict["u_abs"]) * float(self.config.q_abs_drive_cap_mw),
@@ -2312,6 +2375,7 @@ class GAMPCPolicy(BaseMPCPolicy):
             population.append(candidate)
         return population[: int(self.population_size)]
 
+
     def _tournament_select(self, scores: np.ndarray, k: int = 3) -> int:
         candidates = self._rng.integers(low=0, high=len(scores), size=max(1, int(k)))
         best = int(candidates[0])
@@ -2319,3 +2383,115 @@ class GAMPCPolicy(BaseMPCPolicy):
             if float(scores[int(index)]) < float(scores[best]):
                 best = int(index)
         return best
+
+
+class GWOMPCPolicy(GAMPCPolicy):
+    def __init__(self, *, config: EnvConfig, history_steps: int, seed: int) -> None:
+        super().__init__(config=config, history_steps=history_steps, seed=seed, use_milp_seed=False)
+
+    def policy_metadata(self) -> dict[str, Any]:
+        payload = super().policy_metadata()
+        payload.update({"optimizer": "grey_wolf_optimizer"})
+        return payload
+
+    def _solve_plan(self, *, current_step: int, observation: dict[str, float]) -> list[dict[str, float]]:
+        horizon = self._horizon_length(current_step)
+        if horizon <= 0:
+            return [self._fallback_action(observation)]
+
+        state = self._snapshot_state()
+        lower = np.tile(
+            np.array(
+                [
+                    0.0,
+                    -float(self.config.p_bes_cap_mw),
+                    0.0,
+                    0.0,
+                    0.0,
+                    -float(self.config.q_tes_charge_cap_mw),
+                ],
+                dtype=float,
+            ),
+            (horizon, 1),
+        )
+        upper = np.tile(
+            np.array(
+                [
+                    float(self.config.p_gt_cap_mw),
+                    float(self.config.p_bes_cap_mw),
+                    float(self.config.q_boiler_cap_mw),
+                    float(self.config.q_abs_drive_cap_mw if self._planner_abs_enabled() else 0.0),
+                    float(self.config.q_ech_cap_mw),
+                    float(self.config.q_tes_discharge_cap_mw),
+                ],
+                dtype=float,
+            ),
+            (horizon, 1),
+        )
+
+        population = self._initialize_population(
+            horizon=horizon,
+            lower=lower,
+            upper=upper,
+            observation=observation,
+            current_step=current_step,
+        )
+        best_plan = population[0].copy()
+        best_score = np.inf
+        for generation in range(int(self.generations)):
+            scores = np.asarray(
+                [
+                    self._simulate_sequence(state=state, start_idx=current_step, plan=np.asarray(candidate))[0]
+                    for candidate in population
+                ],
+                dtype=float,
+            )
+            order = np.argsort(scores)
+            if float(scores[int(order[0])]) < float(best_score):
+                best_score = float(scores[int(order[0])])
+                best_plan = population[int(order[0])].copy()
+            alpha = population[int(order[0])].copy()
+            beta = population[int(order[min(1, len(order) - 1)])].copy()
+            delta = population[int(order[min(2, len(order) - 1)])].copy()
+            a = 2.0 - 2.0 * float(generation) / float(max(1, int(self.generations) - 1))
+            next_population = [alpha, beta, delta]
+            while len(next_population) < int(self.population_size):
+                wolf = population[len(next_population) % len(population)]
+                r1 = self._rng.random(size=wolf.shape)
+                r2 = self._rng.random(size=wolf.shape)
+                a1 = 2.0 * a * r1 - a
+                c1 = 2.0 * r2
+                r1 = self._rng.random(size=wolf.shape)
+                r2 = self._rng.random(size=wolf.shape)
+                a2 = 2.0 * a * r1 - a
+                c2 = 2.0 * r2
+                r1 = self._rng.random(size=wolf.shape)
+                r2 = self._rng.random(size=wolf.shape)
+                a3 = 2.0 * a * r1 - a
+                c3 = 2.0 * r2
+                x1 = alpha - a1 * np.abs(c1 * alpha - wolf)
+                x2 = beta - a2 * np.abs(c2 * beta - wolf)
+                x3 = delta - a3 * np.abs(c3 * delta - wolf)
+                next_population.append(np.clip((x1 + x2 + x3) / 3.0, lower, upper))
+            population = next_population[: int(self.population_size)]
+
+        scores = np.asarray(
+            [self._simulate_sequence(state=state, start_idx=current_step, plan=np.asarray(candidate))[0] for candidate in population],
+            dtype=float,
+        )
+        best_idx = int(np.argmin(scores))
+        if float(scores[best_idx]) < float(best_score):
+            best_plan = population[best_idx].copy()
+
+        _, realized_actions, planner_debug_rows = self._simulate_sequence(
+            state=state,
+            start_idx=current_step,
+            plan=best_plan,
+        )
+        self._previous_plan = best_plan.copy()
+        action_dicts: list[dict[str, float]] = []
+        for action, debug_row in zip(realized_actions, planner_debug_rows):
+            env_action = self._action_to_env_dict(action)
+            env_action.update({key: float(value) for key, value in debug_row.items()})
+            action_dicts.append(env_action)
+        return action_dicts

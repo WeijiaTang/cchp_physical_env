@@ -46,6 +46,8 @@ class KPITracker:
             "gt_delta": 0.0,
             "idle_heat_backup": 0.0,
             "idle_cool_backup": 0.0,
+            "gt_low_load": 0.0,
+            "abs_drive_temp_low": 0.0,
         }
         self.energies_mwh = {
             "demand_e": 0.0,

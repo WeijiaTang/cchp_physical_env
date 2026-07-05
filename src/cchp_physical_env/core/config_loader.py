@@ -180,6 +180,7 @@ TRAINING_DEFAULTS: dict[str, Any] = {
     "pafc_expert_prefill_checkpoint_path": "",
     "pafc_expert_prefill_economic_policy": "checkpoint",
     "pafc_expert_prefill_economic_checkpoint_path": "",
+    "pafc_mode_anchor_checkpoint_path": "",
     "pafc_frozen_action_keys": [],
     "pafc_frozen_action_safe_checkpoint_path": "",
     "pafc_gt_safe_action_delta_clip": 0.0,
@@ -538,6 +539,14 @@ ENV_NUMERIC_RULES: dict[str, tuple[Callable[[float], bool], str]] = {
         lambda value: 0.0 <= value <= 1.0,
         "abs_boiler_assist_boiler_fraction 必须在 [0,1]。",
     ),
+    "gt_action_off_threshold": (
+        lambda value: -1.0 <= value < 1.0,
+        "gt_action_off_threshold 必须在 [-1, 1)。",
+    ),
+    "gt_action_on_threshold": (
+        lambda value: -1.0 < value <= 1.0,
+        "gt_action_on_threshold 必须在 (-1, 1]。",
+    ),
     "gt_min_on_steps": (
         lambda value: value >= 0.0,
         "gt_min_on_steps 必须 >= 0。",
@@ -577,6 +586,18 @@ ENV_NUMERIC_RULES: dict[str, tuple[Callable[[float], bool], str]] = {
     "penalty_idle_cool_backup": (
         lambda value: value >= 0.0,
         "penalty_idle_cool_backup 必须 >= 0。",
+    ),
+    "gt_low_load_threshold_frac": (
+        lambda value: 0.0 <= value <= 1.0,
+        "gt_low_load_threshold_frac 必须在 [0, 1]。",
+    ),
+    "penalty_gt_low_load_per_mw": (
+        lambda value: value >= 0.0,
+        "penalty_gt_low_load_per_mw 必须 >= 0。",
+    ),
+    "penalty_abs_drive_temp_low_per_k": (
+        lambda value: value >= 0.0,
+        "penalty_abs_drive_temp_low_per_k 必须 >= 0。",
     ),
     "heat_backup_shield_margin_mw": (
         lambda value: value >= 0.0,
@@ -931,6 +952,7 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
         if key in {
             "pafc_expert_prefill_checkpoint_path",
             "pafc_expert_prefill_economic_checkpoint_path",
+            "pafc_mode_anchor_checkpoint_path",
             "pafc_frozen_action_safe_checkpoint_path",
         }:
             if not isinstance(value, str):
@@ -1234,11 +1256,11 @@ def validate_training_overrides(overrides: dict[str, Any]) -> None:
     sb3_enabled_flag = bool(overrides.get("sb3_enabled", TRAINING_DEFAULTS.get("sb3_enabled", False)))
     if sb3_enabled_flag:
         # sb3_enabled=true 时，policy 仅作记录，但仍需要校验以避免拼写错误污染实验口径。
-        if policy not in {"rule", "easy_rule", "random", "sequence_rule", "milp_mpc", "ga_mpc", "sb3", "pafc_td3"}:
-            raise ValueError("training.policy 仅支持 rule/easy_rule/random/sequence_rule/milp_mpc/ga_mpc/sb3/pafc_td3（sb3_enabled=true 时该字段仅作备注，不参与路由）。")
+        if policy not in {"rule", "easy_rule", "random", "sequence_rule", "milp_mpc", "ga_mpc", "ga", "ga_dispatch", "gwo", "gwo_mpc", "gwo_dispatch", "sb3", "pafc_td3"}:
+            raise ValueError("training.policy 仅支持 rule/easy_rule/random/sequence_rule/milp_mpc/ga_mpc/ga_dispatch/gwo_dispatch/sb3/pafc_td3（sb3_enabled=true 时该字段仅作备注，不参与路由）。")
     else:
-        if policy not in {"rule", "easy_rule", "random", "sequence_rule", "milp_mpc", "ga_mpc", "pafc_td3"}:
-            raise ValueError("training.policy 仅支持 rule/easy_rule/random/sequence_rule/milp_mpc/ga_mpc/pafc_td3（sb3_enabled=false）。")
+        if policy not in {"rule", "easy_rule", "random", "sequence_rule", "milp_mpc", "ga_mpc", "ga", "ga_dispatch", "gwo", "gwo_mpc", "gwo_dispatch", "pafc_td3"}:
+            raise ValueError("training.policy 仅支持 rule/easy_rule/random/sequence_rule/milp_mpc/ga_mpc/ga_dispatch/gwo_dispatch/pafc_td3（sb3_enabled=false）。")
     sequence_adapter = str(
         overrides.get("sequence_adapter", TRAINING_DEFAULTS["sequence_adapter"])
     ).strip().lower()

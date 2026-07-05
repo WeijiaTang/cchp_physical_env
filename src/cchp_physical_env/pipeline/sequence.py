@@ -62,6 +62,25 @@ _ACTION_BOUNDS = {
     "u_abs": (0.0, 1.0),      # 吸收式制冷机控制信号范围
 }
 
+
+def _gt_target_mw_to_action(
+    p_gt_target_mw: float,
+    *,
+    p_gt_cap_mw: float,
+    gt_min_output_mw: float = 1.0,
+    gt_action_off_threshold: float = -0.8,
+) -> float:
+    threshold = float(np.clip(float(gt_action_off_threshold), -1.0, 1.0))
+    min_output = max(0.0, float(gt_min_output_mw))
+    cap = max(1e-6, float(p_gt_cap_mw))
+    if float(p_gt_target_mw) < 0.5 * min_output:
+        return float(0.5 * (threshold - 1.0))
+    p_clamped = float(np.clip(float(p_gt_target_mw), min_output, cap))
+    normalized = (p_clamped - min_output) / max(1e-6, cap - min_output)
+    u_gt = threshold + 1e-6 + normalized * max(1e-6, 1.0 - threshold - 1e-6)
+    return float(np.clip(u_gt, -1.0, 1.0))
+
+
 def build_feature_vector(observation: dict[str, float], feature_keys: Iterable[str]) -> np.ndarray:
     """
     构建特征向量
@@ -366,6 +385,8 @@ class RuleSequenceAdapter(SequenceAdapter):
         train_statistics: dict,
         history_steps: int,
         p_gt_cap_mw: float = 12.0,
+        gt_min_output_mw: float = 1.0,
+        gt_action_off_threshold: float = -0.8,
         q_ech_cap_mw: float = 6.0,
         observation_feature_keys: tuple[str, ...] = DEFAULT_SEQUENCE_OBSERVATION_FEATURE_KEYS,
         action_feature_keys: tuple[str, ...] = DEFAULT_SEQUENCE_ACTION_KEYS,
@@ -377,6 +398,8 @@ class RuleSequenceAdapter(SequenceAdapter):
         )
         self.train_statistics = train_statistics
         self.p_gt_cap_mw = float(p_gt_cap_mw)
+        self.gt_min_output_mw = float(gt_min_output_mw)
+        self.gt_action_off_threshold = float(gt_action_off_threshold)
         self.q_ech_cap_mw = float(q_ech_cap_mw)
 
         required_features = {"p_dem_mw", "qh_dem_mw", "qc_dem_mw", "pv_mw", "wt_mw", "price_e"}
@@ -418,7 +441,12 @@ class RuleSequenceAdapter(SequenceAdapter):
 
         net_load = max(0.0, p_dem_smooth - p_re_smooth)
         gt_ratio = min(1.0, net_load / max(1e-6, self.p_gt_cap_mw))
-        u_gt = gt_ratio * 2.0 - 1.0
+        u_gt = _gt_target_mw_to_action(
+            gt_ratio * self.p_gt_cap_mw,
+            p_gt_cap_mw=self.p_gt_cap_mw,
+            gt_min_output_mw=self.gt_min_output_mw,
+            gt_action_off_threshold=self.gt_action_off_threshold,
+        )
 
         if price_now >= self.price_high and soc_bes > 0.25:
             u_bes = 0.8
@@ -546,6 +574,8 @@ def build_sequence_adapter(
     observation_feature_keys: tuple[str, ...] = DEFAULT_SEQUENCE_OBSERVATION_FEATURE_KEYS,
     action_feature_keys: tuple[str, ...] = DEFAULT_SEQUENCE_ACTION_KEYS,
     p_gt_cap_mw: float = 12.0,
+    gt_min_output_mw: float = 1.0,
+    gt_action_off_threshold: float = -0.8,
     q_ech_cap_mw: float = 6.0,
     predictor: Callable[[np.ndarray, dict[str, float]], Mapping[str, float]] | None = None,
 ) -> SequenceAdapter:
@@ -555,6 +585,8 @@ def build_sequence_adapter(
             train_statistics=train_statistics,
             history_steps=history_steps,
             p_gt_cap_mw=p_gt_cap_mw,
+            gt_min_output_mw=gt_min_output_mw,
+            gt_action_off_threshold=gt_action_off_threshold,
             q_ech_cap_mw=q_ech_cap_mw,
             observation_feature_keys=observation_feature_keys,
             action_feature_keys=action_feature_keys,
@@ -596,6 +628,8 @@ class SequenceRulePolicy:
         history_steps: int = 16,
         feature_keys: tuple[str, ...] = DEFAULT_SEQUENCE_OBSERVATION_FEATURE_KEYS,
         p_gt_cap_mw: float = 12.0,
+        gt_min_output_mw: float = 1.0,
+        gt_action_off_threshold: float = -0.8,
         q_ech_cap_mw: float = 6.0,
         sequence_adapter: str = "rule",
         sequence_predictor: Callable[[np.ndarray, dict[str, float]], Mapping[str, float]] | None = None,
@@ -608,6 +642,8 @@ class SequenceRulePolicy:
             observation_feature_keys=feature_keys,
             action_feature_keys=DEFAULT_SEQUENCE_ACTION_KEYS,
             p_gt_cap_mw=p_gt_cap_mw,
+            gt_min_output_mw=gt_min_output_mw,
+            gt_action_off_threshold=gt_action_off_threshold,
             q_ech_cap_mw=q_ech_cap_mw,
             predictor=sequence_predictor,
         )

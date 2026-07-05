@@ -214,6 +214,84 @@ def _gt_off_deadband_mw(*, gt_min_output_mw: float, gt_off_deadband_ratio: float
     return max(0.0, float(gt_min_output_mw)) * ratio
 
 
+def _gt_action_off_threshold(env_config) -> float:
+    return float(np.clip(float(getattr(env_config, "gt_action_off_threshold", -0.8)), -1.0, 1.0))
+
+
+def _gt_action_to_target_mw_np(
+    *,
+    u_gt: float,
+    p_gt_cap_mw: float,
+    gt_min_output_mw: float,
+    gt_action_off_threshold: float,
+) -> float:
+    u_gt = float(np.clip(float(u_gt), -1.0, 1.0))
+    threshold = float(gt_action_off_threshold)
+    min_output = max(0.0, float(gt_min_output_mw))
+    cap = max(_NORM_EPS, float(p_gt_cap_mw))
+    if u_gt <= threshold:
+        return 0.0
+    normalized = (u_gt - threshold) / max(_NORM_EPS, 1.0 - threshold)
+    return float(min_output + np.clip(normalized, 0.0, 1.0) * max(0.0, cap - min_output))
+
+
+def _gt_target_mw_to_action_np(
+    *,
+    p_gt_target_mw: float,
+    p_gt_cap_mw: float,
+    gt_min_output_mw: float,
+    gt_action_off_threshold: float,
+) -> float:
+    threshold = float(gt_action_off_threshold)
+    min_output = max(0.0, float(gt_min_output_mw))
+    cap = max(_NORM_EPS, float(p_gt_cap_mw))
+    if float(p_gt_target_mw) < 0.5 * min_output:
+        return float(0.5 * (threshold - 1.0))
+    p_clamped = float(np.clip(float(p_gt_target_mw), min_output, cap))
+    normalized = (p_clamped - min_output) / max(_NORM_EPS, cap - min_output)
+    u_gt = threshold + _NORM_EPS + normalized * max(_NORM_EPS, 1.0 - threshold - _NORM_EPS)
+    return float(np.clip(u_gt, -1.0, 1.0))
+
+
+def _gt_action_to_target_mw_tensor(
+    *,
+    u_gt,
+    p_gt_cap_mw: float,
+    gt_min_output_mw: float,
+    gt_action_off_threshold: float,
+    torch,
+):
+    u_gt = torch.clamp(u_gt, -1.0, 1.0)
+    threshold = float(gt_action_off_threshold)
+    min_output = max(0.0, float(gt_min_output_mw))
+    cap = max(_NORM_EPS, float(p_gt_cap_mw))
+    normalized = (u_gt - threshold) / max(_NORM_EPS, 1.0 - threshold)
+    p_gt_target = min_output + torch.clamp(normalized, 0.0, 1.0) * max(0.0, cap - min_output)
+    return torch.where(u_gt <= threshold, torch.zeros_like(u_gt), p_gt_target)
+
+
+def _gt_target_mw_to_action_tensor(
+    *,
+    p_gt_target_mw,
+    p_gt_cap_mw: float,
+    gt_min_output_mw: float,
+    gt_action_off_threshold: float,
+    torch,
+):
+    threshold = float(gt_action_off_threshold)
+    min_output = max(0.0, float(gt_min_output_mw))
+    cap = max(_NORM_EPS, float(p_gt_cap_mw))
+    off_value = float(0.5 * (threshold - 1.0))
+    p_clamped = torch.clamp(p_gt_target_mw, min=min_output, max=cap)
+    normalized = (p_clamped - min_output) / max(_NORM_EPS, cap - min_output)
+    u_gt = threshold + _NORM_EPS + normalized * max(_NORM_EPS, 1.0 - threshold - _NORM_EPS)
+    return torch.where(
+        p_gt_target_mw < (0.5 * min_output),
+        torch.full_like(p_gt_target_mw, off_value),
+        torch.clamp(u_gt, -1.0, 1.0),
+    )
+
+
 def _canonicalize_gt_target_np(
     *,
     p_gt_target_mw: float,
@@ -587,7 +665,12 @@ def _gt_price_prior_target_np(
         gt_min_output_mw=gt_min_output_mw,
         gt_off_deadband_ratio=gt_off_deadband_ratio,
     )
-    target_u_gt = float(np.clip(2.0 * (p_gt_target_mw / p_gt_cap_mw) - 1.0, -1.0, 1.0))
+    target_u_gt = _gt_target_mw_to_action_np(
+        p_gt_target_mw=p_gt_target_mw,
+        p_gt_cap_mw=p_gt_cap_mw,
+        gt_min_output_mw=gt_min_output_mw,
+        gt_action_off_threshold=_gt_action_off_threshold(env_config),
+    )
     return {
         "target_u_gt": float(target_u_gt),
         "opportunity": float(commit_score),
@@ -1079,7 +1162,12 @@ def _estimate_dispatch_proxy_np(
     u_abs_exec = float(np.clip(_action_value("u_abs"), 0.0, 1.0))
 
     u_gt_exec = float(np.clip(_action_value("u_gt"), -1.0, 1.0))
-    p_gt_exec_mw = ((u_gt_exec + 1.0) * 0.5) * p_gt_cap_mw
+    p_gt_exec_mw = _gt_action_to_target_mw_np(
+        u_gt=u_gt_exec,
+        p_gt_cap_mw=p_gt_cap_mw,
+        gt_min_output_mw=float(env_config.gt_min_output_mw),
+        gt_action_off_threshold=_gt_action_off_threshold(env_config),
+    )
     gt_load_ratio = float(np.clip(p_gt_exec_mw / p_gt_cap_mw, 0.0, 1.0))
     eta_gt = float(env_config.gt_eta_min) + (
         float(env_config.gt_eta_max) - float(env_config.gt_eta_min)
@@ -1773,6 +1861,16 @@ class PAFCTD3TrainConfig:
     expert_prefill_checkpoint_path: str | Path = ""
     expert_prefill_economic_policy: str = "checkpoint"
     expert_prefill_economic_checkpoint_path: str | Path = ""
+    mode_anchor_checkpoint_path: str | Path = ""
+    fhac_dqn_lr: float = 3e-4
+    fhac_mode_eval_interval: int = 16
+    fhac_dqn_mse_coef: float = 0.1
+    fhac_acont_reg_coef: float = 0.01
+    fhac_mode_temperature: float = 1.0
+    fhac_mode_embed_dim: int = 0
+    fhac_dqn_warmup_steps: int = 16384
+    fhac_dqn_bellman_beta_start: float = 1.0
+    fhac_dqn_bellman_beta_end: float = 0.5
     frozen_action_keys: tuple[str, ...] = field(default_factory=tuple)
     frozen_action_safe_checkpoint_path: str | Path = ""
     gt_safe_action_delta_clip: float = 0.0
@@ -1976,6 +2074,16 @@ class PAFCTD3TrainConfig:
         self.expert_prefill_economic_checkpoint_path = str(
             self.expert_prefill_economic_checkpoint_path
         ).strip()
+        self.mode_anchor_checkpoint_path = str(self.mode_anchor_checkpoint_path).strip()
+        self.fhac_dqn_lr = float(self.fhac_dqn_lr)
+        self.fhac_mode_eval_interval = int(self.fhac_mode_eval_interval)
+        self.fhac_dqn_mse_coef = float(self.fhac_dqn_mse_coef)
+        self.fhac_acont_reg_coef = float(self.fhac_acont_reg_coef)
+        self.fhac_mode_temperature = float(self.fhac_mode_temperature)
+        self.fhac_mode_embed_dim = int(self.fhac_mode_embed_dim)
+        self.fhac_dqn_warmup_steps = int(self.fhac_dqn_warmup_steps)
+        self.fhac_dqn_bellman_beta_start = float(self.fhac_dqn_bellman_beta_start)
+        self.fhac_dqn_bellman_beta_end = float(self.fhac_dqn_bellman_beta_end)
         self.frozen_action_keys = _normalize_action_key_tuple(self.frozen_action_keys)
         self.frozen_action_safe_checkpoint_path = str(
             self.frozen_action_safe_checkpoint_path
@@ -2286,6 +2394,8 @@ class PAFCTD3TrainConfig:
             "easy_rule_abs",
             "checkpoint",
             "checkpoint_dual",
+            "milp_mpc",
+            "ga_mpc",
         }:
             raise ValueError(
                 "expert_prefill_policy 当前仅支持 "
@@ -2351,6 +2461,24 @@ class PAFCTD3TrainConfig:
             raise ValueError("actor_warm_start_batch_size 必须 > 0。")
         if self.actor_warm_start_lr <= 0.0:
             raise ValueError("actor_warm_start_lr 必须 > 0。")
+        if self.fhac_dqn_lr <= 0.0:
+            raise ValueError("fhac_dqn_lr 必须 > 0。")
+        if self.fhac_mode_eval_interval < 1:
+            raise ValueError("fhac_mode_eval_interval 必须 >= 1。")
+        if self.fhac_dqn_mse_coef < 0.0:
+            raise ValueError("fhac_dqn_mse_coef 必须 >= 0。")
+        if self.fhac_acont_reg_coef < 0.0:
+            raise ValueError("fhac_acont_reg_coef 必须 >= 0。")
+        if self.fhac_mode_temperature <= 0.0:
+            raise ValueError("fhac_mode_temperature 必须 > 0。")
+        if self.fhac_mode_embed_dim < 0:
+            raise ValueError("fhac_mode_embed_dim 必须 >= 0。")
+        if self.fhac_dqn_warmup_steps < 0:
+            raise ValueError("fhac_dqn_warmup_steps 必须 >= 0。")
+        if self.fhac_dqn_bellman_beta_start < 0.0 or self.fhac_dqn_bellman_beta_start > 1.0:
+            raise ValueError("fhac_dqn_bellman_beta_start 必须在 [0,1]。")
+        if self.fhac_dqn_bellman_beta_end < 0.0 or self.fhac_dqn_bellman_beta_end > 1.0:
+            raise ValueError("fhac_dqn_bellman_beta_end 必须在 [0,1]。")
         if self.expert_prefill_cooling_bias < 0.0 or self.expert_prefill_cooling_bias > 1.0:
             raise ValueError("expert_prefill_cooling_bias 必须在 [0,1]。")
         if self.expert_prefill_abs_replay_boost < 0:
@@ -2405,10 +2533,26 @@ class PAFCTD3TrainConfig:
 
 
 class _ReplayBuffer:
-    def __init__(self, *, capacity: int, obs_dim: int, action_dim: int) -> None:
+    def __init__(
+        self,
+        *,
+        capacity: int,
+        obs_dim: int,
+        action_dim: int,
+        mode_context_dim: int = 0,
+    ) -> None:
         self.capacity = int(capacity)
+        self.mode_context_dim = max(0, int(mode_context_dim))
         self.obs = np.zeros((self.capacity, obs_dim), dtype=np.float32)
         self.next_obs = np.zeros((self.capacity, obs_dim), dtype=np.float32)
+        self.mode_context = np.zeros(
+            (self.capacity, self.mode_context_dim),
+            dtype=np.float32,
+        )
+        self.next_mode_context = np.zeros(
+            (self.capacity, self.mode_context_dim),
+            dtype=np.float32,
+        )
         self.action_raw = np.zeros((self.capacity, action_dim), dtype=np.float32)
         self.action_exec = np.zeros((self.capacity, action_dim), dtype=np.float32)
         self.teacher_action_exec = np.zeros((self.capacity, action_dim), dtype=np.float32)
@@ -2426,6 +2570,8 @@ class _ReplayBuffer:
         *,
         obs: np.ndarray,
         next_obs: np.ndarray,
+        mode_context: np.ndarray | None = None,
+        next_mode_context: np.ndarray | None = None,
         action_raw: np.ndarray,
         action_exec: np.ndarray,
         teacher_action_exec: np.ndarray | None = None,
@@ -2439,6 +2585,20 @@ class _ReplayBuffer:
         index = self._ptr
         self.obs[index] = np.asarray(obs, dtype=np.float32)
         self.next_obs[index] = np.asarray(next_obs, dtype=np.float32)
+        if self.mode_context_dim > 0:
+            if mode_context is None:
+                self.mode_context[index].fill(0.0)
+            else:
+                self.mode_context[index] = np.asarray(mode_context, dtype=np.float32).reshape(
+                    self.mode_context_dim
+                )
+            if next_mode_context is None:
+                self.next_mode_context[index].fill(0.0)
+            else:
+                self.next_mode_context[index] = np.asarray(
+                    next_mode_context,
+                    dtype=np.float32,
+                ).reshape(self.mode_context_dim)
         self.action_raw[index] = np.asarray(action_raw, dtype=np.float32)
         self.action_exec[index] = np.asarray(action_exec, dtype=np.float32)
         if teacher_action_exec is not None:
@@ -2464,6 +2624,8 @@ class _ReplayBuffer:
         return {
             "obs": self.obs[indices].copy(),
             "next_obs": self.next_obs[indices].copy(),
+            "mode_context": self.mode_context[indices].copy(),
+            "next_mode_context": self.next_mode_context[indices].copy(),
             "action_raw": self.action_raw[indices].copy(),
             "action_exec": self.action_exec[indices].copy(),
             "teacher_action_exec": self.teacher_action_exec[indices].copy(),
@@ -2498,20 +2660,101 @@ def _build_mlp_layers(
     return nn.Sequential(*layers)
 
 
+class _DQNModeBuffer:
+    def __init__(self, capacity: int = 4096) -> None:
+        self._capacity = int(capacity)
+        self._windowed_obs: list[np.ndarray] = []
+        self._obs_vectors: list[np.ndarray] = []
+        self._mode_contexts: list[np.ndarray] = []
+        self._prev_windowed_obs: list[np.ndarray] = []
+        self._rewards: list[np.float32] = []
+        self._dones: list[bool] = []
+
+    @property
+    def size(self) -> int:
+        return len(self._windowed_obs)
+
+    def add(
+        self,
+        *,
+        windowed_obs: np.ndarray,
+        obs_vector: np.ndarray,
+        mode_context: np.ndarray,
+        prev_windowed_obs: np.ndarray | None = None,
+        reward: float = 0.0,
+        done: bool = False,
+    ) -> None:
+        wobs = np.asarray(windowed_obs, dtype=np.float32)
+        if wobs.ndim >= 3 and wobs.shape[0] == 1:
+            wobs = wobs.squeeze(0)
+        self._windowed_obs.append(wobs.copy())
+        self._obs_vectors.append(np.asarray(obs_vector, dtype=np.float32).copy())
+        self._mode_contexts.append(np.asarray(mode_context, dtype=np.float32).copy())
+        self._prev_windowed_obs.append(
+            np.asarray(prev_windowed_obs, dtype=np.float32).copy()
+            if prev_windowed_obs is not None
+            else np.zeros_like(wobs)
+        )
+        self._rewards.append(np.float32(reward))
+        self._dones.append(bool(done))
+        for _list in (
+            self._windowed_obs,
+            self._obs_vectors,
+            self._mode_contexts,
+            self._prev_windowed_obs,
+            self._rewards,
+            self._dones,
+        ):
+            while len(_list) > self._capacity:
+                _list.pop(0)
+
+    def sample(
+        self, batch_size: int, rng: np.random.Generator
+    ) -> dict[str, np.ndarray]:
+        n = min(int(batch_size), len(self._windowed_obs))
+        indices = rng.integers(0, len(self._windowed_obs), size=n)
+        return {
+            "windowed_obs": np.stack([self._windowed_obs[i] for i in indices]),
+            "obs_vector": np.stack([self._obs_vectors[i] for i in indices]),
+            "mode_context": np.stack([self._mode_contexts[i] for i in indices]),
+            "prev_windowed_obs": np.stack([self._prev_windowed_obs[i] for i in indices]),
+            "reward": np.asarray([float(self._rewards[i]) for i in indices], dtype=np.float32).reshape(-1, 1),
+            "done": np.asarray([float(self._dones[i]) for i in indices], dtype=np.float32).reshape(-1, 1),
+            "has_transition": np.asarray(
+                [float(not self._is_first_episode_entry(i)) for i in indices],
+                dtype=np.float32,
+            ).reshape(-1, 1),
+        }
+
+    def _is_first_episode_entry(self, idx: int) -> bool:
+        return bool(idx == 0 or bool(self._dones[idx - 1]))
+
+
 def build_pafc_actor_network(
     *,
     observation_dim: int,
     action_keys: Sequence[str],
+    mode_context_dim: int = 0,
+    mode_embed_dim: int = 0,
     hidden_dims: Sequence[int] = (256, 256),
 ):
     torch, nn, _, _ = _require_torch_modules()
     action_low_np, action_high_np = _action_bounds_arrays(action_keys)
+    _mode_dim = max(0, int(mode_context_dim))
+    _embed_dim = max(0, int(mode_embed_dim))
 
     class PAFCActor(nn.Module):
         def __init__(self) -> None:
             super().__init__()
+            self._mode_dim = _mode_dim
+            if _mode_dim > 0 and _embed_dim > 0:
+                self.mode_embed = nn.Linear(_mode_dim, _embed_dim)
+                input_dim = int(observation_dim) + _embed_dim
+            else:
+                self.mode_embed = None
+                input_dim = int(observation_dim) + _mode_dim
             self.net = _build_mlp_layers(
-                input_dim=int(observation_dim),
+                input_dim=input_dim,
                 output_dim=len(tuple(action_keys)),
                 hidden_dims=tuple(hidden_dims),
                 nn=nn,
@@ -2526,7 +2769,14 @@ def build_pafc_actor_network(
             )
 
         def forward(self, observation):
-            bounded = torch.tanh(self.net(observation))
+            if self.mode_embed is not None and self._mode_dim > 0:
+                obs_part = observation[:, :-self._mode_dim]
+                mode_part = observation[:, -self._mode_dim:]
+                embedded = self.mode_embed(mode_part)
+                x = torch.cat([obs_part, embedded], dim=-1)
+            else:
+                x = observation
+            bounded = torch.tanh(self.net(x))
             scale = 0.5 * (self.action_high - self.action_low)
             center = 0.5 * (self.action_high + self.action_low)
             return bounded * scale + center
@@ -2538,32 +2788,92 @@ def build_pafc_critic_network(
     *,
     observation_dim: int,
     action_dim: int,
+    mode_context_dim: int = 0,
+    mode_embed_dim: int = 0,
     hidden_dims: Sequence[int] = (256, 256),
     positive_output: bool = False,
 ):
     torch, nn, _, _ = _require_torch_modules()
+    _mode_dim = max(0, int(mode_context_dim))
+    _embed_dim = max(0, int(mode_embed_dim))
 
     class PAFCCritic(nn.Module):
         def __init__(self) -> None:
             super().__init__()
-            layers: list[nn.Module] = []
-            prev_dim = int(observation_dim) + int(action_dim)
+            self._mode_dim = _mode_dim
+            if _mode_dim > 0:
+                if _embed_dim > 0:
+                    self.mode_embed = nn.Linear(_mode_dim, _embed_dim)
+                    state_prev = int(observation_dim) + _embed_dim
+                else:
+                    self.mode_embed = None
+                    state_prev = int(observation_dim) + _mode_dim
+                state_layers: list[nn.Module] = []
+                for hidden_dim in tuple(hidden_dims):
+                    state_layers.append(nn.Linear(state_prev, int(hidden_dim)))
+                    state_layers.append(nn.ReLU())
+                    state_prev = int(hidden_dim)
+                self.state_net = nn.Sequential(*state_layers)
+                self.v_head = nn.Linear(state_prev, 1)
+                self.am_head = nn.Linear(state_prev, _mode_dim)
+            full_prev = int(observation_dim) + (_embed_dim if _embed_dim > 0 else _mode_dim) + int(action_dim)
+            full_layers: list[nn.Module] = []
             for hidden_dim in tuple(hidden_dims):
-                width = int(hidden_dim)
-                layers.append(nn.Linear(prev_dim, width))
-                layers.append(nn.ReLU())
-                prev_dim = width
-            self.feature_net = nn.Sequential(*layers)
-            self.output = nn.Linear(prev_dim, 1)
+                full_layers.append(nn.Linear(full_prev, int(hidden_dim)))
+                full_layers.append(nn.ReLU())
+                full_prev = int(hidden_dim)
+            self.feature_net = nn.Sequential(*full_layers)
+            if _mode_dim > 0:
+                self.ac_head = nn.Linear(full_prev, 1)
+            else:
+                self.output = nn.Linear(full_prev, 1)
             self.positive_output = bool(positive_output)
             self.softplus = nn.Softplus() if self.positive_output else None
 
-        def forward(self, observation, action):
-            hidden = self.feature_net(torch.cat([observation, action], dim=-1))
-            value = self.output(hidden)
+        def _embed_mode(self, observation):
+            obs_part = observation[:, :-self._mode_dim]
+            mode_raw = observation[:, -self._mode_dim:]
+            if self.mode_embed is not None:
+                embedded = self.mode_embed(mode_raw)
+            else:
+                embedded = mode_raw
+            return obs_part, mode_raw, embedded
+
+        def forward(self, observation, action, return_decomposition=False):
+            if self._mode_dim > 0:
+                obs_part, mode_raw, mode_emb = self._embed_mode(observation)
+                h_state = self.state_net(torch.cat([obs_part, mode_emb], dim=-1))
+                V = self.v_head(h_state)
+                # am_head on detached state_net output — V drives the shared
+                # representation, A_mode learns mode ranking independently
+                A_mode = self.am_head(h_state.detach())
+                A_mode = A_mode - A_mode.mean(dim=-1, keepdim=True)
+                h_full = self.feature_net(torch.cat([obs_part, mode_emb, action], dim=-1))
+                A_cont = self.ac_head(h_full)
+                Q = V + (mode_raw * A_mode).sum(dim=-1, keepdim=True) + A_cont
+                if return_decomposition:
+                    return Q, A_cont
+                return self._apply_output(Q)
+            h_full = self.feature_net(torch.cat([observation, action], dim=-1))
+            Q = self.output(h_full)
+            if return_decomposition:
+                return Q, None
+            return self._apply_output(Q)
+
+        def _apply_output(self, value):
             if self.positive_output and self.softplus is not None:
                 return self.softplus(value)
             return value
+
+        def forward_state_only(self, observation):
+            if self._mode_dim <= 0:
+                raise RuntimeError("forward_state_only requires mode_context_dim > 0")
+            obs_part, _mode_raw, mode_emb = self._embed_mode(observation)
+            h_state = self.state_net(torch.cat([obs_part, mode_emb], dim=-1))
+            V = self.v_head(h_state)
+            A_mode = self.am_head(h_state)
+            A_mode = A_mode - A_mode.mean(dim=-1, keepdim=True)
+            return V, A_mode
 
     return PAFCCritic()
 
@@ -2632,7 +2942,14 @@ class FrozenProjectionSurrogate:
 
     def _requested_gt_mw(self, action_raw):
         u_gt = action_raw[:, self.action_index["u_gt"]]
-        return 0.5 * (u_gt + 1.0) * float(self.env_config.p_gt_cap_mw)
+        torch, _, _, _ = _require_torch_modules()
+        return _gt_action_to_target_mw_tensor(
+            u_gt=u_gt,
+            p_gt_cap_mw=float(self.env_config.p_gt_cap_mw),
+            gt_min_output_mw=float(self.env_config.gt_min_output_mw),
+            gt_action_off_threshold=_gt_action_off_threshold(self.env_config),
+            torch=torch,
+        )
 
     def _state_feature(self, key: str, obs_batch, action_raw):
         torch, _, _, _ = _require_torch_modules()
@@ -2714,7 +3031,12 @@ class EasyRuleAbsPolicy:
             u_gt = -1.0
         else:
             gt_ratio = min(0.55, net_load / max(1e-6, float(self.p_gt_cap_mw)))
-            u_gt = gt_ratio * 2.0 - 1.0
+            u_gt = _gt_target_mw_to_action_np(
+                p_gt_target_mw=gt_ratio * float(self.p_gt_cap_mw),
+                p_gt_cap_mw=float(self.p_gt_cap_mw),
+                gt_min_output_mw=float(self.env_config.gt_min_output_mw),
+                gt_action_off_threshold=_gt_action_off_threshold(self.env_config),
+            )
 
         if price_e >= self.price_high_threshold and soc_bes > 0.35:
             u_bes = 0.3
@@ -3191,6 +3513,100 @@ def _aggregate_eval_episode_summaries(
     }
 
 
+def _pafc_checkpoint_selection_rank(
+    *,
+    metrics: Mapping[str, Any],
+    gate_result: Mapping[str, Any],
+) -> tuple[float, float, float, float, float, float]:
+    shortfall = dict(gate_result.get("shortfall") or {})
+    return (
+        1.0 if bool(gate_result.get("passed", False)) else 0.0,
+        -_safe_float(shortfall.get("total"), 0.0),
+        -_safe_float(shortfall.get("max"), 0.0),
+        -_safe_float(metrics.get("mean_total_cost"), 0.0),
+        -_safe_float(metrics.get("mean_violation_rate"), 0.0),
+        _safe_float(metrics.get("mean_reward"), float("-inf")),
+    )
+
+
+def _selection_history_metrics(item: Mapping[str, Any]) -> dict[str, Any]:
+    metrics = item.get("metrics")
+    if isinstance(metrics, Mapping):
+        return dict(metrics)
+    return {
+        "mean_reward": _safe_float(item.get("mean_reward"), float("-inf")),
+        "mean_total_cost": _safe_float(item.get("mean_total_cost"), 0.0),
+        "mean_violation_rate": _safe_float(item.get("mean_violation_rate"), 0.0),
+        "reliability_min": dict(item.get("reliability_min") or {}),
+        "mean_cost_breakdown": dict(item.get("mean_cost_breakdown") or {}),
+    }
+
+
+def _select_posttrain_rerank_candidates(
+    *,
+    history_items: Sequence[Mapping[str, Any]],
+    selected_snapshot: Mapping[str, Any] | None,
+    reward_snapshot: Mapping[str, Any] | None,
+    last_snapshot: Mapping[str, Any] | None,
+    top_k: int,
+    path_exists=None,
+) -> list[dict[str, Any]]:
+    exists = path_exists or (lambda value: Path(str(value)).exists())
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(reason: str, item: Mapping[str, Any] | None) -> None:
+        if item is None or len(candidates) >= int(top_k):
+            return
+        checkpoint_path = str(item.get("checkpoint_path", "") or "").strip()
+        if len(checkpoint_path) == 0 or checkpoint_path in seen or not bool(exists(checkpoint_path)):
+            return
+        seen.add(checkpoint_path)
+        candidates.append(
+            {
+                "reason": str(reason),
+                "checkpoint_path": checkpoint_path,
+                "timesteps": int(_safe_float(item.get("timesteps"), 0.0)),
+                "episode_idx": int(_safe_float(item.get("episode_idx"), 0.0)),
+                "training_complete": bool(item.get("training_complete", False)),
+            }
+        )
+
+    add("current_selected", selected_snapshot)
+    add("reward_leader", reward_snapshot)
+    add("last", last_snapshot)
+
+    history = [dict(item) for item in history_items if isinstance(item, Mapping)]
+
+    def history_rank(item: Mapping[str, Any]) -> tuple[float, float, float, float, float, float]:
+        return _pafc_checkpoint_selection_rank(
+            metrics=_selection_history_metrics(item),
+            gate_result=dict(item.get("gate") or {}),
+        )
+
+    def cooling_min(item: Mapping[str, Any]) -> float:
+        metrics = _selection_history_metrics(item)
+        return _safe_float(dict(metrics.get("reliability_min") or {}).get("cooling"), 0.0)
+
+    def total_cost(item: Mapping[str, Any]) -> float:
+        return _safe_float(_selection_history_metrics(item).get("mean_total_cost"), float("inf"))
+
+    buckets = [
+        ("rank", sorted(history, key=history_rank, reverse=True)[:3]),
+        ("cost_if_cool99", sorted([item for item in history if cooling_min(item) >= 0.99], key=total_cost)[:3]),
+        ("cost_if_cool95", sorted([item for item in history if cooling_min(item) >= 0.95], key=total_cost)[:3]),
+        ("cost", sorted(history, key=total_cost)[:3]),
+    ]
+    for reason, items in buckets:
+        for item in items:
+            add(f"{reason}_step{int(_safe_float(item.get('timesteps'), 0.0))}", item)
+            if len(candidates) >= int(top_k):
+                break
+        if len(candidates) >= int(top_k):
+            break
+    return candidates
+
+
 def _build_reliability_gate_result(
     *,
     metrics: Mapping[str, Any],
@@ -3373,15 +3789,51 @@ class PAFCTD3Trainer:
         )
         obs_dim = len(self.observation_keys)
         action_dim = len(self.action_keys)
+        self.mode_anchor_policy = None
+        self.mode_anchor_info: dict[str, Any] = {}
+        self.mode_context_dim = 0
+        self._fhac_dqn_q_net = None
+        self._fhac_dqn_optimizer = None
+        self._fhac_dqn_buffer = _DQNModeBuffer(capacity=0)
+        self._fhac_dqn_prev_wobs: np.ndarray | None = None
+        self._fhac_step_progress: float = 0.0
+        mode_anchor_checkpoint_path = str(self.config.mode_anchor_checkpoint_path).strip()
+        if mode_anchor_checkpoint_path:
+            self.mode_anchor_policy, self.mode_anchor_info = self._build_checkpoint_expert_policy(
+                checkpoint_path=mode_anchor_checkpoint_path,
+                role="mode_anchor",
+            )
+            if str(self.mode_anchor_info.get("algo", "")).strip().lower() != "dqn":
+                raise ValueError("mode_anchor_checkpoint_path 必须指向 DQN checkpoint。")
+            self.mode_context_dim = int(self.mode_anchor_info.get("action_count", 0))
+            if self.mode_context_dim <= 0:
+                raise ValueError("DQN mode anchor 缺少有效 action_count。")
+            self.mode_anchor_policy._sb3_model.policy.to(self.device)
+            self._fhac_dqn_q_net = self.mode_anchor_policy._sb3_model.policy.q_net
+            self._fhac_dqn_q_net_target = self.mode_anchor_policy._sb3_model.policy.q_net_target
+            self._fhac_dqn_q_net_target.load_state_dict(self._fhac_dqn_q_net.state_dict())
+            self._fhac_dqn_q_net.train()
+            self._fhac_dqn_optimizer = AdamW(
+                self._fhac_dqn_q_net.parameters(),
+                lr=float(self.config.fhac_dqn_lr),
+            )
+            self._fhac_dqn_buffer = _DQNModeBuffer(capacity=4096)
 
+        _mode_embed_dim = (
+            int(self.config.fhac_mode_embed_dim) if self.mode_context_dim > 0 else 0
+        )
         self.actor = build_pafc_actor_network(
             observation_dim=obs_dim,
             action_keys=self.action_keys,
+            mode_context_dim=self.mode_context_dim,
+            mode_embed_dim=_mode_embed_dim,
             hidden_dims=self.config.hidden_dims,
         ).to(self.device)
         self.actor_target = build_pafc_actor_network(
             observation_dim=obs_dim,
             action_keys=self.action_keys,
+            mode_context_dim=self.mode_context_dim,
+            mode_embed_dim=_mode_embed_dim,
             hidden_dims=self.config.hidden_dims,
         ).to(self.device)
         self.actor_target.load_state_dict(self.actor.state_dict())
@@ -3389,21 +3841,29 @@ class PAFCTD3Trainer:
         self.q1 = build_pafc_critic_network(
             observation_dim=obs_dim,
             action_dim=action_dim,
+            mode_context_dim=self.mode_context_dim,
+            mode_embed_dim=_mode_embed_dim,
             hidden_dims=self.config.hidden_dims,
         ).to(self.device)
         self.q2 = build_pafc_critic_network(
             observation_dim=obs_dim,
             action_dim=action_dim,
+            mode_context_dim=self.mode_context_dim,
+            mode_embed_dim=_mode_embed_dim,
             hidden_dims=self.config.hidden_dims,
         ).to(self.device)
         self.q1_target = build_pafc_critic_network(
             observation_dim=obs_dim,
             action_dim=action_dim,
+            mode_context_dim=self.mode_context_dim,
+            mode_embed_dim=_mode_embed_dim,
             hidden_dims=self.config.hidden_dims,
         ).to(self.device)
         self.q2_target = build_pafc_critic_network(
             observation_dim=obs_dim,
             action_dim=action_dim,
+            mode_context_dim=self.mode_context_dim,
+            mode_embed_dim=_mode_embed_dim,
             hidden_dims=self.config.hidden_dims,
         ).to(self.device)
         self.q1_target.load_state_dict(self.q1.state_dict())
@@ -3413,6 +3873,8 @@ class PAFCTD3Trainer:
             build_pafc_critic_network(
                 observation_dim=obs_dim,
                 action_dim=action_dim,
+                mode_context_dim=self.mode_context_dim,
+                mode_embed_dim=_mode_embed_dim,
                 hidden_dims=self.config.hidden_dims,
                 positive_output=True,
             ).to(self.device)
@@ -3422,6 +3884,8 @@ class PAFCTD3Trainer:
             build_pafc_critic_network(
                 observation_dim=obs_dim,
                 action_dim=action_dim,
+                mode_context_dim=self.mode_context_dim,
+                mode_embed_dim=_mode_embed_dim,
                 hidden_dims=self.config.hidden_dims,
                 positive_output=True,
             ).to(self.device)
@@ -3446,6 +3910,7 @@ class PAFCTD3Trainer:
             capacity=int(self.config.replay_capacity),
             obs_dim=obs_dim,
             action_dim=action_dim,
+            mode_context_dim=self.mode_context_dim,
         )
         self.surrogate = FrozenProjectionSurrogate(
             checkpoint_path=self.config.projection_surrogate_checkpoint_path,
@@ -3474,6 +3939,7 @@ class PAFCTD3Trainer:
         ).strip()
         self.frozen_action_safe_metadata: dict[str, Any] = {}
         self.frozen_action_safe_actor = None
+        self.frozen_action_safe_mode_context_dim = 0
         self.frozen_action_safe_obs_offset_np = np.zeros((len(self.observation_keys),), dtype=np.float32)
         self.frozen_action_safe_obs_scale_np = np.ones((len(self.observation_keys),), dtype=np.float32)
         self.frozen_action_safe_obs_offset = self.torch.zeros(
@@ -3570,6 +4036,7 @@ class PAFCTD3Trainer:
         self.stop_requested = False
         self.stop_reason = ""
         self.plateau_events: list[dict[str, Any]] = []
+        self.posttrain_rerank_summary: dict[str, Any] = {}
         self.expert_prefill_summary: dict[str, Any] = self._base_expert_prefill_summary()
         self.expert_prefill_summary.update(
             {
@@ -3688,6 +4155,8 @@ class PAFCTD3Trainer:
         actor = build_pafc_actor_network(
             observation_dim=int(metadata["observation_dim"]),
             action_keys=action_keys,
+            mode_context_dim=int(metadata.get("mode_context_dim", 0) or 0),
+            mode_embed_dim=int(metadata.get("mode_embed_dim", 0) or 0),
             hidden_dims=tuple(int(dim) for dim in metadata.get("hidden_dims", (256, 256))),
         ).to(self.device)
         actor.load_state_dict(payload["state_dict"])
@@ -3703,6 +4172,7 @@ class PAFCTD3Trainer:
             raise ValueError("冻结安全策略 observation_norm 维度与当前训练配置不一致。")
         scale_np = np.where(np.abs(scale_np) < _NORM_EPS, 1.0, scale_np)
         self.frozen_action_safe_actor = actor
+        self.frozen_action_safe_mode_context_dim = int(metadata.get("mode_context_dim", 0) or 0)
         self.frozen_action_safe_metadata = {
             **metadata,
             "entry_path": str(Path(artifact["entry_path"]).resolve()).replace("\\", "/"),
@@ -3733,11 +4203,21 @@ class PAFCTD3Trainer:
             metadata.get("abs_min_on_u_margin", self.config.abs_min_on_u_margin)
         )
 
-    def _predict_frozen_safe_action_tensor(self, *, obs_batch):
+    def _predict_frozen_safe_action_tensor(self, *, obs_batch, mode_context_batch=None):
         if not self.safe_reference_action_enabled or self.frozen_action_safe_actor is None:
             return None
         with self.torch.no_grad():
             obs_norm = (obs_batch - self.frozen_action_safe_obs_offset) / self.frozen_action_safe_obs_scale
+            if self.frozen_action_safe_mode_context_dim > 0:
+                if mode_context_batch is not None:
+                    mc = mode_context_batch
+                else:
+                    mc = self.torch.zeros(
+                        (obs_norm.shape[0], self.frozen_action_safe_mode_context_dim),
+                        dtype=obs_norm.dtype,
+                        device=obs_norm.device,
+                    )
+                obs_norm = self.torch.cat([obs_norm, mc], dim=-1)
             safe_action = self.frozen_action_safe_actor(obs_norm)
             return self._apply_abs_cooling_blend_tensor(
                 obs_batch=obs_batch,
@@ -3749,7 +4229,12 @@ class PAFCTD3Trainer:
                 abs_min_on_u_margin=self.frozen_action_safe_abs_min_on_u_margin,
             )
 
-    def _predict_frozen_safe_action_np(self, *, observation_vector: np.ndarray) -> np.ndarray | None:
+    def _predict_frozen_safe_action_np(
+        self,
+        *,
+        observation_vector: np.ndarray,
+        mode_context: np.ndarray | None = None,
+    ) -> np.ndarray | None:
         if not self.safe_reference_action_enabled or self.frozen_action_safe_actor is None:
             return None
         normalized = (
@@ -3762,6 +4247,20 @@ class PAFCTD3Trainer:
                 dtype=self.torch.float32,
                 device=self.device,
             )
+            if self.frozen_action_safe_mode_context_dim > 0:
+                if mode_context is not None:
+                    mc = self.torch.as_tensor(
+                        np.asarray(mode_context, dtype=np.float32).reshape(1, -1),
+                        dtype=tensor.dtype,
+                        device=tensor.device,
+                    )
+                else:
+                    mc = self.torch.zeros(
+                        (1, self.frozen_action_safe_mode_context_dim),
+                        dtype=tensor.dtype,
+                        device=tensor.device,
+                    )
+                tensor = self.torch.cat([tensor, mc], dim=-1)
             safe_action = (
                 self.frozen_action_safe_actor(tensor).squeeze(0).detach().cpu().numpy().astype(np.float32)
             )
@@ -4532,7 +5031,13 @@ class PAFCTD3Trainer:
             else:
                 p_gt_low = self.torch.zeros_like(p_gt_prev)
                 p_gt_high = self.torch.full_like(p_gt_prev, p_gt_cap_mw)
-            p_gt_target = ((shaped_columns[u_gt_index] + 1.0) * 0.5) * p_gt_cap_mw
+            p_gt_target = _gt_action_to_target_mw_tensor(
+                u_gt=shaped_columns[u_gt_index],
+                p_gt_cap_mw=p_gt_cap_mw,
+                gt_min_output_mw=gt_min_output_mw,
+                gt_action_off_threshold=_gt_action_off_threshold(self.env_config),
+                torch=self.torch,
+            )
             p_gt_target = self.torch.clamp(p_gt_target, p_gt_low, p_gt_high)
             p_gt_target = self.torch.where(
                 p_gt_target <= (gt_off_deadband_mw + _NORM_EPS),
@@ -4545,10 +5050,12 @@ class PAFCTD3Trainer:
                 self.torch.full_like(p_gt_target, gt_min_output_mw),
                 p_gt_target,
             )
-            shaped_columns[u_gt_index] = self.torch.clamp(
-                2.0 * (p_gt_target / p_gt_cap_mw) - 1.0,
-                -1.0,
-                1.0,
+            shaped_columns[u_gt_index] = _gt_target_mw_to_action_tensor(
+                p_gt_target_mw=p_gt_target,
+                p_gt_cap_mw=p_gt_cap_mw,
+                gt_min_output_mw=gt_min_output_mw,
+                gt_action_off_threshold=_gt_action_off_threshold(self.env_config),
+                torch=self.torch,
             )
 
         if feasible_shaping_enabled:
@@ -4761,7 +5268,12 @@ class PAFCTD3Trainer:
             else:
                 p_gt_low = 0.0
                 p_gt_high = p_gt_cap_mw
-            p_gt_target = ((float(blended[u_gt_index]) + 1.0) * 0.5) * p_gt_cap_mw
+            p_gt_target = _gt_action_to_target_mw_np(
+                u_gt=float(blended[u_gt_index]),
+                p_gt_cap_mw=p_gt_cap_mw,
+                gt_min_output_mw=float(self.env_config.gt_min_output_mw),
+                gt_action_off_threshold=_gt_action_off_threshold(self.env_config),
+            )
             p_gt_target = _canonicalize_gt_target_np(
                 p_gt_target_mw=p_gt_target,
                 p_gt_low_mw=p_gt_low,
@@ -4769,7 +5281,12 @@ class PAFCTD3Trainer:
                 gt_min_output_mw=float(self.env_config.gt_min_output_mw),
                 gt_off_deadband_ratio=float(self.config.gt_off_deadband_ratio),
             )
-            blended[u_gt_index] = float(np.clip(2.0 * (p_gt_target / p_gt_cap_mw) - 1.0, -1.0, 1.0))
+            blended[u_gt_index] = _gt_target_mw_to_action_np(
+                p_gt_target_mw=p_gt_target,
+                p_gt_cap_mw=p_gt_cap_mw,
+                gt_min_output_mw=float(self.env_config.gt_min_output_mw),
+                gt_action_off_threshold=_gt_action_off_threshold(self.env_config),
+            )
 
         if "abs_drive_margin_k" not in self.observation_index:
             return blended
@@ -4999,6 +5516,8 @@ class PAFCTD3Trainer:
             _build_observation_normalizer,
             _build_residual_expert_policy,
             _compose_residual_action,
+            _install_numpy_bit_generator_pickle_compat,
+            _load_vec_normalize_compat,
             _observation_dict_to_vector,
             _require_sb3_modules,
             _resolve_checkpoint_sidecar_path,
@@ -5122,7 +5641,11 @@ class PAFCTD3Trainer:
         model_env = DummyVecEnv([_SB3PredictDummyEnv])
         vec_normalizer = None
         if resolved_vecnormalize_path is not None:
-            vec_normalizer = VecNormalize.load(str(resolved_vecnormalize_path), model_env)
+            vec_normalizer = _load_vec_normalize_compat(
+                VecNormalize,
+                resolved_vecnormalize_path,
+                model_env,
+            )
             vec_normalizer.training = False
             vec_normalizer.norm_reward = False
             model_env = vec_normalizer
@@ -5135,6 +5658,7 @@ class PAFCTD3Trainer:
                 "buffer_size": 1,
                 "learning_starts": 0,
             }
+        _install_numpy_bit_generator_pickle_compat()
         model = algo_cls.load(
             str(resolved_model_path),
             env=model_env,
@@ -5150,6 +5674,10 @@ class PAFCTD3Trainer:
                 )
                 self._initialized = False
                 self._last_decision: dict[str, Any] = {}
+                self._sb3_model = model
+                self._vec_normalizer = vec_normalizer
+                self._observation_keys = observation_keys
+                self._normalizer = normalizer
 
             def reset_episode(self, observation: Mapping[str, float] | None = None) -> None:
                 del observation
@@ -5169,7 +5697,11 @@ class PAFCTD3Trainer:
                 if vec_normalizer is not None:
                     model_obs = vec_normalizer.normalize_obs(model_obs)
                 action, _ = model.predict(model_obs, deterministic=True)
+                action_index = -1
+                action_label = ""
                 if discrete_action_mapper is not None:
+                    action_index = int(np.asarray(action).reshape(-1)[0])
+                    action_label = str(discrete_action_mapper.action_labels[action_index])
                     action_dict = discrete_action_mapper.decode(action, observation)
                 elif residual_policy is not None:
                     delta_action = _action_vector_to_residual_delta(action)
@@ -5185,11 +5717,31 @@ class PAFCTD3Trainer:
                     "artifact_type": "sb3_policy",
                     "algo": str(algo),
                     "paper_model_label": str(checkpoint_payload.get("paper_model_label", "")),
+                    "action_index": int(action_index),
+                    "action_label": str(action_label),
                 }
                 return dict(action_dict)
 
             def consume_last_decision(self) -> dict[str, Any]:
                 return dict(self._last_decision)
+
+            def get_windowed_obs_tensor(self) -> np.ndarray:
+                window = self._buffer.window.astype(np.float32, copy=True)
+                model_obs = window.reshape(1, *window.shape)
+                if self._vec_normalizer is not None:
+                    model_obs = self._vec_normalizer.normalize_obs(model_obs)
+                return np.asarray(model_obs, dtype=np.float32)
+
+            def get_q_values_np(self) -> np.ndarray:
+                """Return the DQN q_net raw logits for the current windowed obs."""
+                import torch
+                wobs = self.get_windowed_obs_tensor()
+                device = next(self._sb3_model.policy.parameters()).device
+                with torch.no_grad():
+                    q_vals = self._sb3_model.policy.q_net(
+                        torch.as_tensor(wobs, dtype=torch.float32, device=device)
+                    )
+                return q_vals.squeeze(0).detach().cpu().numpy().astype(np.float32)
 
         return _SB3CheckpointPrefillPolicy(), {
             "role": str(role),
@@ -5199,6 +5751,16 @@ class PAFCTD3Trainer:
             "algo": str(algo),
             "paper_model_label": str(checkpoint_payload.get("paper_model_label", "")),
             "history_steps": int(history_steps),
+            "action_count": (
+                int(discrete_action_mapper.action_count)
+                if discrete_action_mapper is not None
+                else 0
+            ),
+            "action_labels": (
+                list(discrete_action_mapper.action_labels)
+                if discrete_action_mapper is not None
+                else []
+            ),
             "model_source": str(resolved_model_source),
             "model_path": str(resolved_model_path.resolve()).replace("\\", "/"),
             "vecnormalize_path": (
@@ -5233,12 +5795,18 @@ class PAFCTD3Trainer:
     def _build_expert_policy(self) -> tuple[Any, dict[str, Any]]:
         from ..pipeline.runner import EasyRulePolicy, RulePolicy
 
-        if str(self.config.expert_prefill_policy) == "checkpoint":
+        expert_prefill_policy = str(self.config.expert_prefill_policy).strip().lower().replace("-", "_")
+        if expert_prefill_policy in {"milp_mpc", "ga_mpc"}:
+            return self._build_planner_expert_policy(
+                planner_policy=expert_prefill_policy,
+                role="primary",
+            )
+        if expert_prefill_policy == "checkpoint":
             return self._build_checkpoint_expert_policy(
                 checkpoint_path=self.config.expert_prefill_checkpoint_path,
                 role="primary",
             )
-        if str(self.config.expert_prefill_policy) == "checkpoint_dual":
+        if expert_prefill_policy == "checkpoint_dual":
             safe_teacher, safe_info = self._build_checkpoint_expert_policy(
                 checkpoint_path=self.config.expert_prefill_checkpoint_path,
                 role="safe",
@@ -5332,7 +5900,7 @@ class PAFCTD3Trainer:
                     "economic": dict(economic_info),
                 },
             }
-        if str(self.config.expert_prefill_policy) == "easy_rule_abs":
+        if expert_prefill_policy == "easy_rule_abs":
             return (
                 EasyRuleAbsPolicy(
                     env_config=self.env_config,
@@ -5343,7 +5911,7 @@ class PAFCTD3Trainer:
                 ),
                 {"mode": "easy_rule_abs"},
             )
-        if str(self.config.expert_prefill_policy) == "easy_rule":
+        if expert_prefill_policy == "easy_rule":
             return (
                 EasyRulePolicy(
                     p_gt_cap_mw=float(self.env_config.p_gt_cap_mw),
@@ -5488,6 +6056,8 @@ class PAFCTD3Trainer:
         teacher_source_counts: dict[str, int] = {}
         dual_gate_reason_counts: dict[str, int] = {}
 
+        current_mode_context = self._select_mode_context(observation) if self.mode_anchor_policy is not None else None
+
         while (not terminated) and episode_steps < int(max_steps):
             obs_vector = self._observation_to_vector(observation)
             if collect_teacher_targets:
@@ -5543,6 +6113,11 @@ class PAFCTD3Trainer:
             )
             next_observation, reward, terminated, _, info = env.step(action_dict)
             next_obs_vector = self._observation_to_vector(next_observation)
+            next_mode_context = (
+                self._zero_mode_context_np()
+                if bool(terminated)
+                else self._select_mode_context(next_observation)
+            ) if self.mode_anchor_policy is not None else None
             action_exec = _extract_action_vector_from_info(
                 info,
                 prefix="action_exec",
@@ -5558,6 +6133,16 @@ class PAFCTD3Trainer:
                 {
                     "obs": obs_vector.copy(),
                     "next_obs": next_obs_vector.copy(),
+                    "mode_context": (
+                        np.asarray(current_mode_context, dtype=np.float32).copy()
+                        if current_mode_context is not None
+                        else None
+                    ),
+                    "next_mode_context": (
+                        np.asarray(next_mode_context, dtype=np.float32).copy()
+                        if next_mode_context is not None
+                        else None
+                    ),
                     "action_raw": action_raw.copy(),
                     "action_exec": action_exec.copy(),
                     "teacher_action_exec": teacher_action_exec.copy(),
@@ -5575,6 +6160,8 @@ class PAFCTD3Trainer:
                 }
             )
             observation = next_observation
+            if current_mode_context is not None and next_mode_context is not None:
+                current_mode_context = next_mode_context
             episode_steps += 1
 
         return {
@@ -5690,6 +6277,8 @@ class PAFCTD3Trainer:
                 self.replay.add(
                     obs=transition["obs"],
                     next_obs=transition["next_obs"],
+                    mode_context=transition.get("mode_context"),
+                    next_mode_context=transition.get("next_mode_context"),
                     action_raw=transition["action_raw"],
                     action_exec=transition["action_exec"],
                     teacher_action_exec=transition["teacher_action_exec"],
@@ -6229,7 +6818,7 @@ class PAFCTD3Trainer:
                 batch_teacher_target_mask = teacher_target_mask_tensor[batch_indices]
                 batch_focus_weight = focus_weight_tensor[batch_indices]
                 batch_delta_weight = delta_weight_tensor[batch_indices]
-                prediction = self.actor(self._normalize_observation_tensor(batch_obs))
+                prediction = self.actor(self._concat_mode_context_tensor(self._normalize_observation_tensor(batch_obs)))
                 prediction = self._apply_abs_cooling_blend_tensor(
                     obs_batch=batch_obs,
                     action_batch=prediction,
@@ -6395,8 +6984,11 @@ class PAFCTD3Trainer:
                     )
                     p_ech_proxy_mw = q_ech_proxy_mw / max(_NORM_EPS, float(ech_cop))
                 p_gt_cap_mw = max(_NORM_EPS, float(self.env_config.p_gt_cap_mw))
-                p_gt_exec = (
-                    (float(teacher_action_exec_np[int(u_gt_index)]) + 1.0) * 0.5 * p_gt_cap_mw
+                p_gt_exec = _gt_action_to_target_mw_np(
+                    u_gt=float(teacher_action_exec_np[int(u_gt_index)]),
+                    p_gt_cap_mw=p_gt_cap_mw,
+                    gt_min_output_mw=float(self.env_config.gt_min_output_mw),
+                    gt_action_off_threshold=_gt_action_off_threshold(self.env_config),
                 )
                 gt_load_ratio = float(np.clip(p_gt_exec / p_gt_cap_mw, 0.0, 1.0))
                 eta_gt = float(self.env_config.gt_eta_min) + (
@@ -6761,7 +7353,7 @@ class PAFCTD3Trainer:
                             int(u_gt_index) : int(u_gt_index) + 1,
                         ]
                         batch_gt_weight = sample_weight_tensor[batch_indices]
-                        prediction = self.actor(self._normalize_observation_tensor(batch_obs))
+                        prediction = self.actor(self._concat_mode_context_tensor(self._normalize_observation_tensor(batch_obs)))
                         prediction = self._apply_abs_cooling_blend_tensor(
                             obs_batch=batch_obs,
                             action_batch=prediction,
@@ -6829,7 +7421,7 @@ class PAFCTD3Trainer:
                 batch_teacher_target = teacher_action_tensor[batch_indices]
                 batch_teacher_mask = teacher_mask_tensor_shared[batch_indices]
                 batch_sample_weight = sample_weight_tensor[batch_indices]
-                prediction = self.actor(self._normalize_observation_tensor(batch_obs))
+                prediction = self.actor(self._concat_mode_context_tensor(self._normalize_observation_tensor(batch_obs)))
                 prediction = self._apply_abs_cooling_blend_tensor(
                     obs_batch=batch_obs,
                     action_batch=prediction,
@@ -7321,7 +7913,7 @@ class PAFCTD3Trainer:
                 batch_base_target = base_action_tensor[batch_indices]
                 batch_target_u = target_u_tensor[batch_indices]
                 batch_weight = sample_weight_tensor[batch_indices]
-                prediction = self.actor(self._normalize_observation_tensor(batch_obs))
+                prediction = self.actor(self._concat_mode_context_tensor(self._normalize_observation_tensor(batch_obs)))
                 prediction = self._apply_abs_cooling_blend_tensor(
                     obs_batch=batch_obs,
                     action_batch=prediction,
@@ -7959,7 +8551,7 @@ class PAFCTD3Trainer:
                 batch_target_u = target_u_tensor[batch_indices]
                 batch_weight = sample_weight_tensor[batch_indices]
                 batch_anchor_weight = anchor_weight_tensor[batch_indices]
-                prediction = self.actor(self._normalize_observation_tensor(batch_obs))
+                prediction = self.actor(self._concat_mode_context_tensor(self._normalize_observation_tensor(batch_obs)))
                 prediction = self._apply_abs_cooling_blend_tensor(
                     obs_batch=batch_obs,
                     action_batch=prediction,
@@ -8338,7 +8930,13 @@ class PAFCTD3Trainer:
             0.0,
             1.0,
         )
-        target_u_gt = 2.0 * target_load_ratio - 1.0
+        target_u_gt = _gt_target_mw_to_action_tensor(
+            p_gt_target_mw=target_load_ratio * p_gt_cap_mw,
+            p_gt_cap_mw=p_gt_cap_mw,
+            gt_min_output_mw=gt_min_output_mw,
+            gt_action_off_threshold=_gt_action_off_threshold(self.env_config),
+            torch=self.torch,
+        )
         target_u_gt = (
             (-1.0) * off_mask
             + target_u_gt.clamp(-1.0, 1.0) * (1.0 - off_mask)
@@ -8604,10 +9202,12 @@ class PAFCTD3Trainer:
         )
         if prior_terms is None:
             return None
-        p_gt_exec = (
-            (action_exec_batch[:, u_gt_index : u_gt_index + 1] + 1.0)
-            * 0.5
-            * p_gt_cap_mw
+        p_gt_exec = _gt_action_to_target_mw_tensor(
+            u_gt=action_exec_batch[:, u_gt_index : u_gt_index + 1],
+            p_gt_cap_mw=p_gt_cap_mw,
+            gt_min_output_mw=float(self.env_config.gt_min_output_mw),
+            gt_action_off_threshold=_gt_action_off_threshold(self.env_config),
+            torch=self.torch,
         )
         mode_on = prior_terms["mode_on"].clamp(0.0, 1.0)
         commit_score = prior_terms["commit_score"].clamp(0.0, 1.0)
@@ -9252,14 +9852,73 @@ class PAFCTD3Trainer:
             size=(len(self.action_keys),),
         ).astype(np.float32)
 
-    def _select_action(self, *, observation_vector: np.ndarray, explore: bool) -> np.ndarray:
+    def _zero_mode_context_np(self) -> np.ndarray:
+        return np.zeros((self.mode_context_dim,), dtype=np.float32)
+
+    def _select_mode_context(
+        self, observation: Mapping[str, float], *, deterministic: bool = False
+    ) -> np.ndarray:
+        if self.mode_anchor_policy is None or self.mode_context_dim <= 0:
+            return self._zero_mode_context_np()
+        self.mode_anchor_policy.act(dict(observation))
+        q_vals = self.mode_anchor_policy.get_q_values_np()
+        if deterministic:
+            idx = int(np.argmax(q_vals))
+            context = self._zero_mode_context_np()
+            if 0 <= idx < self.mode_context_dim:
+                context[idx] = 1.0
+            return context
+        # Anneal temperature: τ_start → τ_min over training
+        tau_start = max(float(self.config.fhac_mode_temperature), 0.1)
+        tau_min = 0.1
+        tau = tau_min + (tau_start - tau_min) * max(0.0, 1.0 - self._fhac_step_progress)
+        q_scaled = q_vals / max(tau, 0.01)
+        q_scaled = q_scaled - q_scaled.max()
+        soft = np.exp(q_scaled) / np.exp(q_scaled).sum()
+        return soft.astype(np.float32)
+
+    def _concat_mode_context_tensor(self, observation_tensor, mode_context_tensor=None):
+        if self.mode_context_dim <= 0:
+            return observation_tensor
+        if mode_context_tensor is None:
+            mode_context_tensor = self.torch.zeros(
+                (observation_tensor.shape[0], self.mode_context_dim),
+                dtype=observation_tensor.dtype,
+                device=observation_tensor.device,
+            )
+        return self.torch.cat([observation_tensor, mode_context_tensor], dim=-1)
+
+    def _mode_context_tensor_from_np(self, mode_context: np.ndarray | None):
+        if self.mode_context_dim <= 0:
+            return None
+        if mode_context is None:
+            mode_context = self._zero_mode_context_np()
+        return self.torch.as_tensor(
+            np.asarray(mode_context, dtype=np.float32).reshape(1, self.mode_context_dim),
+            dtype=self.torch.float32,
+            device=self.device,
+        )
+
+    def _select_action(
+        self,
+        *,
+        observation_vector: np.ndarray,
+        explore: bool,
+        mode_context: np.ndarray | None = None,
+    ) -> np.ndarray:
         observation_tensor = self.torch.as_tensor(
             observation_vector.reshape(1, -1),
             dtype=self.torch.float32,
             device=self.device,
         )
+        mode_context_tensor = self._mode_context_tensor_from_np(mode_context)
         with self.torch.no_grad():
-            action = self.actor(self._normalize_observation_tensor(observation_tensor))
+            action = self.actor(
+                self._concat_mode_context_tensor(
+                    self._normalize_observation_tensor(observation_tensor),
+                    mode_context_tensor,
+                )
+            )
         action_np = action.squeeze(0).detach().cpu().numpy().astype(np.float32)
         if explore and self.config.exploration_noise_std > 0.0:
             noise = self.rng.normal(
@@ -9274,6 +9933,7 @@ class PAFCTD3Trainer:
         )
         safe_action_np = self._predict_frozen_safe_action_np(
             observation_vector=observation_vector,
+            mode_context=mode_context,
         )
         action_np = self._clip_abs_near_safe_action_np(
             action_vector=action_np,
@@ -9337,8 +9997,25 @@ class PAFCTD3Trainer:
         return {
             "artifact_type": "pafc_td3_actor",
             "policy_name": "pafc_td3",
+            "algorithm_variant": "dpar_v2_fhac" if self.mode_context_dim > 0 else "pafc_td3",
             "observation_dim": int(len(self.observation_keys)),
             "action_dim": int(len(self.action_keys)),
+            "mode_context_dim": int(self.mode_context_dim),
+            "mode_anchor_checkpoint_path": (
+                str(Path(self.config.mode_anchor_checkpoint_path).resolve()).replace("\\", "/")
+                if str(self.config.mode_anchor_checkpoint_path).strip()
+                else ""
+            ),
+            "mode_anchor_info": dict(self.mode_anchor_info),
+            "fhac_dqn_lr": float(self.config.fhac_dqn_lr),
+            "fhac_mode_eval_interval": int(self.config.fhac_mode_eval_interval),
+            "fhac_dqn_mse_coef": float(self.config.fhac_dqn_mse_coef),
+            "fhac_acont_reg_coef": float(self.config.fhac_acont_reg_coef),
+            "fhac_mode_temperature": float(self.config.fhac_mode_temperature),
+            "mode_embed_dim": int(self.config.fhac_mode_embed_dim) if self.mode_context_dim > 0 else 0,
+            "fhac_dqn_warmup_steps": int(self.config.fhac_dqn_warmup_steps),
+            "fhac_dqn_bellman_beta_start": float(self.config.fhac_dqn_bellman_beta_start),
+            "fhac_dqn_bellman_beta_end": float(self.config.fhac_dqn_bellman_beta_end),
             "observation_keys": list(self.observation_keys),
             "action_keys": list(self.action_keys),
             "hidden_dims": list(self.config.hidden_dims),
@@ -9713,35 +10390,12 @@ class PAFCTD3Trainer:
         episode_idx: int,
         training_complete: bool,
     ) -> dict[str, Any]:
-        def predictor(observation: Mapping[str, float]) -> dict[str, float]:
-            observation_vector = self._observation_to_vector(observation)
-            action_vector = self._select_action(
-                observation_vector=observation_vector,
-                explore=False,
-            )
-            return _action_vector_to_dict(action_vector, action_keys=self.action_keys)
-
-        episode_summaries = [
-            _evaluate_predictor_on_episode_df(
-                predictor=predictor,
-                exogenous_df=self.train_df,
-                episode_df=episode_df,
-                env_config=self.env_config,
-                seed=int(self.config.seed + 10_000 + idx),
-            )
-            for idx, episode_df in enumerate(self.eval_episode_dfs)
-        ]
-        metrics = _aggregate_eval_episode_summaries(episode_summaries)
-        gate_result = _build_reliability_gate_result(metrics=metrics, config=self.config)
-        shortfall = dict(gate_result.get("shortfall") or {})
-        current_rank = (
-            1 if bool(gate_result.get("passed", False)) else 0,
-            -float(shortfall.get("total", 0.0)),
-            -float(shortfall.get("max", 0.0)),
-            -float(metrics.get("mean_total_cost", 0.0)),
-            -float(metrics.get("mean_violation_rate", 0.0)),
-            float(metrics.get("mean_reward", float("-inf"))),
+        metrics = self._evaluate_current_actor_on_episode_dfs(
+            episode_dfs=self.eval_episode_dfs,
+            seed_offset=10_000,
         )
+        gate_result = _build_reliability_gate_result(metrics=metrics, config=self.config)
+        current_rank = _pafc_checkpoint_selection_rank(metrics=metrics, gate_result=gate_result)
         reward_improved = float(metrics.get("mean_reward", float("-inf"))) > float(self.best_reward_mean)
         best_improved = bool(current_rank > self.best_selection_rank)
         snapshot = {
@@ -9793,6 +10447,147 @@ class PAFCTD3Trainer:
         }
         self._append_selection_history(history_item)
         return history_item
+
+    def _evaluate_current_actor_on_episode_dfs(
+        self,
+        *,
+        episode_dfs: Sequence[pd.DataFrame],
+        seed_offset: int,
+    ) -> dict[str, Any]:
+        def predictor(observation: Mapping[str, float]) -> dict[str, float]:
+            observation_vector = self._observation_to_vector(observation)
+            mode_ctx = self._select_mode_context(observation, deterministic=True)
+            action_vector = self._select_action(
+                observation_vector=observation_vector,
+                explore=False,
+                mode_context=mode_ctx,
+            )
+            return _action_vector_to_dict(action_vector, action_keys=self.action_keys)
+
+        episode_summaries = [
+            _evaluate_predictor_on_episode_df(
+                predictor=predictor,
+                exogenous_df=self.train_df,
+                episode_df=episode_df,
+                env_config=self.env_config,
+                seed=int(self.config.seed + int(seed_offset) + idx),
+            )
+            for idx, episode_df in enumerate(episode_dfs)
+        ]
+        return _aggregate_eval_episode_summaries(episode_summaries)
+
+    def _read_selection_history_items(self) -> list[dict[str, Any]]:
+        if not self.selection_history_path.exists():
+            return []
+        items: list[dict[str, Any]] = []
+        with self.selection_history_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if len(line) == 0:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(payload, dict):
+                    items.append(payload)
+        return items
+
+    def _rerank_best_checkpoint_after_training(
+        self,
+        *,
+        final_eval_item: Mapping[str, Any],
+        total_env_steps: int,
+        episode_idx: int,
+    ) -> dict[str, Any]:
+        candidates = _select_posttrain_rerank_candidates(
+            history_items=self._read_selection_history_items(),
+            selected_snapshot=self.best_selection_snapshot,
+            reward_snapshot=self.best_reward_snapshot,
+            last_snapshot=final_eval_item,
+            top_k=8,
+        )
+        rerank_path = self.run_dir / "train" / "pafc_posttrain_rerank_history.jsonl"
+        best_rank = (
+            0.0,
+            float("-inf"),
+            float("-inf"),
+            float("-inf"),
+            float("-inf"),
+            float("-inf"),
+        )
+        best_snapshot: dict[str, Any] | None = None
+        rows: list[dict[str, Any]] = []
+        for idx, candidate in enumerate(candidates):
+            checkpoint_path = Path(str(candidate["checkpoint_path"]))
+            self._restore_actor_from_checkpoint(
+                checkpoint_path=checkpoint_path,
+                actor_lr=float(self.current_actor_lr),
+                restore_dual_lambdas=False,
+            )
+            metrics = self._evaluate_current_actor_on_episode_dfs(
+                episode_dfs=(self.train_df,),
+                seed_offset=30_000 + idx,
+            )
+            gate_result = _build_reliability_gate_result(metrics=metrics, config=self.config)
+            rank = _pafc_checkpoint_selection_rank(metrics=metrics, gate_result=gate_result)
+            row = {
+                "candidate_index": int(idx),
+                "reason": str(candidate["reason"]),
+                "checkpoint_path": str(checkpoint_path.resolve()).replace("\\", "/"),
+                "timesteps": int(candidate.get("timesteps", 0)),
+                "episode_idx": int(candidate.get("episode_idx", 0)),
+                "training_complete": bool(candidate.get("training_complete", False)),
+                "metrics": dict(metrics),
+                "gate": dict(gate_result),
+                "selected_as_posttrain_best": False,
+            }
+            if rank > best_rank:
+                best_rank = rank
+                best_snapshot = dict(row)
+            rows.append(row)
+        if best_snapshot is not None:
+            for row in rows:
+                row["selected_as_posttrain_best"] = str(row["checkpoint_path"]) == str(best_snapshot["checkpoint_path"])
+            with rerank_path.open("w", encoding="utf-8") as handle:
+                for row in rows:
+                    handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+            best_checkpoint_path = Path(str(best_snapshot["checkpoint_path"]))
+            self._restore_actor_from_checkpoint(
+                checkpoint_path=best_checkpoint_path,
+                actor_lr=float(self.current_actor_lr),
+                restore_dual_lambdas=False,
+            )
+            self._save_actor_checkpoint(
+                checkpoint_path=self.actor_checkpoint_path,
+                checkpoint_json_path=self.actor_checkpoint_json,
+                total_env_steps=int(best_snapshot.get("timesteps", total_env_steps)),
+                episode_idx=int(best_snapshot.get("episode_idx", episode_idx)),
+                training_complete=bool(best_snapshot.get("training_complete", True)),
+                checkpoint_role="best_posttrain_rerank",
+            )
+            self.best_selection_rank = best_rank
+            self.best_selection_snapshot = {
+                "timesteps": int(best_snapshot.get("timesteps", total_env_steps)),
+                "episode_idx": int(best_snapshot.get("episode_idx", episode_idx)),
+                "training_complete": bool(best_snapshot.get("training_complete", True)),
+                "checkpoint_path": str(best_checkpoint_path.resolve()).replace("\\", "/"),
+                "metrics": dict(best_snapshot["metrics"]),
+                "gate": dict(best_snapshot["gate"]),
+                "posttrain_rerank": {
+                    "enabled": True,
+                    "candidate_count": int(len(rows)),
+                    "history_path": str(rerank_path.resolve()).replace("\\", "/"),
+                    "reason": str(best_snapshot["reason"]),
+                },
+            }
+        self.posttrain_rerank_summary = {
+            "enabled": True,
+            "candidate_count": int(len(rows)),
+            "history_path": str(rerank_path.resolve()).replace("\\", "/"),
+            "selected": dict(self.best_selection_snapshot) if self.best_selection_snapshot is not None else None,
+        }
+        return dict(self.posttrain_rerank_summary)
 
     def _handle_plateau_after_eval(
         self,
@@ -9882,6 +10677,16 @@ class PAFCTD3Trainer:
         batch = self.replay.sample(batch_size=int(self.config.batch_size), rng=self.rng)
         obs = self.torch.as_tensor(batch["obs"], dtype=self.torch.float32, device=self.device)
         next_obs = self.torch.as_tensor(batch["next_obs"], dtype=self.torch.float32, device=self.device)
+        mode_context = self.torch.as_tensor(
+            batch["mode_context"],
+            dtype=self.torch.float32,
+            device=self.device,
+        )
+        next_mode_context = self.torch.as_tensor(
+            batch["next_mode_context"],
+            dtype=self.torch.float32,
+            device=self.device,
+        )
         action_exec = self.torch.as_tensor(batch["action_exec"], dtype=self.torch.float32, device=self.device)
         teacher_action_exec = self.torch.as_tensor(
             batch["teacher_action_exec"],
@@ -9905,9 +10710,11 @@ class PAFCTD3Trainer:
 
         obs_norm = self._normalize_observation_tensor(obs)
         next_obs_norm = self._normalize_observation_tensor(next_obs)
+        actor_obs_norm = self._concat_mode_context_tensor(obs_norm, mode_context)
+        next_actor_obs_norm = self._concat_mode_context_tensor(next_obs_norm, next_mode_context)
 
         with self.torch.no_grad():
-            next_action_raw = self.actor_target(next_obs_norm)
+            next_action_raw = self.actor_target(next_actor_obs_norm)
             next_action_raw = self.torch.clamp(
                 next_action_raw + self._sample_target_noise(tuple(next_action_raw.shape)),
                 self.action_low,
@@ -9917,7 +10724,10 @@ class PAFCTD3Trainer:
                 obs_batch=next_obs,
                 action_batch=next_action_raw,
             )
-            next_safe_action = self._predict_frozen_safe_action_tensor(obs_batch=next_obs)
+            next_safe_action = self._predict_frozen_safe_action_tensor(
+                obs_batch=next_obs,
+                mode_context_batch=next_mode_context,
+            )
             next_action_raw = self._clip_abs_near_safe_action_tensor(
                 action_batch=next_action_raw,
                 safe_action_batch=next_safe_action,
@@ -9955,33 +10765,49 @@ class PAFCTD3Trainer:
                 trust_weight=self.surrogate_actor_trust_weight,
             )
             reward_target = reward + float(self.config.gamma) * (1.0 - done) * self.torch.minimum(
-                self.q1_target(next_obs_norm, next_action_exec_for_target),
-                self.q2_target(next_obs_norm, next_action_exec_for_target),
+                self.q1_target(next_actor_obs_norm, next_action_exec_for_target),
+                self.q2_target(next_actor_obs_norm, next_action_exec_for_target),
             )
             cost_targets = [
                 cost[:, idx : idx + 1]
                 + float(self.config.gamma)
                 * (1.0 - done)
                 * self.cost_target_critics[idx](
-                    next_obs_norm, next_action_exec_for_target
+                    next_actor_obs_norm, next_action_exec_for_target
                 ).clamp_min(0.0)
                 for idx in range(3)
             ]
 
-        q1_pred = self.q1(obs_norm, action_exec)
-        q2_pred = self.q2(obs_norm, action_exec)
+        q1_pred = self.q1(actor_obs_norm, action_exec)
+        q2_pred = self.q2(actor_obs_norm, action_exec)
         reward_critic_loss = self.F.mse_loss(q1_pred, reward_target) + self.F.mse_loss(
             q2_pred, reward_target
         )
+        _acont_reg_coef = float(self.config.fhac_acont_reg_coef)
+        if self.mode_context_dim > 0 and _acont_reg_coef > 0.0:
+            _ = self.q1(actor_obs_norm, action_exec, return_decomposition=True)
+            q1_acont = _[1] if isinstance(_, tuple) else None
+            _ = self.q2(actor_obs_norm, action_exec, return_decomposition=True)
+            q2_acont = _[1] if isinstance(_, tuple) else None
+            if q1_acont is not None:
+                reward_critic_loss = reward_critic_loss + _acont_reg_coef * (
+                    q1_acont.mean().pow(2) + q2_acont.mean().pow(2)
+                )
         self.reward_critic_optimizer.zero_grad(set_to_none=True)
         reward_critic_loss.backward()
         self.reward_critic_optimizer.step()
 
-        cost_predictions = [critic(obs_norm, action_exec) for critic in self.cost_critics]
+        cost_predictions = [critic(actor_obs_norm, action_exec) for critic in self.cost_critics]
         cost_critic_loss = sum(
             self.F.mse_loss(prediction, target)
             for prediction, target in zip(cost_predictions, cost_targets)
         )
+        if self.mode_context_dim > 0 and _acont_reg_coef > 0.0:
+            for critic in self.cost_critics:
+                _ = critic(actor_obs_norm, action_exec, return_decomposition=True)
+                ac = _[1] if isinstance(_, tuple) else None
+                if ac is not None:
+                    cost_critic_loss = cost_critic_loss + _acont_reg_coef * ac.mean().pow(2)
         self.cost_critic_optimizer.zero_grad(set_to_none=True)
         cost_critic_loss.backward()
         self.cost_critic_optimizer.step()
@@ -10015,16 +10841,29 @@ class PAFCTD3Trainer:
                 float(update_step) / max(1.0, float(self.config.dual_warmup_steps)),
             )
         ) if int(self.config.dual_warmup_steps) > 0 else 1.0
+
+        # DQN loss placeholders — must be set before the actor-update if-block
+        # so odd-numbered update steps (skip actor) still have valid entries in the return dict.
+        dqn_loss_value = float("nan")
+        dqn_mode_agreement_value = float("nan")
+        dqn_kl_loss_value = float("nan")
+        dqn_mse_loss_value = float("nan")
+        dqn_td_loss_value = float("nan")
+        dqn_beta_value = float("nan")
+
         if (
             actor_step >= int(self.config.actor_warmup_steps)
             and update_step % int(self.config.actor_delay) == 0
         ):
-            action_raw = self.actor(obs_norm)
+            action_raw = self.actor(actor_obs_norm)
             action_raw = self._apply_abs_cooling_blend_tensor(
                 obs_batch=obs,
                 action_batch=action_raw,
             )
-            safe_action_raw = self._predict_frozen_safe_action_tensor(obs_batch=obs)
+            safe_action_raw = self._predict_frozen_safe_action_tensor(
+                obs_batch=obs,
+                mode_context_batch=mode_context,
+            )
             action_raw = self._clip_abs_near_safe_action_tensor(
                 action_batch=action_raw,
                 safe_action_batch=safe_action_raw,
@@ -10065,11 +10904,11 @@ class PAFCTD3Trainer:
                 trust_weight=surrogate_actor_trust,
             )
             reward_actor = self.torch.minimum(
-                self.q1(obs_norm, action_exec_for_actor),
-                self.q2(obs_norm, action_exec_for_actor),
+                self.q1(actor_obs_norm, action_exec_for_actor),
+                self.q2(actor_obs_norm, action_exec_for_actor),
             )
             constraint_predictions = self.torch.cat(
-                [critic(obs_norm, action_exec_for_actor) for critic in self.cost_critics],
+                [critic(actor_obs_norm, action_exec_for_actor) for critic in self.cost_critics],
                 dim=1,
             ).clamp_min(0.0)
             lambda_tensor = self.torch.as_tensor(
@@ -10199,6 +11038,114 @@ class PAFCTD3Trainer:
                     + float(self.config.dual_lr) * (batch_cost_mean - self.dual_targets),
                 ).astype(np.float32)
 
+            if (
+                self.mode_context_dim > 0
+                and self._fhac_dqn_buffer.size >= int(self.config.batch_size)
+            ):
+                dqn_batch = self._fhac_dqn_buffer.sample(
+                    int(self.config.batch_size), self.rng
+                )
+                dqn_wobs = self.torch.as_tensor(
+                    dqn_batch["windowed_obs"],
+                    dtype=self.torch.float32,
+                    device=self.device,
+                )
+                dqn_obs = self.torch.as_tensor(
+                    dqn_batch["obs_vector"],
+                    dtype=self.torch.float32,
+                    device=self.device,
+                )
+                dqn_mode_ctx = self.torch.as_tensor(
+                    dqn_batch["mode_context"],
+                    dtype=self.torch.float32,
+                    device=self.device,
+                )
+                dqn_prev_wobs = self.torch.as_tensor(
+                    dqn_batch["prev_windowed_obs"],
+                    dtype=self.torch.float32,
+                    device=self.device,
+                )
+                dqn_reward = self.torch.as_tensor(
+                    dqn_batch["reward"],
+                    dtype=self.torch.float32,
+                    device=self.device,
+                )
+                dqn_done = self.torch.as_tensor(
+                    dqn_batch["done"],
+                    dtype=self.torch.float32,
+                    device=self.device,
+                )
+                dqn_has_transition = self.torch.as_tensor(
+                    dqn_batch["has_transition"],
+                    dtype=self.torch.float32,
+                    device=self.device,
+                )
+                dqn_obs_norm = self._normalize_observation_tensor(dqn_obs)
+                dqn_obs_with_mode = self.torch.cat(
+                    [dqn_obs_norm, dqn_mode_ctx], dim=-1
+                )
+                # A_mode from single-step obs (last frame of DQN window).
+                # Both representations describe the same underlying state.
+                with self.torch.no_grad():
+                    V, A_mode = self.q1.forward_state_only(dqn_obs_with_mode)
+                    soft_targets = V + A_mode
+
+                dqn_q = self._fhac_dqn_q_net(dqn_wobs)
+                # KL divergence: DQN q_net distribution → softmax(A_mode)
+                dqn_log_soft = self.F.log_softmax(dqn_q, dim=-1)
+                a_mode_soft = self.F.softmax(A_mode, dim=-1)
+                kl_loss = (a_mode_soft * (a_mode_soft.log() - dqn_log_soft)).sum(dim=-1).mean()
+                mse_loss = self.F.mse_loss(dqn_q, soft_targets)
+
+                # Bellman TD target via DQN target network
+                dqn_td_loss = self.torch.tensor(0.0, device=self.device)
+                if dqn_has_transition.sum() > 0.5:
+                    with self.torch.no_grad():
+                        next_q = self._fhac_dqn_q_net_target(dqn_prev_wobs)
+                        max_next_q = next_q.max(dim=-1, keepdim=True).values
+                        td_target = dqn_reward + float(self.config.gamma) * (1.0 - dqn_done) * max_next_q
+                    q_selected = dqn_q.gather(1, dqn_mode_ctx.argmax(dim=-1, keepdim=True))
+                    dqn_td_loss = (
+                        (dqn_has_transition * (q_selected - td_target).pow(2)).sum()
+                        / dqn_has_transition.sum().clamp_min(1.0)
+                    )
+
+                # β anneals from start→end over training (warmup gated below)
+                _warmup = max(0, int(self.config.fhac_dqn_warmup_steps))
+                _total = max(1, int(self.config.total_env_steps) - _warmup)
+                _progress = max(0.0, min(1.0, float(int(update_step) - _warmup) / float(_total)))
+                _b_start = float(self.config.fhac_dqn_bellman_beta_start)
+                _b_end = float(self.config.fhac_dqn_bellman_beta_end)
+                beta = _b_start + (_b_end - _b_start) * _progress
+
+                dqn_loss = kl_loss + float(self.config.fhac_dqn_mse_coef) * mse_loss
+                if int(update_step) >= _warmup:
+                    dqn_loss = beta * dqn_loss + (1.0 - beta) * dqn_td_loss
+                self._fhac_dqn_optimizer.zero_grad(set_to_none=True)
+                dqn_loss.backward()
+                self._fhac_dqn_optimizer.step()
+                # Polyak update DQN target
+                _dqn_tau = 0.005
+                for tp, sp in zip(
+                    self._fhac_dqn_q_net_target.parameters(),
+                    self._fhac_dqn_q_net.parameters(),
+                ):
+                    tp.data.mul_(1.0 - _dqn_tau).add_(sp.data, alpha=_dqn_tau)
+
+                dqn_loss_value = float(dqn_loss.detach().cpu().item())
+                dqn_kl_loss_value = float(kl_loss.detach().cpu().item())
+                dqn_mse_loss_value = float(mse_loss.detach().cpu().item())
+                dqn_td_loss_value = float(dqn_td_loss.detach().cpu().item())
+                dqn_beta_value = float(beta)
+                chosen_modes = dqn_mode_ctx.argmax(dim=-1)
+                dqn_mode_agreement_value = float(
+                    (chosen_modes == A_mode.argmax(dim=-1))
+                    .float()
+                    .mean()
+                    .cpu()
+                    .item()
+                )
+
             actor_loss_value = float(actor_loss.detach().cpu().item())
             gap_loss_value = float(gap_loss.detach().cpu().item())
             exec_anchor_loss_value = float(exec_anchor_loss.detach().cpu().item())
@@ -10287,6 +11234,13 @@ class PAFCTD3Trainer:
             "lambda_e": float(self.dual_lambdas[0]),
             "lambda_h": float(self.dual_lambdas[1]),
             "lambda_c": float(self.dual_lambdas[2]),
+            "fhac_dqn_loss": dqn_loss_value,
+            "fhac_dqn_kl_loss": dqn_kl_loss_value,
+            "fhac_dqn_mse_loss": dqn_mse_loss_value,
+            "fhac_dqn_td_loss": dqn_td_loss_value,
+            "fhac_dqn_beta": dqn_beta_value,
+            "fhac_dqn_mode_agreement": dqn_mode_agreement_value,
+            "fhac_dqn_buffer_size": int(self._fhac_dqn_buffer.size),
         }
 
     def train(self) -> dict[str, Any]:
@@ -10349,6 +11303,13 @@ class PAFCTD3Trainer:
             "lambda_e": 0.0,
             "lambda_h": 0.0,
             "lambda_c": 0.0,
+            "fhac_dqn_loss": float("nan"),
+            "fhac_dqn_kl_loss": float("nan"),
+            "fhac_dqn_mse_loss": float("nan"),
+            "fhac_dqn_td_loss": float("nan"),
+            "fhac_dqn_beta": float("nan"),
+            "fhac_dqn_mode_agreement": float("nan"),
+            "fhac_dqn_buffer_size": 0,
         }
 
         initial_checkpoint_path = self._save_actor_checkpoint(
@@ -10402,6 +11363,29 @@ class PAFCTD3Trainer:
                 )
             if self.economic_teacher_safe_policy is not None and hasattr(self.economic_teacher_safe_policy, "reset_episode"):
                 self.economic_teacher_safe_policy.reset_episode(observation=observation)
+            if self.mode_anchor_policy is not None:
+                self._bind_policy_episode_context(
+                    policy=self.mode_anchor_policy,
+                    env=env,
+                    observation=observation,
+                    episode_seed=int(self.config.seed + episode_idx),
+                )
+            if self.mode_anchor_policy is not None and hasattr(self.mode_anchor_policy, "reset_episode"):
+                self.mode_anchor_policy.reset_episode(observation=observation)
+            current_mode_context = self._select_mode_context(observation)
+            self._fhac_step_progress = float(total_env_steps) / max(1.0, float(self.config.total_env_steps))
+            if self.mode_context_dim > 0:
+                dqn_wobs = self.mode_anchor_policy.get_windowed_obs_tensor()
+                # squeeze batch dim so it matches _fhac_dqn_buffer.add() internal handling
+                if dqn_wobs.ndim >= 3 and dqn_wobs.shape[0] == 1:
+                    dqn_wobs = dqn_wobs.squeeze(0)
+                self._fhac_dqn_prev_wobs = dqn_wobs.copy()
+                self._fhac_dqn_buffer.add(
+                    windowed_obs=dqn_wobs,
+                    obs_vector=self._observation_to_vector(observation),
+                    mode_context=current_mode_context,
+                )
+            _mode_eval_counter = 0
             terminated = False
             episode_reward = 0.0
             episode_cost_sum = np.zeros(3, dtype=np.float64)
@@ -10420,10 +11404,38 @@ class PAFCTD3Trainer:
                     action_raw = self._select_action(
                         observation_vector=obs_vector,
                         explore=True,
+                        mode_context=current_mode_context,
                     )
                 env_action = _action_vector_to_dict(action_raw, action_keys=self.action_keys)
                 next_observation, reward, terminated, _, info = env.step(env_action)
                 next_obs_vector = self._observation_to_vector(next_observation)
+                _mode_eval_counter += 1
+                _should_refresh = (
+                    _mode_eval_counter % max(1, int(self.config.fhac_mode_eval_interval)) == 0
+                )
+                if bool(terminated):
+                    next_mode_context = self._zero_mode_context_np()
+                elif _should_refresh and self.mode_anchor_policy is not None:
+                    self._fhac_step_progress = float(total_env_steps) / max(
+                        1.0, float(self.config.total_env_steps)
+                    )
+                    next_mode_context = self._select_mode_context(next_observation)
+                else:
+                    next_mode_context = current_mode_context
+                if self.mode_context_dim > 0 and not bool(terminated) and _should_refresh:
+                    dqn_wobs = self.mode_anchor_policy.get_windowed_obs_tensor()
+                    # squeeze batch dim so _fhac_dqn_buffer.add() stores consistent shapes
+                    if dqn_wobs.ndim >= 3 and dqn_wobs.shape[0] == 1:
+                        dqn_wobs = dqn_wobs.squeeze(0)
+                    self._fhac_dqn_buffer.add(
+                        windowed_obs=dqn_wobs,
+                        obs_vector=next_obs_vector,
+                        mode_context=next_mode_context,
+                        prev_windowed_obs=self._fhac_dqn_prev_wobs,
+                        reward=float(reward),
+                        done=bool(terminated),
+                    )
+                    self._fhac_dqn_prev_wobs = dqn_wobs.copy()
                 action_exec = _extract_action_vector_from_info(
                     info,
                     prefix="action_exec",
@@ -10434,6 +11446,8 @@ class PAFCTD3Trainer:
                 self.replay.add(
                     obs=obs_vector,
                     next_obs=next_obs_vector,
+                    mode_context=current_mode_context,
+                    next_mode_context=next_mode_context,
                     action_raw=action_raw,
                     action_exec=action_exec,
                     teacher_action_exec=teacher_action_exec,
@@ -10450,6 +11464,7 @@ class PAFCTD3Trainer:
                     ) + 1
 
                 observation = next_observation
+                current_mode_context = next_mode_context
                 total_env_steps += 1
                 episode_steps += 1
                 episode_reward += float(reward)
@@ -10535,6 +11550,11 @@ class PAFCTD3Trainer:
         )
         self._handle_plateau_after_eval(
             evaluation_item=final_eval_item,
+            total_env_steps=total_env_steps,
+            episode_idx=episode_idx,
+        )
+        self._rerank_best_checkpoint_after_training(
+            final_eval_item=final_eval_item,
             total_env_steps=total_env_steps,
             episode_idx=episode_idx,
         )
@@ -10790,9 +11810,10 @@ class PAFCTD3Trainer:
             "cost_critic_positive_output": True,
             "validation_protocol": dict(self.eval_protocol),
             "best_model_selection": {
-                "mode": "reliability_shortfall_then_cost_then_reward_v1",
+                "mode": "posttrain_full_year_rerank_v1",
                 "selected": dict(self.best_selection_snapshot) if self.best_selection_snapshot is not None else None,
                 "reward_leader": dict(self.best_reward_snapshot) if self.best_reward_snapshot is not None else None,
+                "posttrain_rerank": dict(self.posttrain_rerank_summary),
             },
             "plateau_control": {
                 "enabled": bool(self.config.plateau_control_enabled),
@@ -10829,11 +11850,14 @@ class PAFCTD3Trainer:
             "actor_bes_warm_start": dict(self.actor_bes_warm_start_summary),
             "replay_schema": {
                 "obs": list(self.observation_keys),
+                "mode_context": [
+                    f"mode_{idx}" for idx in range(int(self.mode_context_dim))
+                ],
                 "action_raw": list(self.action_keys),
                 "action_exec": list(self.action_keys),
-            "teacher_action_exec": list(self.action_keys),
-            "teacher_action_mask": list(self.action_keys),
-            "teacher_available": ["teacher_available"],
+                "teacher_action_exec": list(self.action_keys),
+                "teacher_action_mask": list(self.action_keys),
+                "teacher_available": ["teacher_available"],
                 "reward": ["reward"],
                 "cost": list(_COST_KEYS),
                 "projection_gap": [
@@ -10842,6 +11866,9 @@ class PAFCTD3Trainer:
                     "projection_gap_max",
                 ],
                 "next_obs": list(self.observation_keys),
+                "next_mode_context": [
+                    f"mode_{idx}" for idx in range(int(self.mode_context_dim))
+                ],
                 "done": ["done"],
             },
             "final_metrics": {
@@ -10902,9 +11929,13 @@ def load_pafc_td3_predictor(
     metadata = dict(payload["metadata"])
     observation_keys = tuple(str(key) for key in metadata.get("observation_keys", ()))
     action_keys = tuple(str(key) for key in metadata.get("action_keys", ()))
+    mode_context_dim = int(metadata.get("mode_context_dim", 0) or 0)
+    mode_embed_dim = int(metadata.get("mode_embed_dim", 0) or 0)
     actor = build_pafc_actor_network(
         observation_dim=int(metadata["observation_dim"]),
         action_keys=action_keys,
+        mode_context_dim=mode_context_dim,
+        mode_embed_dim=mode_embed_dim,
         hidden_dims=tuple(int(dim) for dim in metadata.get("hidden_dims", (256, 256))),
     ).to(target_device)
     actor.load_state_dict(payload["state_dict"])
@@ -11026,7 +12057,10 @@ def load_pafc_td3_predictor(
     )
     gt_off_deadband_ratio = float(metadata.get("gt_off_deadband_ratio", 0.0))
 
-    def predictor(observation: Mapping[str, float] | np.ndarray | Sequence[float]):
+    def predictor(
+        observation: Mapping[str, float] | np.ndarray | Sequence[float],
+        mode_context: np.ndarray | Sequence[float] | None = None,
+    ):
         if isinstance(observation, Mapping):
             missing = [key for key in observation_keys if key not in observation]
             if missing:
@@ -11048,6 +12082,15 @@ def load_pafc_td3_predictor(
                 dtype=torch.float32,
                 device=target_device,
             )
+            if mode_context_dim > 0:
+                if mode_context is None:
+                    mode_context = np.zeros((mode_context_dim,), dtype=np.float32)
+                mode_tensor = torch.as_tensor(
+                    np.asarray(mode_context, dtype=np.float32).reshape(1, mode_context_dim),
+                    dtype=torch.float32,
+                    device=target_device,
+                )
+                tensor = torch.cat([tensor, mode_tensor], dim=-1)
             action = actor(tensor).squeeze(0).detach().cpu().numpy().astype(np.float32)
         if bool(metadata.get("state_feasible_action_shaping_enabled", False)):
             if "u_bes" in action_index and "soc_bes" in observation_index:
@@ -11097,7 +12140,12 @@ def load_pafc_td3_predictor(
             else:
                 p_gt_low = 0.0
                 p_gt_high = p_gt_cap_mw
-            p_gt_target = ((float(action[u_gt_index]) + 1.0) * 0.5) * max(_NORM_EPS, p_gt_cap_mw)
+            p_gt_target = _gt_action_to_target_mw_np(
+                u_gt=float(action[u_gt_index]),
+                p_gt_cap_mw=max(_NORM_EPS, p_gt_cap_mw),
+                gt_min_output_mw=gt_min_output_mw,
+                gt_action_off_threshold=_gt_action_off_threshold(env_config),
+            )
             p_gt_target = _canonicalize_gt_target_np(
                 p_gt_target_mw=p_gt_target,
                 p_gt_low_mw=p_gt_low,
@@ -11105,8 +12153,11 @@ def load_pafc_td3_predictor(
                 gt_min_output_mw=gt_min_output_mw,
                 gt_off_deadband_ratio=gt_off_deadband_ratio,
             )
-            action[u_gt_index] = float(
-                np.clip(2.0 * (p_gt_target / max(_NORM_EPS, p_gt_cap_mw)) - 1.0, -1.0, 1.0)
+            action[u_gt_index] = _gt_target_mw_to_action_np(
+                p_gt_target_mw=p_gt_target,
+                p_gt_cap_mw=max(_NORM_EPS, p_gt_cap_mw),
+                gt_min_output_mw=gt_min_output_mw,
+                gt_action_off_threshold=_gt_action_off_threshold(env_config),
             )
         if (
             abs_cooling_blend_enabled

@@ -154,6 +154,96 @@ def _require_sb3_modules():
     return gym, spaces, PPO, SAC, TD3, DDPG, DQN, DummyVecEnv, VecNormalize
 
 
+def _install_numpy_bit_generator_pickle_compat() -> None:
+    import sys
+    import types
+
+    import numpy
+    import numpy.random as numpy_random
+    import numpy.random._pickle as random_pickle
+
+    if not hasattr(numpy, "_core"):
+        numpy._core = types.ModuleType("numpy._core")
+        sys.modules["numpy._core"] = numpy._core
+    for module_name in (
+        "multiarray",
+        "umath",
+        "fromnumeric",
+        "shape_base",
+        "numeric",
+        "arrayprint",
+        "records",
+    ):
+        source = getattr(numpy.core, module_name, None)
+        if source is None:
+            continue
+        target_name = f"numpy._core.{module_name}"
+        target = types.ModuleType(target_name)
+        sys.modules[target_name] = target
+        setattr(numpy._core, module_name, target)
+        for attr in dir(source):
+            if attr.startswith("__"):
+                continue
+            try:
+                setattr(target, attr, getattr(source, attr))
+            except Exception:
+                pass
+
+    class _WrappedPCG64:
+        def __init__(self, *args, **kwargs) -> None:
+            del args, kwargs
+            self._pcg64 = numpy_random.PCG64()
+
+        def __setstate__(self, state) -> None:
+            del state
+            self._pcg64 = numpy_random.PCG64()
+
+        def __getstate__(self):
+            return self._pcg64.state
+
+        @property
+        def state(self):
+            return self._pcg64.state
+
+        @state.setter
+        def state(self, value) -> None:
+            del value
+            self._pcg64 = numpy_random.PCG64()
+
+        def __reduce__(self):
+            return (self.__class__, (), {})
+
+        def __reduce_ex__(self, protocol):
+            del protocol
+            return self.__reduce__()
+
+    module = types.ModuleType("numpy.random._pcg64")
+    module.PCG64 = _WrappedPCG64
+    sys.modules["numpy.random._pcg64"] = module
+    numpy_random._pcg64 = module
+
+    def _patched_ctor(bit_generator_name, *args, **kwargs):
+        del bit_generator_name, args, kwargs
+        return _WrappedPCG64()
+
+    def _patched_generator_ctor(bit_generator_name="MT19937", bit_generator_ctor=None):
+        del bit_generator_name, bit_generator_ctor
+        return numpy_random.default_rng()
+
+    random_pickle.__bit_generator_ctor = _patched_ctor
+    random_pickle.__generator_ctor = _patched_generator_ctor
+
+
+def _load_vec_normalize_compat(VecNormalize, path: str | Path, env):
+    try:
+        return VecNormalize.load(str(path), env)
+    except ValueError as error:
+        if "BitGenerator" not in str(error) and "PCG64" not in str(error):
+            raise
+        _install_numpy_bit_generator_pickle_compat()
+        return VecNormalize.load(str(path), env)
+
+
 def _timestamped_run_dir(
     run_root: str | Path, *, mode: str, algo: str, backbone: str, history_steps: int
 ) -> Path:
@@ -467,9 +557,15 @@ class RuleBasedDiscreteActionMapper:
         raise ValueError(f"不支持的 DQN prefill expert_policy: {expert_policy}")
 
     def _gt_action_from_mw(self, p_gt_target_mw: float) -> float:
+        threshold = float(getattr(self.env_config, "gt_action_off_threshold", -0.8))
+        min_output = float(self.env_config.gt_min_output_mw)
         cap = max(1e-6, float(self.env_config.p_gt_cap_mw))
-        normalized = 2.0 * (float(p_gt_target_mw) / cap) - 1.0
-        return float(np.clip(normalized, -1.0, 1.0))
+        if float(p_gt_target_mw) < 0.5 * min_output:
+            return float(0.5 * (threshold - 1.0))
+        p_clamped = float(np.clip(float(p_gt_target_mw), min_output, cap))
+        normalized = (p_clamped - min_output) / max(1e-6, cap - min_output)
+        u_gt = threshold + 1e-6 + normalized * max(1e-6, 1.0 - threshold - 1e-6)
+        return float(np.clip(u_gt, -1.0, 1.0))
 
     def _boiler_follow(self, observation: Mapping[str, float]) -> float:
         q_boiler_need = float(
@@ -2936,12 +3032,10 @@ def _resolve_sb3_eval_artifacts(
     resolved_model_path: Path | None = None
     resolved_source = normalized_source
     for candidate_source, candidate_path, default_filename in model_candidates:
-        if not candidate_path:
-            continue
         try:
             resolved_model_path = _resolve_sb3_model_path(
                 checkpoint_json=checkpoint_json,
-                model_path_value=str(candidate_path),
+                model_path_value=str(candidate_path) if candidate_path else None,
                 run_dir_value=run_dir_value,
                 default_filename=default_filename,
             )
@@ -2986,7 +3080,37 @@ def evaluate_sb3_policy(
         raise ValueError(f"评估必须使用 {EVAL_YEAR}，当前年份 {year}")
 
     checkpoint_json_path = Path(checkpoint_json)
-    ckpt = json.loads(checkpoint_json_path.read_text(encoding="utf-8"))
+
+    # 尝试读取 JSON，失败则从 zip 中提取
+    try:
+        ckpt = json.loads(checkpoint_json_path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, FileNotFoundError):
+        # 如果是 zip 文件，试图从其中提取 policy.json
+        if checkpoint_json_path.suffix == ".zip" or not checkpoint_json_path.exists():
+            import zipfile
+            zip_path = checkpoint_json_path.with_suffix(".zip") if checkpoint_json_path.suffix != ".zip" else checkpoint_json_path
+            if zip_path.exists():
+                try:
+                    with zipfile.ZipFile(zip_path, "r") as z:
+                        # 尝试读取 policy.json 或创建最小配置
+                        if "policy.json" in z.namelist():
+                            policy_data = z.read("policy.json").decode("utf-8")
+                            ckpt = json.loads(policy_data)
+                        else:
+                            # 最小默认配置，从 model.zip 推断
+                            ckpt = {
+                                "artifact_type": "sb3_policy",
+                                "algo": "sac",  # 默认，会在下面被覆盖
+                                "history_steps": 1,
+                                "observation_keys": OBS_KEYS,
+                            }
+                except Exception as e:
+                    raise ValueError(f"无法从 zip 读取 policy.json: {e}")
+            else:
+                raise ValueError(f"找不到 checkpoint 文件: {checkpoint_json_path}")
+        else:
+            raise
+
     if ckpt.get("artifact_type") != "sb3_policy":
         raise ValueError("checkpoint_json 不是 sb3_policy。")
 
@@ -3069,10 +3193,11 @@ def evaluate_sb3_policy(
     )
     vec_env = base_eval_env
     if resolved_vecnormalize_path is not None:
-        vec_env = VecNormalize.load(str(resolved_vecnormalize_path), base_eval_env)
+        vec_env = _load_vec_normalize_compat(VecNormalize, resolved_vecnormalize_path, base_eval_env)
         vec_env.training = False
         vec_env.norm_reward = False
 
+    _install_numpy_bit_generator_pickle_compat()
     model = algo_cls.load(str(resolved_model_path), env=vec_env, device=device)
     observation = vec_env.reset()
     terminated = False

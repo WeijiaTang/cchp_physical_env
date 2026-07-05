@@ -138,7 +138,16 @@ class ConstraintSolver:
         u_ech = _clip(raw_u_ech, 0.0, 1.0)
         u_tes = _clip(raw_u_tes, -1.0, 1.0)
 
-        p_gt_target_raw = ((u_gt + 1.0) * 0.5) * self.config.p_gt_cap_mw
+        # GT 死区映射：u_gt ∈ [-1, threshold] -> 关机, (threshold, 1] -> [min_output, cap]
+        threshold = float(getattr(self.config, "gt_action_off_threshold", -0.8))
+        if u_gt <= threshold:
+            p_gt_target_raw = 0.0
+        else:
+            normalized = (u_gt - threshold) / max(1e-9, 1.0 - threshold)
+            p_gt_target_raw = self.config.gt_min_output_mw + normalized * (
+                self.config.p_gt_cap_mw - self.config.gt_min_output_mw
+            )
+
         p_gt_target = p_gt_target_raw
         gt_min_output_enforced = False
         if (
@@ -147,7 +156,8 @@ class ConstraintSolver:
             and p_gt_target < (self.config.gt_min_output_mw - GT_MIN_OUTPUT_EPS_MW)
         ):
             # 对连续控制更友好的最小侵入修正：
-            # 一旦判定“开机”，就直接抬升到最小稳定出力，避免在 0 与 min_output 之间出现硬断点。
+            # 一旦判定"开机"，就直接抬升到最小稳定出力，避免在 0 与 min_output 之间出现硬断点。
+            # 注意：死区映射后这个分支几乎不会被触发
             p_gt_target = self.config.gt_min_output_mw
             gt_min_output_enforced = True
 
@@ -217,11 +227,15 @@ class ConstraintSolver:
         m.q_heat_dump_mw = pyo.Var(bounds=(0.0, None))
         m.qc_unmet_mw = pyo.Var(bounds=(0.0, None))
 
+        gt_ramp_enabled = (
+            inputs.is_physics_mode
+            and float(targets["p_gt_target_mw_raw"]) > GT_MIN_OUTPUT_EPS_MW
+        )
         add_gt_ramp_constraint(
             m,
             p_gt_prev_mw=inputs.p_gt_prev_mw,
             gt_ramp_mw_per_step=self.config.gt_ramp_mw_per_step,
-            enabled=inputs.is_physics_mode,
+            enabled=gt_ramp_enabled,
         )
         add_balance_constraints(
             m,
@@ -420,7 +434,11 @@ class ConstraintSolver:
         m = pyo.ConcreteModel()
         p_bes_min, p_bes_max = self._bes_bounds(inputs.soc_bes, is_physics_mode=inputs.is_physics_mode)
         p_gt_target = _clip(float(targets["p_gt_target_mw"]), 0.0, self.config.p_gt_cap_mw)
-        if inputs.is_physics_mode:
+        gt_ramp_enabled = (
+            inputs.is_physics_mode
+            and float(targets["p_gt_target_mw_raw"]) > GT_MIN_OUTPUT_EPS_MW
+        )
+        if gt_ramp_enabled:
             p_gt_target = _clip(
                 p_gt_target,
                 max(0.0, inputs.p_gt_prev_mw - self.config.gt_ramp_mw_per_step),
@@ -481,7 +499,7 @@ class ConstraintSolver:
         qc_supply = q_abs_cool + q_ech
         qc_unmet = max(0.0, inputs.qc_dem_mw - qc_supply)
 
-        # 组装为“伪模型”变量接口，复用统一提取逻辑。
+        # 组装为"伪模型"变量接口，复用统一提取逻辑。
         m.p_gt_mw = pyo.Param(initialize=p_gt_target, mutable=True)
         m.p_bes_mw = pyo.Param(initialize=p_bes_target, mutable=True)
         m.p_grid_mw = pyo.Param(initialize=p_grid, mutable=True)
@@ -504,7 +522,7 @@ class ConstraintSolver:
         solver_name = self.config.solver_name.strip().lower()
 
         # 说明：reward_only 模式不运行外部求解器，直接使用线性投影（projection）得到可行动作。
-        # 这样可保证在“无物理闭环/无求解器依赖”时也能稳定执行训练与评估。
+        # 这样可保证在"无物理闭环/无求解器依赖"时也能稳定执行训练与评估。
         if not inputs.is_physics_mode:
             pseudo_model = self._build_projection_model(inputs, targets)
             return self._model_to_solution(
@@ -566,7 +584,7 @@ class ConstraintSolver:
             solver_error = f"{type(error).__name__}: {error}"
 
         if used_fallback:
-            # fallback：外部求解器失败/非最优/异常时，使用 projection 返回“可执行”的近似动作。
+            # fallback：外部求解器失败/非最优/异常时，使用 projection 返回"可执行"的近似动作。
             pseudo_model = self._build_projection_model(inputs, targets)
             return self._model_to_solution(
                 pseudo_model,

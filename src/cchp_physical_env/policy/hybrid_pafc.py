@@ -19,6 +19,8 @@ from .sb3 import (
     WindowBuffer,
     _build_observation_normalizer,
     _extract_year,
+    _install_numpy_bit_generator_pickle_compat,
+    _load_vec_normalize_compat,
     _observation_dict_to_vector,
     _resolve_checkpoint_sidecar_path,
     _require_sb3_modules,
@@ -212,9 +214,10 @@ class _DQNAnchorPredictor:
         )
         self.vec_env = None
         if resolved_vecnormalize_path is not None:
-            self.vec_env = VecNormalize.load(str(resolved_vecnormalize_path), base_eval_env)
+            self.vec_env = _load_vec_normalize_compat(VecNormalize, resolved_vecnormalize_path, base_eval_env)
             self.vec_env.training = False
             self.vec_env.norm_reward = False
+        _install_numpy_bit_generator_pickle_compat()
         self.model = DQN.load(
             str(resolved_model_path),
             env=self.vec_env if self.vec_env is not None else base_eval_env,
@@ -309,6 +312,16 @@ class _HybridPolicyController:
         self.current_anchor_info: dict[str, Any] = {}
         self.anchor_hold_remaining = 0
 
+    def _current_mode_context(self) -> np.ndarray | None:
+        mode_dim = int(self.pafc_metadata.get("mode_context_dim", 0) or 0)
+        if mode_dim <= 0:
+            return None
+        context = np.zeros((mode_dim,), dtype=np.float32)
+        mode_index = int(self.current_anchor_info.get("anchor_action_index", -1))
+        if 0 <= mode_index < mode_dim:
+            context[mode_index] = 1.0
+        return context
+
     def reset(self, observation: Mapping[str, float]) -> None:
         self.anchor_predictor.reset(observation)
         self.current_anchor_action = None
@@ -326,7 +339,9 @@ class _HybridPolicyController:
             refreshed = True
         self.anchor_hold_remaining -= 1
         anchor_action = dict(self.current_anchor_action or {})
-        pafc_action = dict(self.pafc_predictor(observation))
+        pafc_action = dict(
+            self.pafc_predictor(observation, mode_context=self._current_mode_context())
+        )
         if self.safe_predictor is not None:
             safe_action = dict(self.safe_predictor(observation))
             residual_reference = dict(safe_action)
